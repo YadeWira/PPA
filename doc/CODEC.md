@@ -264,3 +264,5 @@ header case) and `pas/tests/cli.sh` (the command: every sample back, `-f`,
 | 31/10/2026 | layer 5's prototype, `tests/png/` (16 small images, ~3,000 pixels each) | 102.7% of the zlib streams: too small for the model to learn |
 | 31/10/2026 | layer 7, damaged `.ppa` files of `tests/png/` (20,062 variants, header to payload) | every one refused, none another file, no exception |
 | 31/10/2026 | the command on `tests/png/`, x86-64 and a 32-bit build | the same `.ppa` bytes on both |
+| 31/10/2026 | the six CI platforms (`.github/test.sh`) | the same `.ppa` bytes on all six |
+| 31/10/2026 | layer 6, the corpus's 70 files of the family (32.9 MB) | **19.4 MB = 58.81%**, every one back; 211 image streams as images, 30 as bytes (13 not zlib's, 17 JNG JPEGs); 2,387 s for compressing, verifying and decompressing, one thread: the zlib parameter search and the model are the slow parts |
