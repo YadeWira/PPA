@@ -34,7 +34,7 @@ The command is described in [`doc/CLI.md`](doc/CLI.md), the file in
 
 ```sh
 sh pas/build_c.sh build/c                                                   # the C part
-fpc -O3 -dPPA_FAST -Fupas -Fipas -Fobuild/c -FUbuild -obuild/ppa pas/ppacli.pas   # the command
+fpc -O3 -dPPA_FAST -dPJA_FAST -Fupas -Fipas -Fuvendor/pja/pas -Fivendor/pja/pas -Fobuild/c -FUbuild -obuild/ppa pas/ppacli.pas   # the command
 ```
 
 ```sh

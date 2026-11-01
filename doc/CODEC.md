@@ -28,9 +28,10 @@ over a large corpus, is the oracle for the whole project.
 | 6 | `ppacodec` | the compressed stream, verified at compress time | done |
 | 7 | `ppaformat`, `ppacli` | the `.ppa` file (`FORMAT.md`) and the `ppa` command (`CLI.md`) | done |
 
-A JNG's JPEG (JDAT, and JDAA for its alpha) goes to PJA's codec, its Pascal
-units vendored from a release tag, the JPEG kept as it is when PJA does not
-take it or does not make it smaller.
+A JNG's JPEG (JDAT, and JDAA for its alpha) goes to PJA's codec: its Pascal
+units and C, vendored unmodified from PJA 0.6.0's release tarball
+(`vendor/pja`, as zpaq-std vendors it), with version 7's model. The JPEG is
+kept as its bytes when PJA does not take it or does not make it smaller.
 
 Each layer has its test in `pas/tests/`, and nothing moves up to the next
 layer with a red test. `pas/run_tests.sh` runs them all.
@@ -230,9 +231,16 @@ An image stream is kept as an image when its deflate stream decodes, its
 image fits its header, zlib's parameters are found and give its very bits
 back (checked, not assumed). It keeps then: the four parameters, the zlib
 header, whether the Adler-32 is right, the pad bits, what follows the
-deflate data, and what follows the image in it. Anything else is kept as
-its bytes: the 13 streams of the corpus no zlib parameters give, and a
-JNG's JPEG (PJA's codec will take it).
+deflate data, and what follows the image in it. A JNG's JPEG (JDAT, JDAA) is
+kept as **PJA's stream** (`pjacodec.Compress`, which verifies it, with
+version 7's model) when PJA takes it and makes it smaller, in a substream
+of its own after the bands; `Decompress` gives it back with
+`pjacodec.Decompress`, the JPEG's length (from its chunks) as the cap, and
+it must have exactly that length. Anything else is kept as its bytes: the
+13 streams of the corpus no zlib parameters give, a JPEG PJA does not take.
+PJA keeps its models in threadvars, which FreePascal does not free when a
+thread ends: `ppathreads` runs `pjamodel.ReleaseThreadModels` at the end of
+each of its threads.
 
 `Compress` decompresses its own stream and compares; a file that does not
 come back is not taken (and that would be a PPA bug). `Decompress` never
@@ -380,5 +388,6 @@ APNG (4.6 MB, level 9): `ppa a` 148 s with one thread, 39.5 s with 8;
 | 31/10/2026 | the command on `tests/png/`, x86-64 and a 32-bit build | the same `.ppa` bytes on both |
 | 31/10/2026 | the six CI platforms (`.github/test.sh`) | the same `.ppa` bytes on all six |
 | 01/11/2026 | layer 5, second version, the corpus's 224 images | **16.7 MB = 50.89% of the zlib streams** (the first: 59.0%), every one decoded back; 383 s coding and decoding, one thread |
+| 01/11/2026 | JNG through PJA 0.6.0 (v7), the corpus's 13 JNG files (85,403 bytes) | 63.48% (as bytes: 88.54%), every one back |
 | 01/11/2026 | the command, 8 threads, bands, the whole corpus (77 files) | every one back byte for byte; the 70 of the family 32.9 MB -> **16.8 MB = 51.11%** (was 58.81%), the 7 others stored; `ppa a` 220 s, `ppa x` 111 s |
 | 31/10/2026 | layer 6, the corpus's 70 files of the family (32.9 MB) | **19.4 MB = 58.81%**, every one back; 211 image streams as images, 30 as bytes (13 not zlib's, 17 JNG JPEGs); 2,387 s for compressing, verifying and decompressing, one thread: the zlib parameter search and the model are the slow parts |

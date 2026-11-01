@@ -17,7 +17,7 @@ echo "== build"
 # the C part (CC: the platform's C compiler)
 sh "$PAS/build_c.sh" "$OUT/c"
 for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_pixels test_arith measure_model test_blake3 test_codec test_format; do
-  $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
+  $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -Fu"$PPA/vendor/pja/pas" -Fi"$PPA/vendor/pja/pas" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
 
@@ -79,7 +79,7 @@ for d in "${dirs[@]}"; do "$OUT/test_codec" "$d" 1 | tail -1; done
 echo "== layer 7: the .ppa file and the command"
 "$OUT/test_blake3" "$PAS/tests/kat.txt" | tail -1
 "$OUT/test_format" "$PPA/tests/png" | tail -1
-$FPC -O3 -dPPA_FAST -Fu"$PAS" -Fi"$PAS" -Fo"$OUT/c" -FU"$OUT/cli" -o"$OUT/ppa" "$PAS/ppacli.pas" > "$OUT/fpc.log" 2>&1 \
+$FPC -O3 -dPPA_FAST -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fu"$PPA/vendor/pja/pas" -Fi"$PPA/vendor/pja/pas" -Fo"$OUT/c" -FU"$OUT/cli" -o"$OUT/ppa" "$PAS/ppacli.pas" > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 (cd "$PPA" && sh pas/tests/cli.sh "$OUT/ppa" "$OUT/clitest")
 

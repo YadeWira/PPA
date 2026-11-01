@@ -32,12 +32,12 @@ if [ "$(uname -s)" = Linux ] && command -v nm > /dev/null; then
 fi
 for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model test_codec; do
   # shellcheck disable=SC2086
-  $FPC -O2 -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/$prog$EXE" pas/tests/$prog.pas > "$OUT/fpc.log" 2>&1 \
+  $FPC -O2 -Fupas -Fipas -Fuvendor/pja/pas -Fivendor/pja/pas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/$prog$EXE" pas/tests/$prog.pas > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
 
 # shellcheck disable=SC2086
-$FPC -O3 -dPPA_FAST -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/cu" -o"$OUT/ppa$EXE" pas/ppacli.pas > "$OUT/fpc.log" 2>&1 \
+$FPC -O3 -dPPA_FAST -dPJA_FAST -Fupas -Fipas -Fuvendor/pja/pas -Fivendor/pja/pas -Fo"$OUT/c" -FU"$OUT/cu" -o"$OUT/ppa$EXE" pas/ppacli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 "$OUT/ppa$EXE" --version
 

@@ -17,6 +17,12 @@ type
 
 procedure ParallelFor(n: SizeInt; threads: Integer; run: TItemProc);
 
+var
+  { run by every worker thread as it ends: PJA's codec keeps its models in
+    threadvars, which FreePascal does not free when a thread ends; ppacodec
+    sets this to pjamodel.ReleaseThreadModels }
+  OnThreadEnd: procedure = nil;
+
 implementation
 
 type
@@ -52,6 +58,7 @@ end;
 procedure TWorker.Execute;
 begin
   Work(sh);
+  if Assigned(OnThreadEnd) then OnThreadEnd;
 end;
 
 procedure ParallelFor(n: SizeInt; threads: Integer; run: TItemProc);

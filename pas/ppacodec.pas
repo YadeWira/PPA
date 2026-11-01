@@ -57,11 +57,14 @@ function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out w
 
 implementation
 
-uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppathreads;
+uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppathreads,
+  pjacodec, pjamodel, pjav7;
 
 const
   MODE_BYTES = 0;
   MODE_IMAGE = 1;
+  { a JNG's JPEG (JDAT, JDAA) through PJA's codec, its stream a substream }
+  MODE_JPEG = 2;
   { A non-interlaced image goes in horizontal bands of at least this many
     unfiltered bytes, at most MAX_BANDS, each its own arithmetic stream with
     its own model, coded and decoded in parallel. The count depends only on
@@ -230,7 +233,23 @@ type
     prm: TZlibParams;
     z: TZStream;          { encoder: the decoded stream }
     px: TPixels;          { encoder: the image }
+    jpeg: TBytes;         { encoder: PJA's stream of a JNG's JPEG }
   end;
+
+{ Whether stream s is a JNG's JPEG that PJA's codec takes and makes smaller
+  (it verifies its own stream), and its plan. threads: PJA's bands. }
+function PlanJpeg(const p: TPng; s: SizeInt; threads: Integer; out plan: TStreamPlan): Boolean;
+var r: TCodecResult;
+begin
+  Result := False;
+  plan := Default(TStreamPlan);
+  plan.mode := MODE_BYTES;
+  if not (p.streams[s].kind in [skJdat, skJdaa]) or (Length(p.streams[s].data) = 0) then Exit;
+  r := pjacodec.Compress(p.streams[s].data, plan.jpeg, True, threads, False, True, True);
+  if not r.Ok or (Length(plan.jpeg) >= Length(p.streams[s].data)) then begin plan.jpeg := nil; Exit; end;
+  plan.mode := MODE_JPEG;
+  Result := True;
+end;
 
 { Whether stream s can be kept as an image, and its plan }
 function PlanImage(const p: TPng; s: SizeInt; out plan: TStreamPlan): Boolean;
@@ -265,11 +284,12 @@ var
   plans: array of TStreamPlan;
   i, s: SizeInt; c: TChunk;
   enc: TArithEncoder; bm, rm: TByteModel; sub0: TBytes;
-  jobs: array of TBandJob; subs: array of TBytes; nJobs: SizeInt;
+  jobs: array of TBandJob; subs: array of TBytes; nJobs, nJpeg: SizeInt;
 
   procedure PlanOne(k: SizeInt);
   begin
-    PlanImage(p, k, plans[k]);
+    if p.streams[k].kind in [skJdat, skJdaa] then PlanJpeg(p, k, 1, plans[k])
+    else PlanImage(p, k, plans[k]);
   end;
 
   procedure CodeBand(k: SizeInt);
@@ -293,7 +313,7 @@ begin
     part, and the streams' are independent }
   ParallelFor(Length(p.streams), CodecThreads, @PlanOne);
   for s := 0 to High(p.streams) do begin
-    if plans[s].mode = MODE_IMAGE then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
+    if plans[s].mode in [MODE_IMAGE, MODE_JPEG] then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
     else begin Inc(stats.rawStreams); Inc(stats.rawBytes, Length(p.streams[s].data)); end;
   end;
 
@@ -352,14 +372,23 @@ begin
   subs := nil; SetLength(subs, nJobs);
   ParallelFor(nJobs, BandThreads, @CodeBand);
 
+  { then each JNG JPEG's PJA stream, in order }
+  nJpeg := 0;
+  for s := 0 to High(p.streams) do
+    if plans[s].mode = MODE_JPEG then Inc(nJpeg);
+  SetLength(subs, nJobs + nJpeg);
+  i := nJobs;
+  for s := 0 to High(p.streams) do
+    if plans[s].mode = MODE_JPEG then begin subs[i] := plans[s].jpeg; Inc(i); end;
+
   { the stream: version, the substreams' count and lengths, the substreams }
   w := Default(TWriter);
   w.Put(STREAM_VERSION);
-  w.PutVar(1 + nJobs);
+  w.PutVar(1 + Length(subs));
   w.PutVar(Length(sub0));
-  for i := 0 to nJobs - 1 do w.PutVar(Length(subs[i]));
+  for i := 0 to High(subs) do w.PutVar(Length(subs[i]));
   w.PutBytes(sub0, 0, Length(sub0));
-  for i := 0 to nJobs - 1 do w.PutBytes(subs[i], 0, Length(subs[i]));
+  for i := 0 to High(subs) do w.PutBytes(subs[i], 0, Length(subs[i]));
   stream := w.Bytes;
   Result := True;
 end;
@@ -393,7 +422,7 @@ var
   info: TImageInfo; pxs: array of TPixels; plains: array of TBytes;
   maxSmall: Int64;
   nSubs: Int64; subLen, subPos: array of Int64;
-  jobs: array of TBandJob; nJobs: SizeInt;
+  jobs: array of TBandJob; nJobs, nJpeg: SizeInt; jpegSub: array of SizeInt;
 
   function Bad(const s: string): Boolean;
   begin
@@ -408,8 +437,16 @@ var
   end;
 
   procedure Rebuild(k: SizeInt);
-  var e: TZStream;
+  var e: TZStream; r: TCodecResult; j: TBytes;
   begin
+    if modes[k] = MODE_JPEG then begin
+      { PJA's stream back to the JPEG, which must be exactly as long as
+        the chunks say }
+      r := pjacodec.Decompress(Copy(stream, subPos[jpegSub[k]], subLen[jpegSub[k]]), j,
+        streamLen[k] + 1024, 1, streamLen[k]);
+      if r.Ok then p.streams[k].data := j else p.streams[k].data := nil;
+      Exit;
+    end;
     if modes[k] <> MODE_IMAGE then Exit;
     ZlibChoices(plains[k], prms[k], nil, e);
     e.raw := zs[k].raw; e.adlerOk := zs[k].adlerOk; e.header := zs[k].header;
@@ -508,7 +545,8 @@ begin
     p.streams[s].header := Int64(r.GetVar(nChunks)) - 1;
     p.streams[s].frame := Int64(r.GetVar(nChunks)) - 1;
     modes[s] := r.Get;
-    if not r.ok or (modes[s] > MODE_IMAGE) then Exit(Bad('bad structure'));
+    if not r.ok or (modes[s] > MODE_JPEG) then Exit(Bad('bad structure'));
+    if (modes[s] = MODE_JPEG) and not (p.streams[s].kind in [skJdat, skJdaa]) then Exit(Bad('bad structure'));
     if modes[s] = MODE_IMAGE then begin
       prms[s].level := r.Get; prms[s].strategy := r.Get; prms[s].memLevel := r.Get; prms[s].wbits := r.Get;
       if (prms[s].level < 1) or (prms[s].level > 9) or (prms[s].strategy > Z_FIXED) or
@@ -537,14 +575,22 @@ begin
     if modes[s] = MODE_BYTES then begin
       SetLength(p.streams[s].data, streamLen[s]);
       CodeBytes(rm, p.streams[s].data, 0, streamLen[s], nil, @dec);
-    end else begin
+    end else if modes[s] = MODE_IMAGE then begin
       if not StreamImage(p, s, info) or not InitLayout(info, pxs[s]) then Exit(Bad('bad image header'));
       if FilteredSize(pxs[s]) + Int64(Length(pxTails[s])) > MAX_INFLATE_RATIO * streamLen[s] + 1024 then
         Exit(Bad('image larger than its stream can hold'));
       Inc(nJobs, BandCount(pxs[s]));
     end;
   end;
-  if nJobs <> nSubs - 1 then Exit(Bad('substreams for another number of bands'));
+  nJpeg := 0;
+  for s := 0 to nStreams - 1 do
+    if modes[s] = MODE_JPEG then Inc(nJpeg);
+  if nJobs + nJpeg <> nSubs - 1 then Exit(Bad('substreams for another number of bands'));
+  { each JNG JPEG's substream }
+  jpegSub := nil; SetLength(jpegSub, nStreams);
+  i := 1 + nJobs;
+  for s := 0 to nStreams - 1 do
+    if modes[s] = MODE_JPEG then begin jpegSub[s] := i; Inc(i); end;
   { each band from its own substream, in parallel }
   jobs := nil; SetLength(jobs, nJobs);
   nJobs := 0;
@@ -564,8 +610,8 @@ begin
     on as many threads as given }
   ParallelFor(nStreams, CodecThreads, @Rebuild);
   for s := 0 to nStreams - 1 do
-    if (modes[s] = MODE_IMAGE) and (Length(p.streams[s].data) <> streamLen[s]) then
-      Exit(Bad('image stream of another length'));
+    if (modes[s] in [MODE_IMAGE, MODE_JPEG]) and (Length(p.streams[s].data) <> streamLen[s]) then
+      Exit(Bad('image stream damaged or of another length'));
 
   data := Compose(p);
   Result := True;
@@ -587,6 +633,8 @@ begin
 end;
 
 initialization
+  { PJA's codec, called from the codec's threads, keeps models in threadvars }
+  OnThreadEnd := @ReleaseThreadModels;
   BandBytes := StrToInt64Def(GetEnvironmentVariable('PPA_TEST_BAND_BYTES'), BAND_BYTES);
   if BandBytes < 1 then BandBytes := BAND_BYTES;
   BandsReverse := GetEnvironmentVariable('PPA_TEST_BANDS_REVERSE') = '1';

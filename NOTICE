@@ -5,6 +5,12 @@ Licensed under the MIT License (see LICENSE).
 Third-party work
 ----------------
 
+vendor/pja is PJA 0.6.0 (https://github.com/YadeWira/PJA, MIT, the same
+author), unmodified, for the JPEG inside a JNG; vendor/pja/NOTICE has its own
+third-party notes (IJG for arithmetic-coded JPEG, CharLS for JPEG-LS).
+pas/ppablake3.pas and pas/ppacpu.pas are PJA's pjablake3 and pjacpu under
+other names.
+
 pas/ppazlib.pas is a port to FreePascal of the parts of zlib 1.3's
 deflate.c and trees.c that decide deflate's choices (hash chains,
 longest_match, deflate_fast, deflate_slow, deflate_rle, deflate_huff, and
