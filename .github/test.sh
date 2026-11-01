@@ -25,6 +25,11 @@ echo "== build"
 # its DLLs and its cc1/as.
 case ${CC:-} in /*) PATH=$(dirname "$CC"):$PATH; export PATH ;; esac
 sh pas/build_c.sh "$OUT/c" || { echo "the C part did not build (CC=${CC:-cc})"; exit 1; }
+# the C objects call no library: on Linux, nm must find no undefined symbol
+# (a 64-bit builtin once pulled libgcc's __ctzdi2 into the 32-bit build)
+if [ "$(uname -s)" = Linux ] && command -v nm > /dev/null; then
+  if nm "$OUT"/c/*.o | grep ' U '; then echo "FAIL: the C objects need a library"; exit 1; fi
+fi
 for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model; do
   # shellcheck disable=SC2086
   $FPC -O2 -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/$prog$EXE" pas/tests/$prog.pas > "$OUT/fpc.log" 2>&1 \
