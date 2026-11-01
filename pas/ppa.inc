@@ -16,3 +16,5 @@
 {$R+}
 {$Q+}
 {$modeswitch advancedrecords}
+{ nested procedures as values: ppathreads.ParallelFor takes them }
+{$modeswitch nestedprocvars}

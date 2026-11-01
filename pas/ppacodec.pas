@@ -37,6 +37,12 @@ const
     older ones. }
   STREAM_VERSION = 1;
 
+var
+  { threads for one file: its image streams' zlib parameters (Compress)
+    and their deflate streams rebuilt (Decompress) go to as many. 1: none,
+    everything in the calling thread. }
+  CodecThreads: Integer = 1;
+
 type
   TCodecStats = record
     images, imageBytes: Integer;      { image streams kept as images, and their bytes }
@@ -51,7 +57,7 @@ function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out w
 
 implementation
 
-uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel;
+uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppathreads;
 
 const
   MODE_BYTES = 0;
@@ -188,6 +194,12 @@ var
   plans: array of TStreamPlan;
   i, s: SizeInt; c: TChunk;
   enc: TArithEncoder; bm, rm: TByteModel; body: TBytes;
+
+  procedure PlanOne(k: SizeInt);
+  begin
+    PlanImage(p, k, plans[k]);
+  end;
+
 begin
   Result := False;
   stream := nil;
@@ -197,8 +209,10 @@ begin
 
   plans := nil;
   SetLength(plans, Length(p.streams));
+  { each stream's plan on its own: the zlib parameter search is the slow
+    part, and the streams' are independent }
+  ParallelFor(Length(p.streams), CodecThreads, @PlanOne);
   for s := 0 to High(p.streams) do begin
-    PlanImage(p, s, plans[s]);
     if plans[s].mode = MODE_IMAGE then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
     else begin Inc(stats.rawStreams); Inc(stats.rawBytes, Length(p.streams[s].data)); end;
   end;
@@ -280,12 +294,23 @@ var
   flags: Byte; c: TChunk;
   modes: array of Integer; prms: array of TZlibParams; zs: array of TZStream; pxTails: array of TBytes;
   streamLen: array of Int64;
-  info: TImageInfo; px: TPixels; plain: TBytes; e: TZStream;
+  info: TImageInfo; px: TPixels; plains: array of TBytes;
   maxSmall: Int64;
 
   function Bad(const s: string): Boolean;
   begin
     why := s; Result := False;
+  end;
+
+  procedure Rebuild(k: SizeInt);
+  var e: TZStream;
+  begin
+    if modes[k] <> MODE_IMAGE then Exit;
+    ZlibChoices(plains[k], prms[k], nil, e);
+    e.raw := zs[k].raw; e.adlerOk := zs[k].adlerOk; e.header := zs[k].header;
+    e.endPad := zs[k].endPad; e.tail := zs[k].tail;
+    p.streams[k].data := Encode(e);
+    plains[k] := nil;
   end;
 
 begin
@@ -382,8 +407,9 @@ begin
   end;
   if r.pos <> Length(meta) then Exit(Bad('bad structure'));
 
-  { the image streams' contents }
+  { the image streams' contents, in order: one arithmetic stream }
   rm.Init;
+  plains := nil; SetLength(plains, nStreams);
   for s := 0 to nStreams - 1 do begin
     if modes[s] = MODE_BYTES then begin
       SetLength(p.streams[s].data, streamLen[s]);
@@ -394,14 +420,15 @@ begin
         Exit(Bad('image larger than its stream can hold'));
       CodeImage(px, nil, @dec);
       px.tail := pxTails[s];
-      plain := Refilter(px);
-      ZlibChoices(plain, prms[s], nil, e);
-      e.raw := zs[s].raw; e.adlerOk := zs[s].adlerOk; e.header := zs[s].header;
-      e.endPad := zs[s].endPad; e.tail := zs[s].tail;
-      p.streams[s].data := Encode(e);
-      if Length(p.streams[s].data) <> streamLen[s] then Exit(Bad('image stream of another length'));
+      plains[s] := Refilter(px);
     end;
   end;
+  { then each image's deflate stream, zlib's choices written: independent,
+    on as many threads as given }
+  ParallelFor(nStreams, CodecThreads, @Rebuild);
+  for s := 0 to nStreams - 1 do
+    if (modes[s] = MODE_IMAGE) and (Length(p.streams[s].data) <> streamLen[s]) then
+      Exit(Bad('image stream of another length'));
 
   data := Compose(p);
   Result := True;

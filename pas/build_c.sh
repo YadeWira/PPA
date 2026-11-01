@@ -1,7 +1,8 @@
 #!/bin/sh
-# The C part of PPA (layer 5's pixel loop, ppamodelc.c) as an object for
-# FreePascal to link: ppamodel.pas takes it with {$L ppamodelc.o}, found
-# through -Fo<dir>. As PJA's pas/build_c.sh.
+# The C part of PPA as objects for FreePascal to link: layer 5's pixel loop
+# (ppamodelc.c, {$L ppamodelc.o} in ppamodel.pas) and layer 2b's
+# longest_match (ppazlibc.c, in ppazlib.pas), found through -Fo<dir>. As
+# PJA's pas/build_c.sh.
 #
 #   pas/build_c.sh <out dir> [extra C flags]
 #
@@ -25,5 +26,7 @@ case "$CC $*" in
   *-m32*|*i686*|*i386*) FLAGS="$FLAGS -fno-pic" ;;
 esac
 mkdir -p "$OUT"
-# shellcheck disable=SC2086
-$CC $FLAGS "$@" -c "$HERE/ppamodelc.c" -o "$OUT/ppamodelc.o"
+for f in ppamodelc ppazlibc; do
+  # shellcheck disable=SC2086
+  $CC $FLAGS "$@" -c "$HERE/$f.c" -o "$OUT/$f.o"
+done

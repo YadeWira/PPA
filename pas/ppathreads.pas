@@ -1,0 +1,81 @@
+{ A parallel for: Run(i) for i = 0 .. n - 1 on up to `threads` threads
+  (the calling one among them), each taking the next i as it finishes. With
+  one thread, or one item, everything runs here, in order, without a thread.
+  An exception in an item is caught and given back: the first one raised
+  again in the caller once all are done. The program needs cthreads first
+  in its uses on Unix (the ppa command has it). }
+unit ppathreads;
+
+{$I ppa.inc}
+
+interface
+
+uses SysUtils, Classes;
+
+type
+  TItemProc = procedure(i: SizeInt) is nested;
+
+procedure ParallelFor(n: SizeInt; threads: Integer; run: TItemProc);
+
+implementation
+
+type
+  TShared = record
+    next: LongInt;     { LongInt: what InterlockedIncrement takes everywhere }
+    n: LongInt;
+    run: TItemProc;
+    failure: string;
+    failed: LongInt;
+  end;
+  PShared = ^TShared;
+
+  TWorker = class(TThread)
+    sh: PShared;
+    procedure Execute; override;
+  end;
+
+procedure Work(sh: PShared);
+var i: LongInt;
+begin
+  repeat
+    i := InterlockedIncrement(sh^.next) - 1;
+    if i >= sh^.n then Break;
+    try
+      sh^.run(i);
+    except
+      on e: Exception do
+        if InterlockedIncrement(sh^.failed) = 1 then sh^.failure := e.ClassName + ': ' + e.Message;
+    end;
+  until False;
+end;
+
+procedure TWorker.Execute;
+begin
+  Work(sh);
+end;
+
+procedure ParallelFor(n: SizeInt; threads: Integer; run: TItemProc);
+var sh: TShared; pool: array of TWorker; i, k: Integer;
+begin
+  if n <= 0 then Exit;
+  if n > High(LongInt) then raise ERangeError.Create('ParallelFor: too many items');
+  if (threads <= 1) or (n = 1) then begin
+    for i := 0 to n - 1 do run(i);
+    Exit;
+  end;
+  sh.next := 0; sh.n := n; sh.run := run; sh.failure := ''; sh.failed := 0;
+  k := threads;
+  if k > n then k := n;
+  pool := nil;
+  SetLength(pool, k - 1);
+  for i := 0 to High(pool) do begin
+    pool[i] := TWorker.Create(True);
+    pool[i].sh := @sh;
+    pool[i].Start;
+  end;
+  Work(@sh);
+  for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+  if sh.failed > 0 then raise Exception.Create(sh.failure);
+end;
+
+end.

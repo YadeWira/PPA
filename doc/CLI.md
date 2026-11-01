@@ -11,6 +11,7 @@ ppa list FILE...            what each .ppa holds: original size, stored size, ex
 | `-o PATH` | output name with one input; a directory if it exists or ends in `/` |
 | `--output-dir=DIR` | output directory |
 | `-f`, `--force` | replace an existing output, only with one that verified |
+| `-th N`, `--threads=N` | threads; by default the processors, up to 8. They go to files first, several at once, and what is left to each file's image streams (zlib's parameters when compressing, the deflate streams rebuilt when extracting). Each file's lines still come out in the order of the inputs; the `.ppa` is the same bytes whatever the threads |
 | `--no-verify` | `a`: do not decompress the stream to check it before writing. The hash still catches a codec bug when extracting |
 | `--max-output=SIZE` | `x`: refuse a declared original above SIZE (`256M` by default, `K`/`M`/`G`, `0` = no limit) |
 | `-n`, `--dry-run` | do everything but write |
@@ -32,5 +33,6 @@ its line on stderr), 2 for a usage error.
   into place when complete.
 - An existing output is not replaced without `-f`.
 
-Version 0.1.0 is a first one: one file at a time, one thread; no thread
-switch yet.
+Version 0.1.0 is a first one, and slow: the model codes an image's pixels
+in one thread, and a stream zlib wrote at level 8 or 9 takes, to rebuild,
+about what zlib took to write it.

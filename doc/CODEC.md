@@ -273,6 +273,22 @@ With tables small enough for the cache the C loop takes 3.1 s: about
 2 MB/s is this model's own cost (lpaq's order), not memory's. Further speed
 has to come from less work a bit, as PJA's version 7, and from threads.
 
+**zlib's own cost.** On an 800x600 RGBA frame (1.9 MB unfiltered), the
+predictor takes 24 ms at level 1 and 2.2 s at level 9; zlib itself takes
+21 ms and 1.5 s (Python's zlib, the same parameters). Rebuilding a stream
+zlib wrote at level 9 costs about what writing it cost zlib: the hash
+chains walked, up to 4,096 candidates a position in flat areas. `longest_match`
+went to C too (`pas/ppazlibc.c`, the same choices as the Pascal, 8 bytes
+compared at a time): 3.1 s to 2.1 s. What is left is walking the chains.
+
+**Threads.** The command gives its threads to files first and what is left
+to each file's image streams (`ppathreads.ParallelFor`): their zlib
+parameters when compressing, their deflate streams rebuilt when
+extracting (the pixels are decoded first, in order: one arithmetic
+stream). The bytes do not depend on the threads. On the corpus's 16-frame
+APNG (4.6 MB, level 9): `ppa a` 148 s with one thread, 39.5 s with 8;
+`ppa x` 71 s, 20 s.
+
 | the photo | before | after |
 |---|---|---|
 | `ppa a` (verifying) | 25.4 s | 13.0 s |

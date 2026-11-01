@@ -72,7 +72,17 @@ function FindZlibParams(const z: TZStream; out prm: TZlibParams; out choices: TZ
 { The zlib header zlib writes for these parameters }
 function ZlibHeader(const prm: TZlibParams): Word;
 
+var
+  { longest_match in C (ppazlibc.c); False: in Pascal, the reference.
+    PPA_NOC=1 in the environment makes it False }
+  UseZlibC: Boolean = True;
+
 implementation
+
+{$L ppazlibc.o}
+
+function ppaz_longest(plain: PByte; n: SizeInt; prev: PSizeInt; wmask, scan, cur, limit, chain,
+  bestLen, nice: SizeInt; matchStart: PSizeInt): SizeInt; cdecl; external name 'ppaz_longest';
 
 const
   MIN_MATCH = 3;
@@ -353,6 +363,12 @@ var
     scanEnd := Win(scan + bestLen);
     if prevLength >= goodMatch then chainLength := chainLength shr 2;
     if nice > Lookahead then nice := Lookahead;
+    if UseZlibC then begin
+      bestLen := ppaz_longest(@plain[0], n, @prev[0], wmask, scan, curMatch, limit, chainLength,
+        bestLen, nice, @matchStart);
+      if bestLen <= Lookahead then Result := bestLen else Result := Lookahead;
+      Exit;
+    end;
     repeat
       match := curMatch;
       if (Win(match + bestLen) = scanEnd) and (Win(match + bestLen - 1) = scanEnd1) and
@@ -736,4 +752,5 @@ end;
 
 initialization
   MakeTables;
+  UseZlibC := GetEnvironmentVariable('PPA_NOC') <> '1';
 end.
