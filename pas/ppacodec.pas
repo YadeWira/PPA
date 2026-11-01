@@ -83,6 +83,16 @@ var
 const
   { deflate's largest expansion is 1032:1, plus room for small streams }
   MAX_INFLATE_RATIO = 1100;
+  { each band coded at once takes its own model, about 140 MB: a 32-bit
+    process (2 GB of addresses, on Windows) codes at most this many }
+  MAX_BANDS_AT_ONCE_32 = 4;
+
+{ the threads for bands: the codec's, fewer on 32 bits (memory) }
+function BandThreads: Integer;
+begin
+  Result := CodecThreads;
+  if (SizeOf(Pointer) = 4) and (Result > MAX_BANDS_AT_ONCE_32) then Result := MAX_BANDS_AT_ONCE_32;
+end;
 
 { ---------------------------------------------------------------- the structure as bytes }
 
@@ -340,7 +350,7 @@ begin
   for s := 0 to High(p.streams) do
     if plans[s].mode = MODE_IMAGE then AddBands(jobs, nJobs, s, plans[s].px);
   subs := nil; SetLength(subs, nJobs);
-  ParallelFor(nJobs, CodecThreads, @CodeBand);
+  ParallelFor(nJobs, BandThreads, @CodeBand);
 
   { the stream: version, the substreams' count and lengths, the substreams }
   w := Default(TWriter);
@@ -543,7 +553,7 @@ begin
   if BandsReverse then
     for i := nJobs - 1 downto 0 do DecodeBand(i)
   else
-    ParallelFor(nJobs, CodecThreads, @DecodeBand);
+    ParallelFor(nJobs, BandThreads, @DecodeBand);
   for s := 0 to nStreams - 1 do
     if modes[s] = MODE_IMAGE then begin
       pxs[s].tail := pxTails[s];
