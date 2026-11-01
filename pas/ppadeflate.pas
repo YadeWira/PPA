@@ -457,10 +457,27 @@ type
     cnt: Integer;
   end;
 
+{ v's n low bits (n <= 24): kept in buf, written four bytes at a time }
 procedure PutBits(var bw: TBitWriter; v: LongWord; n: Integer); inline;
+var p: PByte;
 begin
   bw.buf := bw.buf or (QWord(v) shl bw.cnt);
   Inc(bw.cnt, n);
+  if bw.cnt >= 32 then begin
+    if bw.n + 4 > Length(bw.out_) then SetLength(bw.out_, 2 * bw.n + 4096);
+    p := @bw.out_[bw.n];
+    {$push}{$R-}
+    p[0] := Byte(bw.buf); p[1] := Byte(bw.buf shr 8); p[2] := Byte(bw.buf shr 16); p[3] := Byte(bw.buf shr 24);
+    {$pop}
+    Inc(bw.n, 4);
+    bw.buf := bw.buf shr 32;
+    Dec(bw.cnt, 32);
+  end;
+end;
+
+{ the whole bytes in buf, written (the rest stays: fewer than 8 bits) }
+procedure FlushBytes(var bw: TBitWriter);
+begin
   while bw.cnt >= 8 do begin
     if bw.n = Length(bw.out_) then SetLength(bw.out_, 2 * bw.n + 4096);
     bw.out_[bw.n] := Byte(bw.buf);
@@ -472,6 +489,7 @@ end;
 
 procedure PutBytes(var bw: TBitWriter; const a: TBytes; first, len: SizeInt);
 begin
+  FlushBytes(bw);
   if len <= 0 then Exit;
   if bw.n + len > Length(bw.out_) then SetLength(bw.out_, 2 * (bw.n + len));
   Move(a[first], bw.out_[bw.n], len);
@@ -555,6 +573,7 @@ begin
     PutBits(bw, (ad shr 8) and $FF, 8); PutBits(bw, ad and $FF, 8);
   end;
   PutBytes(bw, z.tail, 0, Length(z.tail));
+  FlushBytes(bw);
   SetLength(bw.out_, bw.n);
   Result := bw.out_;
 end;

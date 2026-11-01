@@ -96,6 +96,7 @@ type
     lfreq, dfreq: PInteger; symNext, symEnd: SizeInt;
     lengthCode, distCode: PByte;
     pending: SizeInt;
+    skipBits: SizeInt;
   end;
 
 const
@@ -108,7 +109,9 @@ const
   MAX_MATCH = 258;
   MIN_LOOKAHEAD = MAX_MATCH + MIN_MATCH + 1;
   TOO_FAR = 4096;
-  SKIP_BITS = 18;    { the skipped chains' tables: 2^SKIP_BITS positions each }
+  { the skipped chains' tables: about two entries a byte of input, from 2^12 to 2^19 each }
+  SKIP_BITS_MIN = 12;
+  SKIP_BITS_MAX = 19;
   L_CODES = 286;
   D_CODES = 30;
   BL_CODES = 19;
@@ -331,6 +334,7 @@ var
   chainOrd: array of LongWord;
   cnt: array of LongWord;
   t3, t4, t8: array of LongWord;
+  skipBits: Integer;
   insH: LongWord;
   strstart, matchStart, prevMatch, blockStart, winBase: SizeInt;
   matchLength, prevLength, matchAvailable: Integer;
@@ -695,6 +699,7 @@ var
     st.lfreq := @ltree.freq[0]; st.dfreq := @dtree.freq[0];
     st.symNext := symNext; st.symEnd := symEnd;
     st.lengthCode := @LengthCode[0]; st.distCode := @DistCode[0];
+    st.skipBits := skipBits;
     repeat
       st.checkNow := Ord(checkNow); st.stop := Ord(stop);
       r := ppaz_deflate(st);
@@ -728,8 +733,10 @@ begin
   if UseZlibC then begin
     nx3 := nil; SetLength(nx3, wsize); nx4 := nil; SetLength(nx4, wsize); nx8 := nil; SetLength(nx8, wsize);
     chainOrd := nil; SetLength(chainOrd, wsize); cnt := nil; SetLength(cnt, hashSize);
-    t3 := nil; SetLength(t3, 1 shl SKIP_BITS); t4 := nil; SetLength(t4, 1 shl SKIP_BITS);
-    t8 := nil; SetLength(t8, 1 shl SKIP_BITS);
+    skipBits := SKIP_BITS_MIN;
+    while (skipBits < SKIP_BITS_MAX) and (SizeInt(1) shl skipBits < 2 * n) do Inc(skipBits);
+    t3 := nil; SetLength(t3, 1 shl skipBits); t4 := nil; SetLength(t4, 1 shl skipBits);
+    t8 := nil; SetLength(t8, 1 shl skipBits);
   end;
   symEnd := (1 shl (prm.memLevel + 6)) - 1;
   goodMatch := CONFIG[prm.level, 0]; maxLazy := CONFIG[prm.level, 1];

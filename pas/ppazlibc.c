@@ -128,7 +128,6 @@ walk:
 enum { ZD_DONE = 0, ZD_FLUSH = 1, ZD_STOP = 2 };
 #define MIN_MATCH 3
 #define TOO_FAR 4096
-#define SKIP_BITS 18
 
 typedef struct {
   const uint8_t *plain; intptr_t n;
@@ -143,6 +142,7 @@ typedef struct {
   int32_t *lfreq, *dfreq; intptr_t symNext, symEnd;
   const uint8_t *lengthCode, *distCode;
   intptr_t pending;              /* after a flush: the literal's strstart++ still to do */
+  intptr_t skipBits;             /* the tables t3, t4, t8: 2^skipBits positions each */
 } zdeflate_t;
 
 static inline void zd_skip(zdeflate_t *s, intptr_t str) {
@@ -150,14 +150,15 @@ static inline void zd_skip(zdeflate_t *s, intptr_t str) {
   const intptr_t i = str & s->wmask, n = s->n;
   s->ord[i] = s->cnt[s->insH]++;
   const uint32_t k3 = p[str] | (uint32_t)p[str + 1] << 8 | (uint32_t)p[str + 2] << 16;
-  uint32_t h = (k3 * 2654435761u) >> (32 - SKIP_BITS);
+  const int sb = (int)s->skipBits;
+  uint32_t h = (k3 * 2654435761u) >> (32 - sb);
   intptr_t c = s->t3[h];
   if (c == 0 || str - c >= s->wsize) s->nx3[i] = 0;
   else s->nx3[i] = (p[c] | (uint32_t)p[c + 1] << 8 | (uint32_t)p[c + 2] << 16) == k3 ? c : -1;
   s->t3[h] = (uint32_t)str;
   if (str + 3 < n) {
     const uint32_t k4 = k3 | (uint32_t)p[str + 3] << 24;
-    h = (k4 * 2246822519u) >> (32 - SKIP_BITS);
+    h = (k4 * 2246822519u) >> (32 - sb);
     c = s->t4[h];
     if (c == 0 || str - c >= s->wsize) s->nx4[i] = 0;
     else s->nx4[i] = (p[c] | (uint32_t)p[c + 1] << 8 | (uint32_t)p[c + 2] << 16 | (uint32_t)p[c + 3] << 24) == k4 ? c : -1;
@@ -166,7 +167,7 @@ static inline void zd_skip(zdeflate_t *s, intptr_t str) {
   if (str + 7 < n) {
     uint64_t k8, kc;
     __builtin_memcpy(&k8, p + str, 8);
-    h = (uint32_t)((k8 * 0x9E3779B97F4A7C15ull) >> (64 - SKIP_BITS));
+    h = (uint32_t)((k8 * 0x9E3779B97F4A7C15ull) >> (64 - sb));
     c = s->t8[h];
     if (c == 0 || str - c >= s->wsize) s->nx8[i] = 0;
     else { __builtin_memcpy(&kc, p + c, 8); s->nx8[i] = kc == k8 ? c : -1; }

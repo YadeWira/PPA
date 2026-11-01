@@ -131,6 +131,76 @@ begin
   else Result := c;
 end;
 
+{ One line's filter undone (Unfilter) or done (Refilter): cur the line,
+  prior the line above or nil (the first line of its pass), rb its bytes.
+  The callers have checked every bound, so no index is checked here. }
+{$push}{$R-}{$Q-}
+procedure UnfilterLine(f: Byte; src, cur, prior: PByte; rb, bpp: SizeInt);
+var x: SizeInt; a, b, c: Integer;
+begin
+  case f of
+    0: Move(src^, cur^, rb);
+    1: begin
+      for x := 0 to bpp - 1 do if x < rb then cur[x] := src[x];
+      for x := bpp to rb - 1 do cur[x] := Byte(src[x] + cur[x - bpp]);
+    end;
+    2: if prior = nil then Move(src^, cur^, rb)
+       else for x := 0 to rb - 1 do cur[x] := Byte(src[x] + prior[x]);
+    3: if prior = nil then begin
+         for x := 0 to bpp - 1 do if x < rb then cur[x] := src[x];
+         for x := bpp to rb - 1 do cur[x] := Byte(src[x] + (cur[x - bpp] shr 1));
+       end else begin
+         for x := 0 to bpp - 1 do if x < rb then cur[x] := Byte(src[x] + (prior[x] shr 1));
+         for x := bpp to rb - 1 do cur[x] := Byte(src[x] + ((cur[x - bpp] + prior[x]) shr 1));
+       end;
+  else
+    if prior = nil then begin
+      { Paeth with no line above is the byte to the left }
+      for x := 0 to bpp - 1 do if x < rb then cur[x] := src[x];
+      for x := bpp to rb - 1 do cur[x] := Byte(src[x] + cur[x - bpp]);
+    end else begin
+      for x := 0 to bpp - 1 do if x < rb then cur[x] := Byte(src[x] + prior[x]);
+      for x := bpp to rb - 1 do begin
+        a := cur[x - bpp]; b := prior[x]; c := prior[x - bpp];
+        cur[x] := Byte(src[x] + Paeth(a, b, c));
+      end;
+    end;
+  end;
+end;
+
+procedure FilterLine(f: Byte; cur, prior, dst: PByte; rb, bpp: SizeInt);
+var x: SizeInt; a, b, c: Integer;
+begin
+  case f of
+    0: Move(cur^, dst^, rb);
+    1: begin
+      for x := 0 to bpp - 1 do if x < rb then dst[x] := cur[x];
+      for x := bpp to rb - 1 do dst[x] := Byte(cur[x] - cur[x - bpp]);
+    end;
+    2: if prior = nil then Move(cur^, dst^, rb)
+       else for x := 0 to rb - 1 do dst[x] := Byte(cur[x] - prior[x]);
+    3: if prior = nil then begin
+         for x := 0 to bpp - 1 do if x < rb then dst[x] := cur[x];
+         for x := bpp to rb - 1 do dst[x] := Byte(cur[x] - (cur[x - bpp] shr 1));
+       end else begin
+         for x := 0 to bpp - 1 do if x < rb then dst[x] := Byte(cur[x] - (prior[x] shr 1));
+         for x := bpp to rb - 1 do dst[x] := Byte(cur[x] - ((cur[x - bpp] + prior[x]) shr 1));
+       end;
+  else
+    if prior = nil then begin
+      for x := 0 to bpp - 1 do if x < rb then dst[x] := cur[x];
+      for x := bpp to rb - 1 do dst[x] := Byte(cur[x] - cur[x - bpp]);
+    end else begin
+      for x := 0 to bpp - 1 do if x < rb then dst[x] := Byte(cur[x] - prior[x]);
+      for x := bpp to rb - 1 do begin
+        a := cur[x - bpp]; b := prior[x]; c := prior[x - bpp];
+        dst[x] := Byte(cur[x] - Paeth(a, b, c));
+      end;
+    end;
+  end;
+end;
+{$pop}
+
 { The passes' layout; False if the image is too large }
 function Layout(var px: TPixels; bitsPerPixel: SizeInt): Boolean;
 var np, i: Integer; w, h, total, lines: SizeInt;
@@ -183,9 +253,9 @@ end;
 
 function Unfilter(const plain: TBytes; const info: TImageInfo; out px: TPixels): Boolean;
 var
-  i: Integer; need: SizeInt;
-  pi_, y, x, rb, src, dst, prior, bpp: SizeInt;
-  f: Byte; a, b, c: Integer;
+  need: SizeInt;
+  pi_, y, rb, src, dst, bpp: SizeInt;
+  f: Byte; prior: PByte;
 begin
   Result := False;
   if not InitLayout(info, px) then Exit;
@@ -200,20 +270,11 @@ begin
       f := plain[src]; Inc(src);
       if f > 4 then Exit;
       px.filters[px.passes[pi_].firstLine + y] := f;
-      dst := px.passes[pi_].first + y * rb;
-      prior := dst - rb;           { the line above, in the same pass }
-      for x := 0 to rb - 1 do begin
-        if x >= bpp then a := px.data[dst + x - bpp] else a := 0;
-        if y > 0 then b := px.data[prior + x] else b := 0;
-        if (x >= bpp) and (y > 0) then c := px.data[prior + x - bpp] else c := 0;
-        case f of
-          0: i := plain[src + x];
-          1: i := plain[src + x] + a;
-          2: i := plain[src + x] + b;
-          3: i := plain[src + x] + (a + b) shr 1;
-        else i := plain[src + x] + Paeth(a, b, c);
-        end;
-        px.data[dst + x] := Byte(i and $FF);
+      if rb > 0 then begin
+        dst := px.passes[pi_].first + y * rb;
+        if (dst < 0) or (dst + rb > Length(px.data)) or (src + rb > Length(plain)) then Exit;
+        if y > 0 then prior := @px.data[dst - rb] else prior := nil;
+        UnfilterLine(f, @plain[src], @px.data[dst], prior, rb, bpp);
       end;
       Inc(src, rb);
     end;
@@ -223,33 +284,24 @@ begin
   Result := True;
 end;
 
+
 function Refilter(const px: TPixels): TBytes;
-var pi_, y, x, rb, o, dst, prior, bpp: SizeInt; f: Byte; a, b, c, v: Integer;
+var pi_, y, rb, o, dst: SizeInt; f: Byte; prior: PByte;
 begin
   Result := nil;
   SetLength(Result, Length(px.data) + Length(px.filters) + Length(px.tail));
-  bpp := px.bpp;
   o := 0;
   for pi_ := 0 to High(px.passes) do begin
     rb := px.passes[pi_].rowBytes;
     for y := 0 to px.passes[pi_].height - 1 do begin
       f := px.filters[px.passes[pi_].firstLine + y];
       Result[o] := f; Inc(o);
-      dst := px.passes[pi_].first + y * rb;
-      prior := dst - rb;
-      for x := 0 to rb - 1 do begin
-        if x >= bpp then a := px.data[dst + x - bpp] else a := 0;
-        if y > 0 then b := px.data[prior + x] else b := 0;
-        if (x >= bpp) and (y > 0) then c := px.data[prior + x - bpp] else c := 0;
-        v := px.data[dst + x];
-        case f of
-          0: ;
-          1: Dec(v, a);
-          2: Dec(v, b);
-          3: Dec(v, (a + b) shr 1);
-        else Dec(v, Paeth(a, b, c));
-        end;
-        Result[o + x] := Byte(v and $FF);
+      if rb > 0 then begin
+        dst := px.passes[pi_].first + y * rb;
+        if (dst < 0) or (dst + rb > Length(px.data)) or (o + rb > Length(Result)) then
+          raise ERangeError.Create('Refilter: layout');
+        if y > 0 then prior := @px.data[dst - rb] else prior := nil;
+        FilterLine(f, @px.data[dst], prior, @Result[o], rb, px.bpp);
       end;
       Inc(o, rb);
     end;
