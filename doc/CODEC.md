@@ -23,8 +23,8 @@ over a large corpus, is the oracle for the whole project.
 | 2a | `ppadeflate` | zlib stream ↔ the bytes it holds + every choice its encoder made (blocks, codes, tokens, pad bits): the same bits back | done |
 | 2b | `ppazlib` | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | in progress: zlib's choices exact |
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
-| 4 | `ppaarith` | binary arithmetic coder and adaptive bit counters | |
-| 5 | `ppamodel` | context modelling of the pixels, the deflate corrections and the raw bytes | |
+| 4 | `ppaarith` | binary arithmetic coder, adaptive bit counters, stretch and squash | done |
+| 5 | `ppamodel` | context modelling of the pixels, the deflate corrections and the raw bytes | prototype |
 | 6 | `ppacodec` | the compressed stream, verified at compress time | |
 | 7 | `ppaformat`, `ppacli` | the `.ppa` file and the `ppa` command | |
 
@@ -150,6 +150,50 @@ Tests: `test_pixels` (every image back; with `-dump`, `tests/pxcheck.py`
 checks the unfiltered bytes of the non-interlaced 8-bit gray, RGB and RGBA
 images against ImageMagick's decoding).
 
+## Layer 4: the arithmetic coder
+
+`ppaarith` is PJA's coder (`pjaarith`): carryless, the interval in 32 bits
+(the lpaq form), probabilities in 16 bits; the decoder reads zeros past the
+end and cannot fail. With it, the adaptive counters (fast at first, then at
+about 1/limit) and stretch/squash for logistic mixing. Everything is
+integer: the tables too are made with integers (squash from repeated
+multiplication by e^(-1/256) in fixed point), so they are the same
+everywhere, and a ZPAQL decoder, which has only 32-bit integers, can make
+the same ones.
+
+`test_arith`: a million bits back at any probabilities, extreme and wrong
+ones included, at what the probabilities say (90,231 bytes for an ideal of
+90,226); squash increasing, stretch its inverse.
+
+## Layer 5: the model (prototype)
+
+The first model, to measure against. It codes an image's unfiltered bytes
+(layer 3) bit by bit, most significant first; each bit mixes six contexts
+of the byte's neighbours in its channel (W, N, the gradient W + N - NW, the
+average with NE, W N NE quantized, and the gradient corrected by what the
+previous channel of the same pixel left over its own), each a hashed table
+of counters, with mixer weights chosen by channel and bit position. A
+line's filter is coded with the previous line's as context. `CodeImage` is
+the same code for encoding and decoding.
+
+The mixer's arithmetic stays in 32 bits (weights bounded, each term shifted
+before summing). Measured on 31/10/2026, the build without range checks
+gives the same bytes as the checked one.
+
+### Its ZPAQL, decided for now
+
+zpaq-std's blocks carry a ZPAQL decoder. PJA's does everything in its
+PCOMP (zero zpaq components: its own coder, model and JPEG rebuilding,
+written in `zpaqlc`, its Python-subset-to-ZPAQL compiler). The other way
+would be zpaq's own components (CM, ICM, ISSE, MIX, SSE, with HCOMP giving
+the contexts) and a PCOMP that only rebuilds the PNG: faster in ZPAQL, but
+the native coder would have to imitate libzpaq bit for bit and the model
+could only be what those components express. PPA follows PJA's way for
+now: the model free, in 32-bit integers, written so that `zpaqlc` can take
+it. Rebuilding the deflate stream with zlib's choices (layer 2b) has to be
+in the PCOMP either way, and is what will weigh most there. To be measured
+with a prototype of each when the ZPAQL is written.
+
 ## Measurements
 
 | date | what | result |
@@ -163,3 +207,6 @@ images against ImageMagick's decoding).
 | 31/10/2026 | `measure_parse` on the corpus's streams | the parse alone, order 0: 26.6% of the streams |
 | 31/10/2026 | layer 2b, the corpus's 224 streams | 211 told by their zlib parameters (level 9 filtered the most, 78; level 7 default 62); 13 not zlib's: one dynamic block for the whole image (advpng-like optimizers) and one CgBI |
 | 31/10/2026 | layer 3, the corpus's 224 images (23 interlaced) | 224 taken and back; the 22 non-interlaced 8-bit gray/RGB/RGBA PNG ones the same pixels as ImageMagick |
+| 31/10/2026 | layer 2b again, after the fixed-block fix | 211/224 told by their zlib parameters, 0 failures |
+| 31/10/2026 | layer 5's prototype, the corpus's 224 images (195 MB unfiltered, 32.8 MB of zlib streams) | 19.3 MB = 59.0% of the zlib streams, every image decoded back; the 1920x1280 photo 72.2%, the 800x600 RGBA frames ~50%; 316 s for coding and decoding, one thread, without range checks |
+| 31/10/2026 | layer 5's prototype, `tests/png/` (16 small images, ~3,000 pixels each) | 102.7% of the zlib streams: too small for the model to learn |

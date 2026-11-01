@@ -14,7 +14,7 @@ echo "== source guards"
 python3 "$PAS/collisions.py" "$PAS"
 
 echo "== build"
-for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_pixels; do
+for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_pixels test_arith measure_model; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -57,5 +57,11 @@ for d in "${dirs[@]}"; do
   "$OUT/test_pixels" "$d" 1 -dump "$OUT/pxdump" > "$OUT/pxdump/list"
   python3 "$PPA/tests/pxcheck.py" "$OUT/pxdump"
 done
+
+echo "== layer 4: arithmetic coder"
+"$OUT/test_arith" | tail -1
+
+echo "== layer 5: the model (every image coded and decoded back)"
+"$OUT/measure_model" "$PPA/tests/png" | tail -1
 
 echo "all green"

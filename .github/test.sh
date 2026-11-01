@@ -17,7 +17,7 @@ if command -v sha256sum > /dev/null; then SHA="sha256sum"; else SHA="shasum -a 2
 rm -rf "$OUT"; mkdir -p "$OUT/u" "$OUT/z"
 
 echo "== build"
-for prog in test_png test_deflate test_zlib test_pixels; do
+for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model; do
   # shellcheck disable=SC2086
   $FPC -O2 -Fupas -Fipas -FU"$OUT/u" -o"$OUT/$prog$EXE" pas/tests/$prog.pas > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
@@ -34,6 +34,10 @@ tail -1 "$OUT/zlib.txt"
 grep -q ', 0 failures' "$OUT/zlib.txt"
 echo "== layer 3"
 "$OUT/test_pixels$EXE" tests/png 16 | tail -1
+echo "== layers 4 and 5"
+"$OUT/test_arith$EXE" | tail -1
+"$OUT/measure_model$EXE" tests/png | sed 's/, [0-9.]* s,/,/' > "$OUT/model.txt"
+cat "$OUT/model.txt"
 
-cat "$OUT/streams.txt" "$OUT/zlib.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
+cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
 echo "hash: $(cat hash.txt)"
