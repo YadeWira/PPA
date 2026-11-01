@@ -25,8 +25,8 @@ over a large corpus, is the oracle for the whole project.
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
 | 4 | `ppaarith` | binary arithmetic coder, adaptive bit counters, stretch and squash | done |
 | 5 | `ppamodel` | context modelling of the pixels, the deflate corrections and the raw bytes | prototype |
-| 6 | `ppacodec` | the compressed stream, verified at compress time | |
-| 7 | `ppaformat`, `ppacli` | the `.ppa` file and the `ppa` command | |
+| 6 | `ppacodec` | the compressed stream, verified at compress time | done |
+| 7 | `ppaformat`, `ppacli` | the `.ppa` file (`FORMAT.md`) and the `ppa` command (`CLI.md`) | done |
 
 A JNG's JPEG (JDAT, and JDAA for its alpha) goes to PJA's codec, its Pascal
 units vendored from a release tag, the JPEG kept as it is when PJA does not
@@ -194,6 +194,58 @@ it. Rebuilding the deflate stream with zlib's choices (layer 2b) has to be
 in the PCOMP either way, and is what will weigh most there. To be measured
 with a prototype of each when the ZPAQL is written.
 
+## Layer 6: the stream
+
+`ppacodec.Compress` takes a whole file. The stream is one version byte
+(`STREAM_VERSION`, 1) and then everything through one arithmetic coder:
+
+- the file's structure, written as bytes (numbers as varints) and coded with
+  a byte model (orders 0 to 3, mixed): the kind of file; each chunk's type,
+  length and CRC when wrong, and either the image stream it belongs to (and
+  an fdAT's sequence number) or its data; the bytes after the end; and for
+  each image stream how it is kept;
+- then each image stream in order: as an **image** (`CodeImage`), or as its
+  **bytes** (the byte model, one that goes on learning from stream to
+  stream).
+
+An image stream is kept as an image when its deflate stream decodes, its
+image fits its header, zlib's parameters are found and give its very bits
+back (checked, not assumed). It keeps then: the four parameters, the zlib
+header, whether the Adler-32 is right, the pad bits, what follows the
+deflate data, and what follows the image in it. Anything else is kept as
+its bytes: the 13 streams of the corpus no zlib parameters give, and a
+JNG's JPEG (PJA's codec will take it).
+
+`Compress` decompresses its own stream and compares; a file that does not
+come back is not taken (and that would be a PPA bug). `Decompress` never
+raises: a damaged or hostile stream gives False and a reason. Every count
+and length in the structure is checked against what it can be; the chunks
+of each image stream must add up to the stream's length before the file
+is put together; and each image is capped before it is decoded: an image
+stream of L bytes holds at most 1,100 L.
+
+A model's millions of counters start at 1/2 without a loop: their
+probability is kept as p xor $8000, so the zeros a new array comes with
+are 1/2 (31/10/2026: the same bytes, the codec test 1.7 times faster).
+
+Tests: `test_codec` (every file compressed, verified, decompressed and
+compared).
+
+## Layer 7: the file and the command
+
+`ppaformat` is PJA's `.pja` for PNG: header, original size, BLAKE3-128 of
+the original, its extension with a check of its own, and the payload (the
+codec stream, or the original itself when the codec does not take it or
+does not make it smaller). The writer and the reader apply the same limits
+with the same function. `FORMAT.md` has the layout and the limits; `CLI.md`
+the command.
+
+Tests: `test_blake3` (PJA's vectors), `test_format` (every sample round
+trip; every bit of the header and descriptor flipped, a sample of the
+payload, cuts: refused or the very original, never another file; each
+header case) and `pas/tests/cli.sh` (the command: every sample back, `-f`,
+`-n`, `list`, a damaged file refused with nothing written, usage errors).
+
 ## Measurements
 
 | date | what | result |
@@ -210,3 +262,5 @@ with a prototype of each when the ZPAQL is written.
 | 31/10/2026 | layer 2b again, after the fixed-block fix | 211/224 told by their zlib parameters, 0 failures |
 | 31/10/2026 | layer 5's prototype, the corpus's 224 images (195 MB unfiltered, 32.8 MB of zlib streams) | 19.3 MB = 59.0% of the zlib streams, every image decoded back; the 1920x1280 photo 72.2%, the 800x600 RGBA frames ~50%; 316 s for coding and decoding, one thread, without range checks |
 | 31/10/2026 | layer 5's prototype, `tests/png/` (16 small images, ~3,000 pixels each) | 102.7% of the zlib streams: too small for the model to learn |
+| 31/10/2026 | layer 7, damaged `.ppa` files of `tests/png/` (20,062 variants, header to payload) | every one refused, none another file, no exception |
+| 31/10/2026 | the command on `tests/png/`, x86-64 and a 32-bit build | the same `.ppa` bytes on both |

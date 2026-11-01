@@ -8,13 +8,13 @@
 set -euo pipefail
 FPC=${FPC:-fpc}
 PAS=$(cd "$(dirname "$0")" && pwd); PPA=$(dirname "$PAS"); OUT=${PAS_OUT:-$PAS/build/tests}
-mkdir -p "$OUT"
+mkdir -p "$OUT" "$OUT/cli"
 
 echo "== source guards"
 python3 "$PAS/collisions.py" "$PAS"
 
 echo "== build"
-for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_pixels test_arith measure_model; do
+for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_pixels test_arith measure_model test_blake3 test_codec test_format; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -63,5 +63,16 @@ echo "== layer 4: arithmetic coder"
 
 echo "== layer 5: the model (every image coded and decoded back)"
 "$OUT/measure_model" "$PPA/tests/png" | tail -1
+
+echo "== layer 6: the codec (every file compressed, verified, decompressed)"
+"$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
+for d in "${dirs[@]}"; do "$OUT/test_codec" "$d" 1 | tail -1; done
+
+echo "== layer 7: the .ppa file and the command"
+"$OUT/test_blake3" "$PAS/tests/kat.txt" | tail -1
+"$OUT/test_format" "$PPA/tests/png" | tail -1
+$FPC -O3 -dPPA_FAST -Fu"$PAS" -Fi"$PAS" -FU"$OUT/cli" -o"$OUT/ppa" "$PAS/ppacli.pas" > "$OUT/fpc.log" 2>&1 \
+  || { cat "$OUT/fpc.log"; exit 1; }
+(cd "$PPA" && sh pas/tests/cli.sh "$OUT/ppa" "$OUT/clitest")
 
 echo "all green"

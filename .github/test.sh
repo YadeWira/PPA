@@ -1,5 +1,8 @@
 #!/bin/sh
-# The check every platform runs (CI): the layer tests built and run on the
+# The check every platform runs (CI): the ppa command built as released and
+# taken through pas/tests/cli.sh (every sample compressed and extracted, the
+# same bytes back), the SHA-256 of every .ppa it made (the format makes the
+# same bytes on every platform); and the layer tests built and run on the
 # repository's samples (layer 1: every file back byte for byte; layer 2a:
 # every zlib stream back bit for bit; layer 2b: zlib's parameters found and
 # the predicted choices giving the same bits; layer 3: every image
@@ -14,7 +17,7 @@ FPC=${FPC:-fpc}
 OUT=${PPA_OUT:-build/ci}
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=.exe ;; *) EXE= ;; esac
 if command -v sha256sum > /dev/null; then SHA="sha256sum"; else SHA="shasum -a 256"; fi
-rm -rf "$OUT"; mkdir -p "$OUT/u" "$OUT/z"
+rm -rf "$OUT"; mkdir -p "$OUT/u" "$OUT/z" "$OUT/cu"
 
 echo "== build"
 for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model; do
@@ -22,6 +25,15 @@ for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model
   $FPC -O2 -Fupas -Fipas -FU"$OUT/u" -o"$OUT/$prog$EXE" pas/tests/$prog.pas > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
+
+# shellcheck disable=SC2086
+$FPC -O3 -dPPA_FAST -Fupas -Fipas -FU"$OUT/cu" -o"$OUT/ppa$EXE" pas/ppacli.pas > "$OUT/fpc.log" 2>&1 \
+  || { cat "$OUT/fpc.log"; exit 1; }
+"$OUT/ppa$EXE" --version
+
+echo "== the command"
+sh pas/tests/cli.sh "$OUT/ppa$EXE" "$OUT/cli"
+( cd "$OUT/cli/in" && for f in *.ppa; do $SHA "$f"; done ) | tr -d '\r*' | sort > "$OUT/ppa.txt"
 
 echo "== layer 1"
 "$OUT/test_png$EXE" tests/png 14 | tail -1
@@ -39,5 +51,5 @@ echo "== layers 4 and 5"
 "$OUT/measure_model$EXE" tests/png | sed 's/, [0-9.]* s,/,/' > "$OUT/model.txt"
 cat "$OUT/model.txt"
 
-cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
+cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" "$OUT/ppa.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
 echo "hash: $(cat hash.txt)"

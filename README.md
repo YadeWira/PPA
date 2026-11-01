@@ -16,15 +16,25 @@ ppa a image.png          # -> image.ppa
 ppa x image.ppa          # -> image.png, the same file byte for byte
 ```
 
-**Work in progress.** Layer 1 of the codec (the file ↔ its chunks and image
-streams) is done and tested; there is no command yet. The plan and the
-status of each layer are in [`doc/CODEC.md`](doc/CODEC.md).
+**Work in progress: version 0.1.0, a first one.** Every layer of the codec
+works and the command does too, but its model is a first prototype and it
+is slow (one thread, the Pascal reference code). The status of each layer,
+and everything measured, is in [`doc/CODEC.md`](doc/CODEC.md).
 
-The original will come back **byte for byte**, and nothing will be written
-under an output's name unless it verified: compressing decompresses the
-result and compares it with the input before writing.
+The original comes back **byte for byte**, and nothing is written under an
+output's name unless it verified: compressing decompresses the result and
+compares it with the input before writing, and extracting checks the size
+and the BLAKE3 hash stored in the `.ppa`. A file PPA cannot take, or does
+not make smaller, is stored in the `.ppa` as it is.
 
-## Tests
+The command is described in [`doc/CLI.md`](doc/CLI.md), the file in
+[`doc/FORMAT.md`](doc/FORMAT.md).
+
+## Building and tests
+
+```sh
+fpc -O3 -dPPA_FAST -Fupas -Fipas -FUbuild -obuild/ppa pas/ppacli.pas      # the command
+```
 
 ```sh
 pas/run_tests.sh                                  # needs fpc 3.2.2 and python3

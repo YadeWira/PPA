@@ -36,6 +36,20 @@ type
 
 procedure CodeImage(var px: TPixels; enc: PArithEncoder; dec: PArithDecoder);
 
+type
+  { The model of plain bytes (a file's chunks, streams kept as bytes):
+    orders 0 to 3, mixed. It keeps learning from one call to the next. }
+  TByteModel = record
+    t: array[0..3] of array of TAdaptiveBit;   { see TCounter: p xor $8000 }
+    w: array[0..7, 0..4] of Integer;
+    hist: Cardinal;    { the last bytes coded }
+    procedure Init;
+  end;
+
+{ data[first .. first + n - 1]: encoded (enc given) or decoded into it }
+procedure CodeBytes(var m: TByteModel; var data: TBytes; first, n: SizeInt;
+  enc: PArithEncoder; dec: PArithDecoder);
+
 implementation
 
 const
@@ -50,8 +64,30 @@ const
   FILTER_LIMIT = 30;
 
 type
+  { TAdaptiveBit's counter, its probability kept as p xor $8000: memory
+    filled with zeros (as SetLength gives it) is every counter at 1/2, so a
+    model of millions of counters starts without a loop over them }
+  TCounter = record
+    q: Word;
+    n: Byte;
+  end;
+
+function CounterP(const c: TCounter): Integer; inline;
+begin
+  Result := c.q xor $8000;
+end;
+
+procedure CounterUpdate(var c: TCounter; bit, limit: Integer); inline;
+var a: TAdaptiveBit;
+begin
+  a.p := c.q xor $8000; a.n := c.n;
+  a.Update(bit, limit);
+  c.q := a.p xor $8000; c.n := a.n;
+end;
+
+type
   TModel = record
-    t: array[0..NCTX - 1] of array of TAdaptiveBit;
+    t: array[0..NCTX - 1] of array of TCounter;
     w: array[0..MIXER_SETS - 1, 0..NIN - 1] of Integer;
     filt: array[0..5, 1..7] of TAdaptiveBit;
   end;
@@ -61,8 +97,7 @@ var i, j: Integer;
 begin
   for i := 0 to NCTX - 1 do begin
     m.t[i] := nil;
-    SetLength(m.t[i], TABLE_MASK + 1);
-    for j := 0 to TABLE_MASK do m.t[i][j].Init;
+    SetLength(m.t[i], TABLE_MASK + 1);   { zeros: every counter at 1/2 }
   end;
   for i := 0 to MIXER_SETS - 1 do
     for j := 0 to NIN - 1 do m.w[i, j] := (1 shl 16) div NCTX;
@@ -71,7 +106,7 @@ end;
 
 { hashes wrap around on purpose }
 {$push}{$Q-}{$R-}
-function Hash(a, b, c: Cardinal): Cardinal; inline;
+function Hash(a, b, c: Cardinal): Cardinal;
 begin
   Result := (a * Cardinal(2654435761)) xor (b * Cardinal(2246822519)) xor (c * Cardinal(3266489917));
   Result := Result xor (Result shr 15);
@@ -155,7 +190,7 @@ begin
           dot := 0;
           for i := 0 to NCTX - 1 do begin
             idx[i] := Slot(ctxBase[i], partial);
-            st[i] := Stretch(m.t[i][idx[i]].p);
+            st[i] := Stretch(CounterP(m.t[i][idx[i]]));
             Inc(dot, (m.w[ws, i] * st[i]) div 8192);
           end;
           st[NCTX] := 256;
@@ -170,12 +205,83 @@ begin
             if m.w[ws, i] > W_MAX then m.w[ws, i] := W_MAX;
             if m.w[ws, i] < -W_MAX then m.w[ws, i] := -W_MAX;
           end;
-          for i := 0 to NCTX - 1 do m.t[i][idx[i]].Update(bit, COUNTER_LIMIT);
+          for i := 0 to NCTX - 1 do CounterUpdate(m.t[i][idx[i]], bit, COUNTER_LIMIT);
           partial := partial * 2 + Cardinal(bit);
         end;
         if dec <> nil then px.data[row + x] := Byte(partial and $FF);
       end;
     end;
+  end;
+end;
+
+const
+  BYTE_TABLE_BITS = 18;
+  BYTE_TABLE_MASK = (1 shl BYTE_TABLE_BITS) - 1;
+  BYTE_LIMIT = 127;
+
+procedure TByteModel.Init;
+var i, j: Integer;
+begin
+  for i := 0 to 3 do begin
+    t[i] := nil;
+    SetLength(t[i], BYTE_TABLE_MASK + 1);   { zeros: every counter at 1/2 }
+  end;
+  for i := 0 to 7 do for j := 0 to 4 do w[i, j] := (1 shl 16) div 4;
+  hist := 0;
+end;
+
+{$push}{$Q-}{$R-}
+function ByteSlot(order: Integer; hist, partial: Cardinal): Cardinal; inline;
+var h: Cardinal;
+begin
+  case order of
+    0: h := 0;
+    1: h := hist and $FF;
+    2: h := hist and $FFFF;
+  else h := hist and $FFFFFF;
+  end;
+  h := (h + Cardinal(order) shl 24) * Cardinal(2654435761);
+  Result := ((h shr (32 - BYTE_TABLE_BITS)) xor ((partial * Cardinal(2246822519)) shr (32 - BYTE_TABLE_BITS))) and BYTE_TABLE_MASK;
+end;
+{$pop}
+
+procedure CodeBytes(var m: TByteModel; var data: TBytes; first, n: SizeInt;
+  enc: PArithEncoder; dec: PArithDecoder);
+var
+  q: SizeInt; j, i, bit, dot, p, err, value: Integer;
+  partial: Cardinal; idx: array[0..3] of Cardinal; st: array[0..4] of Integer;
+begin
+  for q := first to first + n - 1 do begin
+    if enc <> nil then value := data[q] else value := 0;
+    partial := 1;
+    for j := 7 downto 0 do begin
+      dot := 0;
+      for i := 0 to 3 do begin
+        idx[i] := ByteSlot(i, m.hist, partial);
+        st[i] := Stretch(m.t[i][idx[i]].p xor $8000);
+        Inc(dot, (m.w[j, i] * st[i]) div 8192);
+      end;
+      st[4] := 256;
+      Inc(dot, (m.w[j, 4] * st[4]) div 8192);
+      p := Squash(dot div 8);
+      if enc <> nil then begin bit := (value shr j) and 1; enc^.Encode(bit, p); end
+      else bit := dec^.Decode(p);
+      err := ((bit shl 16) - p) div 16;
+      for i := 0 to 4 do begin
+        m.w[j, i] := m.w[j, i] + (st[i] * err * LEARNING_RATE) div 65536;
+        if m.w[j, i] > W_MAX then m.w[j, i] := W_MAX;
+        if m.w[j, i] < -W_MAX then m.w[j, i] := -W_MAX;
+      end;
+      for i := 0 to 3 do begin
+        m.t[i][idx[i]].p := m.t[i][idx[i]].p xor $8000;
+        m.t[i][idx[i]].Update(bit, BYTE_LIMIT);
+        m.t[i][idx[i]].p := m.t[i][idx[i]].p xor $8000;
+      end;
+      partial := partial * 2 + Cardinal(bit);
+    end;
+    value := Integer(partial and $FF);
+    if dec <> nil then data[q] := value;
+    m.hist := ((m.hist shl 8) or Cardinal(value)) and $FFFFFF;
   end;
 end;
 

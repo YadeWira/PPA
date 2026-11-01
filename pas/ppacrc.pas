@@ -68,7 +68,7 @@ end;
 
 function Adler32(adler: LongWord; const a: TBytes; first, len: SizeInt): LongWord;
 const
-  BASE = 65521;
+  ADLER_BASE = 65521;
   { the most bytes before s2 can overflow 32 bits (zlib's NMAX) }
   NMAX = 5552;
 var s1, s2: LongWord; i, n: SizeInt;
@@ -82,7 +82,7 @@ begin
       Inc(s1, a[i]); Inc(s2, s1);
       Inc(i); Dec(n);
     end;
-    s1 := s1 mod BASE; s2 := s2 mod BASE;
+    s1 := s1 mod ADLER_BASE; s2 := s2 mod ADLER_BASE;
   end;
   Result := (s2 shl 16) or s1;
 end;

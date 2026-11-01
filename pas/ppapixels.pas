@@ -58,6 +58,12 @@ function Channels(colorType, depth: Byte): Integer;
   for JDAT and JDAA (they are JPEG). }
 function StreamImage(const p: TPng; s: SizeInt; out info: TImageInfo): Boolean;
 
+{ px's layout for the image (bpp, passes, filters and data sized, not
+  filled); False if the image is not valid or too large }
+function InitLayout(const info: TImageInfo; out px: TPixels): Boolean;
+{ How many filtered bytes the image takes (filter bytes included) }
+function FilteredSize(const px: TPixels): SizeInt;
+
 { The image's filtered bytes -> px. False if they do not fit the image. }
 function Unfilter(const plain: TBytes; const info: TImageInfo; out px: TPixels): Boolean;
 { px -> the filtered bytes }
@@ -157,11 +163,8 @@ begin
   Result := True;
 end;
 
-function Unfilter(const plain: TBytes; const info: TImageInfo; out px: TPixels): Boolean;
-var
-  ch, i: Integer; bits, need: SizeInt;
-  pi_, y, x, rb, src, dst, prior, bpp: SizeInt;
-  f: Byte; a, b, c: Integer;
+function InitLayout(const info: TImageInfo; out px: TPixels): Boolean;
+var ch: Integer; bits: SizeInt;
 begin
   Result := False;
   px := Default(TPixels);
@@ -169,10 +172,25 @@ begin
   ch := Channels(info.colorType, info.depth);
   if (ch = 0) or (info.interlace > 1) or (info.width = 0) or (info.height = 0) then Exit;
   bits := SizeInt(ch) * info.depth;
-  bpp := (bits + 7) div 8;
-  px.bpp := bpp;
-  if not Layout(px, bits) then Exit;
-  need := Length(px.data) + Length(px.filters);
+  px.bpp := (bits + 7) div 8;
+  Result := Layout(px, bits);
+end;
+
+function FilteredSize(const px: TPixels): SizeInt;
+begin
+  Result := Length(px.data) + Length(px.filters);
+end;
+
+function Unfilter(const plain: TBytes; const info: TImageInfo; out px: TPixels): Boolean;
+var
+  i: Integer; need: SizeInt;
+  pi_, y, x, rb, src, dst, prior, bpp: SizeInt;
+  f: Byte; a, b, c: Integer;
+begin
+  Result := False;
+  if not InitLayout(info, px) then Exit;
+  bpp := px.bpp;
+  need := FilteredSize(px);
   if Length(plain) < need then Exit;
 
   src := 0;

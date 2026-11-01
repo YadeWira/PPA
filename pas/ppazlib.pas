@@ -53,6 +53,11 @@ type
 function ZlibChoices(const plain: TBytes; const prm: TZlibParams; ref: PZStream;
   out z: TZStream): Boolean;
 
+{ The zlib parameters that give z's blocks and tokens, if there are any:
+  levels from the header's FLEVEL (any with a bare deflate stream), the
+  window from its CINFO up to 15, every strategy and memLevel. }
+function FindZlibParams(const z: TZStream; out prm: TZlibParams): Boolean;
+
 { The zlib header zlib writes for these parameters }
 function ZlibHeader(const prm: TZlibParams): Word;
 
@@ -656,6 +661,31 @@ begin
   z.raw := True;
   z.plain := plain;
   Result := not diverged and ((ref = nil) or (nBlocks = Length(ref^.blocks)));
+end;
+
+function FindZlibParams(const z: TZStream; out prm: TZlibParams): Boolean;
+var lvMin, lvMax, wbMin, lv, st, ml, wb: Integer; e: TZStream;
+const ML_ORDER: array[0..8] of Integer = (8, 9, 7, 6, 5, 4, 3, 2, 1);
+begin
+  Result := False;
+  prm := Default(TZlibParams);
+  case z.header[1] shr 6 of
+    0: begin lvMin := 1; lvMax := 1; end;
+    1: begin lvMin := 2; lvMax := 5; end;
+    2: begin lvMin := 6; lvMax := 6; end;
+  else begin lvMin := 7; lvMax := 9; end;
+  end;
+  wbMin := (z.header[0] shr 4) + 8;
+  if z.raw then begin lvMin := 1; lvMax := 9; wbMin := 15; end;
+  for wb := 15 downto wbMin do
+    for ml := 0 to 8 do
+      for st := Z_DEFAULT_STRATEGY to Z_FIXED do
+        for lv := lvMin to lvMax do begin
+          { huffman and rle do not depend on the level }
+          if (st in [Z_HUFFMAN_ONLY, Z_RLE]) and (lv <> lvMin) then Continue;
+          prm.level := lv; prm.strategy := st; prm.memLevel := ML_ORDER[ml]; prm.wbits := wb;
+          if ZlibChoices(z.plain, prm, @z, e) then Exit(True);
+        end;
 end;
 
 procedure MakeTables;
