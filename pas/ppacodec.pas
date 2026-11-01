@@ -42,6 +42,10 @@ var
     and their deflate streams rebuilt (Decompress) go to as many. 1: none,
     everything in the calling thread. }
   CodecThreads: Integer = 1;
+  { the images ppafast takes (8-bit samples, not a palette) with it, about
+    ten times as quick to decompress; False: every image with ppamodel's
+    slower model, a few percent smaller (ppa --max) }
+  FastModel: Boolean = True;
 
 type
   TCodecStats = record
@@ -57,7 +61,7 @@ function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out w
 
 implementation
 
-uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppathreads,
+uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppafast, ppathreads,
   pjacodec, pjamodel, pjav7;
 
 const
@@ -65,6 +69,9 @@ const
   MODE_IMAGE = 1;
   { a JNG's JPEG (JDAT, JDAA) through PJA's codec, its stream a substream }
   MODE_JPEG = 2;
+  { an image with ppafast's model (MODE_IMAGE: with ppamodel's) }
+  MODE_FAST = 3;
+  IMAGE_MODES = [MODE_IMAGE, MODE_FAST];
   { A non-interlaced image goes in horizontal bands of at least this many
     unfiltered bytes, at most MAX_BANDS, each its own arithmetic stream with
     its own model, coded and decoded in parallel. The count depends only on
@@ -73,6 +80,11 @@ const
     0.7%, 1.2%; a 1.9 MB RGBA frame in 2 bands 1.6%. }
   BAND_BYTES = 2 * 1024 * 1024;
   MAX_BANDS = 16;
+  { the slow model for an image the fast one takes only when it is this
+    many percent smaller on a sample of SAMPLE_BYTES (SlowMuchSmaller) }
+  SLOW_GAIN = 10;
+  SAMPLE_BYTES = 256 * 1024;
+  INTERLACED_TRY_BYTES = 1024 * 1024;
 
 var
   { For the tests only, from the environment: PPA_TEST_BAND_BYTES makes the
@@ -251,6 +263,31 @@ begin
   Result := True;
 end;
 
+{ Whether the slow model makes an image (one the fast model takes) much
+  smaller: both code a sample of it, the lines in the middle (SAMPLE_BYTES
+  of them), or all of it when small; the slow one must be SLOW_GAIN percent
+  smaller. Drawings are where it is (up to half the size); photographs
+  are within a few percent either way, and keep the fast model. }
+function SlowMuchSmaller(var px: TPixels): Boolean;
+var y0, rows, rb, h: SizeInt; e: TArithEncoder; sFast, sSlow: SizeInt;
+begin
+  Result := False;
+  rb := px.passes[0].rowBytes; h := px.passes[0].height;
+  if (rb = 0) or (h = 0) then Exit;
+  if Length(px.passes) <> 1 then begin
+    { interlaced: no band to take, the whole image or nothing }
+    if FilteredSize(px) > INTERLACED_TRY_BYTES then Exit;
+    y0 := 0; rows := High(SizeInt);
+  end else begin
+    rows := SAMPLE_BYTES div rb;
+    if rows < 8 then rows := 8;
+    if rows >= h then begin y0 := 0; rows := h; end else y0 := (h - rows) div 2;
+  end;
+  e.Init; CodeImageFast(px, y0, rows, @e, nil); sFast := Length(e.Finish);
+  e.Init; CodeImageBand(px, y0, rows, @e, nil); sSlow := Length(e.Finish);
+  Result := Int64(sSlow) * 100 < Int64(sFast) * (100 - SLOW_GAIN);
+end;
+
 { Whether stream s can be kept as an image, and its plan }
 function PlanImage(const p: TPng; s: SizeInt; out plan: TStreamPlan): Boolean;
 var info: TImageInfo; e: TZStream; back: TBytes; a: TBytes;
@@ -271,7 +308,8 @@ begin
   e.endPad := plan.z.endPad; e.tail := plan.z.tail;
   back := Encode(e);
   if (Length(back) <> Length(a)) or not CompareMem(@back[0], @a[0], Length(a)) then Exit;
-  plan.mode := MODE_IMAGE;
+  if FastModel and FastEligible(info) and not SlowMuchSmaller(plan.px) then plan.mode := MODE_FAST
+  else plan.mode := MODE_IMAGE;
   Result := True;
 end;
 
@@ -296,7 +334,8 @@ var
   var e: TArithEncoder;
   begin
     e.Init;
-    CodeImageBand(plans[jobs[k].s].px, jobs[k].firstRow, jobs[k].rows, @e, nil);
+    if plans[jobs[k].s].mode = MODE_FAST then CodeImageFast(plans[jobs[k].s].px, jobs[k].firstRow, jobs[k].rows, @e, nil)
+    else CodeImageBand(plans[jobs[k].s].px, jobs[k].firstRow, jobs[k].rows, @e, nil);
     subs[k] := e.Finish;
   end;
 
@@ -313,7 +352,7 @@ begin
     part, and the streams' are independent }
   ParallelFor(Length(p.streams), CodecThreads, @PlanOne);
   for s := 0 to High(p.streams) do begin
-    if plans[s].mode in [MODE_IMAGE, MODE_JPEG] then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
+    if plans[s].mode in IMAGE_MODES + [MODE_JPEG] then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
     else begin Inc(stats.rawStreams); Inc(stats.rawBytes, Length(p.streams[s].data)); end;
   end;
 
@@ -341,7 +380,7 @@ begin
     w.PutVar(p.streams[s].header + 1);
     w.PutVar(p.streams[s].frame + 1);
     w.Put(plans[s].mode);
-    if plans[s].mode = MODE_IMAGE then
+    if plans[s].mode in IMAGE_MODES then
       with plans[s] do begin
         w.Put(prm.level); w.Put(prm.strategy); w.Put(prm.memLevel); w.Put(prm.wbits);
         w.Put(Ord(z.raw) or (Ord(z.adlerOk) shl 1));
@@ -364,11 +403,11 @@ begin
   { then each band of each image, in order, in parallel }
   nJobs := 0;
   for s := 0 to High(p.streams) do
-    if plans[s].mode = MODE_IMAGE then Inc(nJobs, BandCount(plans[s].px));
+    if plans[s].mode in IMAGE_MODES then Inc(nJobs, BandCount(plans[s].px));
   jobs := nil; SetLength(jobs, nJobs);
   nJobs := 0;
   for s := 0 to High(p.streams) do
-    if plans[s].mode = MODE_IMAGE then AddBands(jobs, nJobs, s, plans[s].px);
+    if plans[s].mode in IMAGE_MODES then AddBands(jobs, nJobs, s, plans[s].px);
   subs := nil; SetLength(subs, nJobs);
   ParallelFor(nJobs, BandThreads, @CodeBand);
 
@@ -433,7 +472,8 @@ var
   var d: TArithDecoder;
   begin
     d.Init(Copy(stream, subPos[k + 1], subLen[k + 1]), 0);
-    CodeImageBand(pxs[jobs[k].s], jobs[k].firstRow, jobs[k].rows, nil, @d);
+    if modes[jobs[k].s] = MODE_FAST then CodeImageFast(pxs[jobs[k].s], jobs[k].firstRow, jobs[k].rows, nil, @d)
+    else CodeImageBand(pxs[jobs[k].s], jobs[k].firstRow, jobs[k].rows, nil, @d);
   end;
 
   procedure Rebuild(k: SizeInt);
@@ -447,7 +487,7 @@ var
       if r.Ok then p.streams[k].data := j else p.streams[k].data := nil;
       Exit;
     end;
-    if modes[k] <> MODE_IMAGE then Exit;
+    if not (modes[k] in IMAGE_MODES) then Exit;
     ZlibChoices(plains[k], prms[k], nil, e);
     e.raw := zs[k].raw; e.adlerOk := zs[k].adlerOk; e.header := zs[k].header;
     e.endPad := zs[k].endPad; e.tail := zs[k].tail;
@@ -545,9 +585,9 @@ begin
     p.streams[s].header := Int64(r.GetVar(nChunks)) - 1;
     p.streams[s].frame := Int64(r.GetVar(nChunks)) - 1;
     modes[s] := r.Get;
-    if not r.ok or (modes[s] > MODE_JPEG) then Exit(Bad('bad structure'));
+    if not r.ok or (modes[s] > MODE_FAST) then Exit(Bad('bad structure'));
     if (modes[s] = MODE_JPEG) and not (p.streams[s].kind in [skJdat, skJdaa]) then Exit(Bad('bad structure'));
-    if modes[s] = MODE_IMAGE then begin
+    if modes[s] in IMAGE_MODES then begin
       prms[s].level := r.Get; prms[s].strategy := r.Get; prms[s].memLevel := r.Get; prms[s].wbits := r.Get;
       if (prms[s].level < 1) or (prms[s].level > 9) or (prms[s].strategy > Z_FIXED) or
          (prms[s].memLevel < 1) or (prms[s].memLevel > 9) or (prms[s].wbits < 8) or (prms[s].wbits > 15) then
@@ -575,8 +615,9 @@ begin
     if modes[s] = MODE_BYTES then begin
       SetLength(p.streams[s].data, streamLen[s]);
       CodeBytes(rm, p.streams[s].data, 0, streamLen[s], nil, @dec);
-    end else if modes[s] = MODE_IMAGE then begin
+    end else if modes[s] in IMAGE_MODES then begin
       if not StreamImage(p, s, info) or not InitLayout(info, pxs[s]) then Exit(Bad('bad image header'));
+      if (modes[s] = MODE_FAST) and not FastEligible(info) then Exit(Bad('bad structure'));
       if FilteredSize(pxs[s]) + Int64(Length(pxTails[s])) > MAX_INFLATE_RATIO * streamLen[s] + 1024 then
         Exit(Bad('image larger than its stream can hold'));
       Inc(nJobs, BandCount(pxs[s]));
@@ -595,13 +636,13 @@ begin
   jobs := nil; SetLength(jobs, nJobs);
   nJobs := 0;
   for s := 0 to nStreams - 1 do
-    if modes[s] = MODE_IMAGE then AddBands(jobs, nJobs, s, pxs[s]);
+    if modes[s] in IMAGE_MODES then AddBands(jobs, nJobs, s, pxs[s]);
   if BandsReverse then
     for i := nJobs - 1 downto 0 do DecodeBand(i)
   else
     ParallelFor(nJobs, BandThreads, @DecodeBand);
   for s := 0 to nStreams - 1 do
-    if modes[s] = MODE_IMAGE then begin
+    if modes[s] in IMAGE_MODES then begin
       pxs[s].tail := pxTails[s];
       plains[s] := Refilter(pxs[s]);
       pxs[s] := Default(TPixels);
@@ -610,7 +651,7 @@ begin
     on as many threads as given }
   ParallelFor(nStreams, CodecThreads, @Rebuild);
   for s := 0 to nStreams - 1 do
-    if (modes[s] in [MODE_IMAGE, MODE_JPEG]) and (Length(p.streams[s].data) <> streamLen[s]) then
+    if (modes[s] in IMAGE_MODES + [MODE_JPEG]) and (Length(p.streams[s].data) <> streamLen[s]) then
       Exit(Bad('image stream damaged or of another length'));
 
   data := Compose(p);

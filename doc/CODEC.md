@@ -24,7 +24,7 @@ over a large corpus, is the oracle for the whole project.
 | 2b | `ppazlib` | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | in progress: zlib's choices exact |
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
 | 4 | `ppaarith` | binary arithmetic coder, adaptive bit counters, stretch and squash | done |
-| 5 | `ppamodel` | context modelling of the pixels, the deflate corrections and the raw bytes | second version |
+| 5 | `ppafast`, `ppamodel` | modelling the pixels (the fast model by default, the slow one with `--max`), the deflate corrections and the raw bytes | fast model; slow one, second version |
 | 6 | `ppacodec` | the compressed stream, verified at compress time | done |
 | 7 | `ppaformat`, `ppacli` | the `.ppa` file (`FORMAT.md`) and the `ppa` command (`CLI.md`) | done |
 
@@ -205,12 +205,15 @@ and the substreams, each its own arithmetic stream. Substream 0 holds:
   a byte model (orders 0 to 3, mixed): the kind of file; each chunk's type,
   length and CRC when wrong, and either the image stream it belongs to (and
   an fdAT's sequence number) or its data; the bytes after the end; and for
-  each image stream how it is kept;
+  each image stream how it is kept (as bytes, as an image with the fast
+  model or with the slow one, as PJA's stream);
 - then the image streams kept as **bytes**, in order (the byte model, one
   that goes on learning from stream to stream).
 
 And each image stream kept as an **image** follows, band by band, a
-substream each (`CodeImageBand`). A non-interlaced image goes in horizontal
+substream each: `CodeImageFast` for the images of 8-bit samples that are
+not a palette, unless the slow model is much smaller (below);
+`CodeImageBand` for the others, and for every image with `--max`. A non-interlaced image goes in horizontal
 bands of at least 2 MB unfiltered (`BAND_BYTES`), at most 16; an
 interlaced one in one. Each band has its own model and reads nothing
 before its own first line (its first line has none above, its match model
@@ -314,6 +317,65 @@ model, a bias; two weight sets (channel and bit; activity and bit)
 averaged; an APM; the counters by nibble in tables of 2^22. The C loop and
 the Pascal reference give the same streams.
 
+## Layer 5, the fast model (01/11/2026)
+
+`ppafast`, for the images of 8-bit samples that are not a palette (gray,
+gray and alpha, RGB, RGBA): the photographs and most of what is drawn. The
+slow model (`ppamodel`, above) codes each byte bit by bit, eight decisions
+each from eight contexts and two mixers: about 1 µs a byte. This one
+predicts each sample and codes the residual with few decisions, about ten
+times as quick, within a few percent of its size.
+
+- **The prediction**: eight predictors, blended by how wrong each was
+  around the sample (W twice, N twice, NW, NE, WW, NN), each weighed by
+  1/(e+2)^2 (a table, 16 bits). A sample's own channel for gray and alpha
+  (W, N, NE, W + N - NW, MED, (W + NE) / 2, 2W - WW, 2N - NN); a colour
+  channel predicts its difference to the channel before with the same
+  eight, which is where photographs decoded from JPEG (Y, Cb, Cr) give
+  most. No bias correction (CALIC's made the residual worse here).
+- **The residual**, folded to -128..127: zero or not (two counters mixed,
+  then an APM), a second guess where values repeat (a match running, or a
+  flat area: the value this exact neighbourhood had last, or W, N, NE, when
+  farther than 4 from the prediction; four counters mixed), the sign (one
+  counter), the magnitude's class in unary (the first two from two
+  counters mixed) and its bits (one counter each). The contexts: the signs
+  of the residuals around and of the channels before, an energy (the
+  residuals around, the channels before, how far apart the predictors
+  are), the exact value of the channel before with the prediction's
+  difference to it (hashed), and the match model's state.
+- **A match model** (the last 6 bytes hashed): what drawings repeat.
+- The loop in C (`ppafastc.c`, SSE2 for the blend where the compiler has it,
+  the same results without), its Pascal reference line for line, the suite
+  demands the same streams from both, and CI on six platforms. A 32-bit
+  x86 build takes the plain C path: the same streams.
+
+Measured on 01/11/2026, against the slow model on the same images: the 5
+photos used to tune it, 102.4% of its size; 7 generated ones (drawings,
+icons, RGBA, gray), 106%; the 20 photos of the benchmark, through the
+whole codec, 100.4% (some photos smaller than with the slow model). But
+drawings can lose far more: in the corpus, 117 of its 152 images of 8-bit
+samples are over 15% larger, Atari bitmaps 60-85%, rendered RGBA
+animation frames 20-36%, tiny frames (22x22) twice as large.
+
+**The choice** (`SlowMuchSmaller`, compressing only: the stream keeps it):
+both models code a sample of the image, the lines in its middle (256 KB
+of them) or all of it when smaller, and the slow model takes the image
+when it is at least 10% smaller there. Photographs stay with the fast one;
+the corpus goes from 57.37% (every image fast) to 54.88% (the slow model
+everywhere: 51.03%). The sample costs about 0.3 s a photo when
+compressing. `--max` takes the slow model for every image.
+
+**Decompressing the 20 photos, one thread** (116 MB of pixels): 116 s to
+27.5 s. The model was 90% of it; then zlib's choices rebuilt, the filters,
+the deflate bits, the Adler-32:
+
+- **zlib's choices** (layer 2b): deflate's loop in C and its hash chains
+  skipped (above); the tables of positions sized by the input (two
+  entries a byte, 2^12 to 2^19). 0.78 s to 0.47 s on the 1920x1080 photo.
+- **The filters, the CRC-32, the Adler-32, the deflate bit writer**: their
+  bounds checked once, not at each byte (the filters a loop per filter
+  type, the CRC four bytes at a time, the bit writer 32 bits at a time).
+
 ## Speed, first pass (31/10/2026)
 
 Measured first, phase by phase (`measure_phases`), on the corpus's
@@ -416,6 +478,7 @@ loop, -O2: none above the noise.
 | 31/10/2026 | the six CI platforms (`.github/test.sh`) | the same `.ppa` bytes on all six |
 | 01/11/2026 | layer 5, second version, the corpus's 224 images | **16.7 MB = 50.89% of the zlib streams** (the first: 59.0%), every one decoded back; 383 s coding and decoding, one thread |
 | 01/11/2026 | JNG through PJA 0.6.0 (v7), the corpus's 13 JNG files (85,403 bytes) | 63.48% (as bytes: 88.54%), every one back |
+| 01/11/2026 | the fast model (`ppafast`) for 8-bit images, zlib's chains skipped, the filters and checksums unchecked inside; the 20 photos, one thread | every one back byte for byte; `ppa x` 116.0 s -> 27.5 s, `ppa a` 240.8 s -> 61.9 s; 23,669,672 bytes (the slow model: 23,569,576) |
 | 01/11/2026 | the model's loop without its two costly branches, its tables aligned, its mixer on vectors; the 20 photos, one thread | the same `.ppa` bytes; `ppa x` 155.1 s -> 116.0 s, `ppa a` 300.4 s -> 240.8 s |
 | 01/11/2026 | the command, 8 threads, bands, the whole corpus (77 files) | every one back byte for byte; the 70 of the family 32.9 MB -> **16.8 MB = 51.11%** (was 58.81%), the 7 others stored; `ppa a` 220 s, `ppa x` 111 s |
 | 31/10/2026 | layer 6, the corpus's 70 files of the family (32.9 MB) | **19.4 MB = 58.81%**, every one back; 211 image streams as images, 30 as bytes (13 not zlib's, 17 JNG JPEGs); 2,387 s for compressing, verifying and decompressing, one thread: the zlib parameter search and the model are the slow parts |

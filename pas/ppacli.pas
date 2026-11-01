@@ -52,6 +52,8 @@ begin
   Writeln('  -f, --force        replace an existing output (only with one that verified)');
   Writeln('  -th N, --threads=N threads (default: the processors, up to 8), one file each');
   Writeln('  --no-verify        a: do not decompress the result to check it first');
+  Writeln('  --max              a: the slow model for every image (by default only where it is');
+  Writeln('                     10% smaller): smaller still, ten times slower to extract');
   Writeln('  --max-output=SIZE  x: refuse a declared original above SIZE (256M; K/M/G; 0 = none)');
   Writeln('  -n, --dry-run      do everything but write');
   Writeln('  -q, --quiet        only errors');
@@ -270,6 +272,7 @@ begin
     else if (a = '-q') or (a = '--quiet') then quiet := True
     else if (a = '-n') or (a = '--dry-run') then dryRun := True
     else if a = '--no-verify' then noVerify := True
+    else if a = '--max' then FastModel := False
     else if (a = '-th') or (Copy(a, 1, 10) = '--threads=') then begin
       if a = '-th' then begin Inc(i); if i > ParamCount then UsageError('-th needs a number'); v := ParamStr(i); end
       else v := Copy(a, 11, MaxInt);

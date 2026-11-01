@@ -16,7 +16,7 @@ python3 "$PAS/collisions.py" "$PAS"
 echo "== build"
 # the C part (CC: the platform's C compiler)
 sh "$PAS/build_c.sh" "$OUT/c"
-for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_pixels test_arith measure_model test_blake3 test_codec test_format; do
+for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_pixels test_arith measure_model measure_fast test_blake3 test_codec test_format; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -Fu"$PPA/vendor/pja/pas" -Fi"$PPA/vendor/pja/pas" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -69,11 +69,20 @@ echo "== layer 5: the model (every image coded and decoded back)"
 PPA_NOC=1 "$OUT/measure_model" "$PPA/tests/png" | tail -1 > "$OUT/model_pas.txt"
 [ "$(sed 's/, [0-9.]* s,/,/' "$OUT/model_c.txt")" = "$(sed 's/, [0-9.]* s,/,/' "$OUT/model_pas.txt")" ] \
   || { echo "FAIL: the C and Pascal pixel loops give different streams"; cat "$OUT/model_pas.txt"; exit 1; }
+# the fast model (ppafast): every 8-bit image back, the same streams from C and Pascal
+"$OUT/measure_fast" "$PPA/tests/png" | tail -1 | tee "$OUT/fast_c.txt"
+PPA_NOC=1 "$OUT/measure_fast" "$PPA/tests/png" | tail -1 > "$OUT/fast_pas.txt"
+[ "$(sed 's/, encode .*, \([0-9]* failures\)/, \1/' "$OUT/fast_c.txt")" = "$(sed 's/, encode .*, \([0-9]* failures\)/, \1/' "$OUT/fast_pas.txt")" ] \
+  || { echo "FAIL: the C and Pascal fast models give different streams"; cat "$OUT/fast_pas.txt"; exit 1; }
+for d in "${dirs[@]}"; do "$OUT/measure_fast" "$d" | tail -1; done
 
 echo "== layer 6: the codec (every file compressed, verified, decompressed)"
 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 # bands: 4 KB ones, so that the samples have several, decoded last first
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
+# --max: every image with the slow model
+PPA_TEST_MAX=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
+PPA_TEST_MAX=1 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 for d in "${dirs[@]}"; do "$OUT/test_codec" "$d" 1 | tail -1; done
 
 echo "== layer 7: the .ppa file and the command"

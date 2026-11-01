@@ -20,6 +20,8 @@ var
   taken, failures, inBytes, outBytes, notTaken, images, raws: Int64;
   t0: TDateTime;
 begin
+  { PPA_TEST_MAX=1: every image with the slow model (ppa --max) }
+  if GetEnvironmentVariable('PPA_TEST_MAX') = '1' then FastModel := False;
   dir := ParamStr(1); minimum := StrToIntDef(ParamStr(2), 1); verbose := ParamStr(3) = '-v';
   files := TStringList.Create; files.Sorted := True;
   if FindFirst(dir + '/*', faAnyFile, sr) = 0 then begin
