@@ -14,7 +14,7 @@ echo "== source guards"
 python3 "$PAS/collisions.py" "$PAS"
 
 echo "== build"
-for prog in test_png test_png_corrupt; do
+for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -25,5 +25,20 @@ echo "== layer 1: file <-> chunks and image streams"
 "$OUT/test_png_corrupt" "$PPA/tests/png" 512 | tail -1
 IFS=: read -ra dirs <<< "${PNG_CORPUS:-}"
 for d in "${dirs[@]}"; do "$OUT/test_png" "$d" 1 | tail -1; done
+
+echo "== layer 2a: zlib stream <-> its bytes and its encoder's choices"
+"$OUT/test_deflate" "$PPA/tests/png" 16 | tail -1
+# what it decodes are the bytes zlib decodes
+rm -rf "$OUT/zdump"; mkdir -p "$OUT/zdump"
+"$OUT/test_deflate" "$PPA/tests/png" 1 -dump "$OUT/zdump" > "$OUT/zdump/list"
+python3 "$PPA/tests/zcheck.py" "$OUT/zdump"
+# every bit of the first 256 bytes of each stream and every cut: decoded or not, never different
+"$OUT/test_deflate_corrupt" "$PPA/tests/png" 256 | tail -1
+for d in "${dirs[@]}"; do
+  "$OUT/test_deflate" "$d" 1 | tail -1
+  rm -rf "$OUT/zdump"; mkdir -p "$OUT/zdump"
+  "$OUT/test_deflate" "$d" 1 -dump "$OUT/zdump" > "$OUT/zdump/list"
+  python3 "$PPA/tests/zcheck.py" "$OUT/zdump"
+done
 
 echo "all green"
