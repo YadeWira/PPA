@@ -69,13 +69,15 @@ One archive per set, 8 threads, on 01/11/2026; every file extracted and
 compared, and every one came back. Times are to write the archive / to
 extract it. PPA has no 7-Zip or zpaq-std plugin yet: "PPA, then 7-Zip" is
 the two in a row, `ppa a -th 8` on every file and then 7-Zip on the `.ppa`
-files (and the reverse to extract).
+files (and the reverse to extract). [aqueous](https://github.com/lifthrasiir/aqueous)'s
+`aqr` (its release of 01/11/2026, its default level `mid`) recompresses
+PNG itself.
 
-| set | PPA, then 7-Zip | 7-Zip | zpaq-std 2.0.3 |
-|---|---|---|---|
-| corpus (70) | **38.39%**, 214.1 / 108.2 s | 84.36%, 3.2 / 0.5 s | 85.45%, 0.3 / 0.3 s |
-| photos (20) | **58.54%**, 41.1 / 19.9 s | 99.11%, 3.8 / 1.0 s | 100.06%, 0.4 / 0.3 s |
-| generated (75) | **25.65%**, 30.6 / 14.2 s | 70.70%, 1.2 / 0.2 s | 71.94%, 0.2 / 0.2 s |
+| set | PPA, then 7-Zip | 7-Zip | zpaq-std 2.0.3 | aqueous 0.0.20261101 |
+|---|---|---|---|---|
+| corpus (70) | **38.39%**, 214.1 / 108.2 s | 84.36%, 3.2 / 0.5 s | 85.45%, 0.3 / 0.3 s | 94.17%, 2.0 / 0.3 s |
+| photos (20) | **58.54%**, 41.1 / 19.9 s | 99.11%, 3.8 / 1.0 s | 100.06%, 0.4 / 0.3 s | 81.42%, 1.3 / 0.4 s |
+| generated (75) | **25.65%**, 30.6 / 14.2 s | 70.70%, 1.2 / 0.2 s | 71.94%, 0.2 / 0.2 s | 52.27%, 0.9 / 0.2 s |
 
 In one archive the same pixels compress once: the corpus has the same
 images in several files (a PNG and an MNG of the same photo, an animation
