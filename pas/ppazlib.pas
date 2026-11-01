@@ -73,22 +73,42 @@ function FindZlibParams(const z: TZStream; out prm: TZlibParams; out choices: TZ
 function ZlibHeader(const prm: TZlibParams): Word;
 
 var
-  { longest_match in C (ppazlibc.c); False: in Pascal, the reference.
-    PPA_NOC=1 in the environment makes it False }
+  { deflate's loop and longest_match in C (ppazlibc.c); False: in Pascal,
+    the reference. PPA_NOC=1 in the environment makes it False }
   UseZlibC: Boolean = True;
 
 implementation
 
 {$L ppazlibc.o}
 
-function ppaz_longest(plain: PByte; n: SizeInt; prev: PSizeInt; wmask, scan, cur, limit, chain,
-  bestLen, nice: SizeInt; matchStart: PSizeInt): SizeInt; cdecl; external name 'ppaz_longest';
+type
+  { ppazlibc.c's zdeflate_t, field for field: the state of its deflate loop }
+  TZDeflate = record
+    plain: PByte; n: SizeInt;
+    wsize, wmask, maxDist, hashMask, hashShift: SizeInt;
+    head, prev, nx3, nx4, nx8: PSizeInt; ord, cnt: PLongWord; t3, t4, t8: PLongWord;
+    insH: SizeInt;
+    strstart, matchStart, prevMatch, winBase: SizeInt;
+    matchLength, prevLength, matchAvailable: SizeInt;
+    goodMatch, maxLazy, niceMatch, maxChain, filtered, fast: SizeInt;
+    tokLen, tokVal: PWord; nTok: SizeInt;
+    refLen, refVal: PWord; refN, checkNow, stop: SizeInt;
+    lfreq, dfreq: PInteger; symNext, symEnd: SizeInt;
+    lengthCode, distCode: PByte;
+    pending: SizeInt;
+  end;
+
+const
+  ZD_DONE = 0; ZD_FLUSH = 1; ZD_STOP = 2;
+
+function ppaz_deflate(var s: TZDeflate): SizeInt; cdecl; external name 'ppaz_deflate';
 
 const
   MIN_MATCH = 3;
   MAX_MATCH = 258;
   MIN_LOOKAHEAD = MAX_MATCH + MIN_MATCH + 1;
   TOO_FAR = 4096;
+  SKIP_BITS = 18;    { the skipped chains' tables: 2^SKIP_BITS positions each }
   L_CODES = 286;
   D_CODES = 30;
   BL_CODES = 19;
@@ -304,6 +324,13 @@ var
   hashBits, hashSize, hashMask, hashShift: Integer;
   head: array of SizeInt;
   prev: array of SizeInt;
+  { DeflateC's chains skipped (ppazlibc.c): for each position, the last one
+    before it with the same 3, 4 and 8 bytes, through the tables t3, t4 and
+    t8; its order in its hash chain, by cnt, each chain's insertions }
+  nx3, nx4, nx8: array of SizeInt;
+  chainOrd: array of LongWord;
+  cnt: array of LongWord;
+  t3, t4, t8: array of LongWord;
   insH: LongWord;
   strstart, matchStart, prevMatch, blockStart, winBase: SizeInt;
   matchLength, prevLength, matchAvailable: Integer;
@@ -363,12 +390,6 @@ var
     scanEnd := Win(scan + bestLen);
     if prevLength >= goodMatch then chainLength := chainLength shr 2;
     if nice > Lookahead then nice := Lookahead;
-    if UseZlibC then begin
-      bestLen := ppaz_longest(@plain[0], n, @prev[0], wmask, scan, curMatch, limit, chainLength,
-        bestLen, nice, @matchStart);
-      if bestLen <= Lookahead then Result := bestLen else Result := Lookahead;
-      Exit;
-    end;
     repeat
       match := curMatch;
       if (Win(match + bestLen) = scanEnd) and (Win(match + bestLen - 1) = scanEnd1) and
@@ -650,6 +671,49 @@ var
     if not stop then FlushBlock(True);
   end;
 
+  { DeflateFast or DeflateSlow in C (ppazlibc.c's ppaz_deflate), which
+    comes back here to flush each block }
+  procedure DeflateC(fast: Boolean);
+  var st: TZDeflate; r: SizeInt;
+  begin
+    SetLength(z.tokLen, n + 8); SetLength(z.tokVal, n + 8);
+    st := Default(TZDeflate);
+    st.plain := @plain[0]; st.n := n;
+    st.wsize := wsize; st.wmask := wmask; st.maxDist := maxDist;
+    st.hashMask := hashMask; st.hashShift := hashShift;
+    st.head := @head[0]; st.prev := @prev[0]; st.nx3 := @nx3[0]; st.nx4 := @nx4[0]; st.nx8 := @nx8[0];
+    st.ord := @chainOrd[0]; st.cnt := @cnt[0]; st.t3 := @t3[0]; st.t4 := @t4[0]; st.t8 := @t8[0];
+    st.insH := insH;
+    st.strstart := strstart; st.matchStart := matchStart; st.prevMatch := prevMatch; st.winBase := winBase;
+    st.matchLength := matchLength; st.prevLength := prevLength; st.matchAvailable := matchAvailable;
+    st.goodMatch := goodMatch; st.maxLazy := maxLazy; st.niceMatch := niceMatch; st.maxChain := maxChain;
+    st.filtered := Ord(prm.strategy = Z_FILTERED); st.fast := Ord(fast);
+    st.tokLen := @z.tokLen[0]; st.tokVal := @z.tokVal[0]; st.nTok := nTok;
+    if (ref <> nil) and (Length(ref^.tokLen) > 0) then begin
+      st.refLen := @ref^.tokLen[0]; st.refVal := @ref^.tokVal[0]; st.refN := Length(ref^.tokLen);
+    end;
+    st.lfreq := @ltree.freq[0]; st.dfreq := @dtree.freq[0];
+    st.symNext := symNext; st.symEnd := symEnd;
+    st.lengthCode := @LengthCode[0]; st.distCode := @DistCode[0];
+    repeat
+      st.checkNow := Ord(checkNow); st.stop := Ord(stop);
+      r := ppaz_deflate(st);
+      strstart := st.strstart; nTok := st.nTok; symNext := st.symNext; winBase := st.winBase;
+      if st.stop <> 0 then begin stop := True; diverged := True; end;
+      case r of
+        ZD_FLUSH: begin
+          FlushBlock(False);
+          st.nTok := nTok; st.symNext := symNext;
+        end;
+        ZD_DONE: begin
+          if not stop then FlushBlock(True);
+          Break;
+        end;
+      else Break;
+      end;
+    until False;
+  end;
+
 var wb: Integer;
 begin
   z := Default(TZStream);
@@ -661,6 +725,12 @@ begin
   hashShift := (hashBits + MIN_MATCH - 1) div MIN_MATCH;
   head := nil; SetLength(head, hashSize);
   prev := nil; SetLength(prev, wsize);
+  if UseZlibC then begin
+    nx3 := nil; SetLength(nx3, wsize); nx4 := nil; SetLength(nx4, wsize); nx8 := nil; SetLength(nx8, wsize);
+    chainOrd := nil; SetLength(chainOrd, wsize); cnt := nil; SetLength(cnt, hashSize);
+    t3 := nil; SetLength(t3, 1 shl SKIP_BITS); t4 := nil; SetLength(t4, 1 shl SKIP_BITS);
+    t8 := nil; SetLength(t8, 1 shl SKIP_BITS);
+  end;
   symEnd := (1 shl (prm.memLevel + 6)) - 1;
   goodMatch := CONFIG[prm.level, 0]; maxLazy := CONFIG[prm.level, 1];
   niceMatch := CONFIG[prm.level, 2]; maxChain := CONFIG[prm.level, 3];
@@ -679,6 +749,7 @@ begin
 
   if prm.strategy = Z_HUFFMAN_ONLY then DeflateHuff
   else if prm.strategy = Z_RLE then DeflateRle
+  else if UseZlibC and (n > 0) then DeflateC(prm.level <= 3)
   else if prm.level <= 3 then DeflateFast
   else DeflateSlow;
 
