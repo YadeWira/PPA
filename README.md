@@ -1,6 +1,6 @@
 # PPA
 
-PPA (packPNG Algorithm): lossless recompression of the **PNG family** (PNG, APNG, MNG, JNG), in
+**packPNG Algorithm**: lossless recompression of the **PNG family** (PNG, APNG, MNG, JNG), in
 FreePascal, with the hot loops in C and some x86-64 assembly; no libraries.
 The successor of [packPNG](https://github.com/YadeWira/packPNG), with a
 format of its own, the way [PJA](https://github.com/YadeWira/PJA) followed
