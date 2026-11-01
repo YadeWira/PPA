@@ -11,8 +11,9 @@
    -O3 -fwrapv -ffp-contract=off (pas/build_c.sh). */
 #include <stdint.h>
 
-#define NCTX 6
-#define NIN (NCTX + 1)
+#define NCTX 8
+#define NIN (NCTX + 2)   /* the contexts, the match model and a bias */
+#define MINLEN 6
 
 /* ppamodel's TCounter: the probability as p xor 0x8000, its count */
 typedef struct { uint16_t q; uint8_t n, pad; } ctr_t;
@@ -33,6 +34,18 @@ typedef struct {
   intptr_t *pos;           /* where in buf */
   intptr_t len;            /* the decoder's input length */
   intptr_t encoding;
+  uint16_t *apm;           /* the final refinement: [16][256][33] */
+  const uint8_t *prior2;   /* the line two above in the same pass, or NULL */
+  /* the match model: the image's bytes from the start, where this line
+     starts in them, a hash table of positions, its bits, the match's state
+     (where it points, how long it is) and its counters [16][2] */
+  const uint8_t *data;
+  intptr_t rowPos;
+  uint32_t *mtab;
+  intptr_t mbits;
+  intptr_t *mptr, *mlen;
+  ctr_t *mm;
+  intptr_t sample16;       /* 16-bit samples: two bytes each, high first */
 } rowargs_t;
 
 static inline uint32_t hash3(uint32_t a, uint32_t b, uint32_t c) {
@@ -45,6 +58,7 @@ static inline uint32_t bucket_hash(uint32_t ctx, uint32_t nib) {
   return r ^ ((r >> 13) * 2246822519u);
 }
 
+static inline int abs_i(int v) { return v < 0 ? -v : v; }
 static inline int clamp255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
 
 void ppam_row(rowargs_t *a) {
@@ -63,7 +77,7 @@ void ppam_row(rowargs_t *a) {
   intptr_t k = bpp - 1;
 
   for (intptr_t xx = 0; xx < rb; xx++) {
-    int W, N, NW, NE, grad, avg, res;
+    int W, N, NW, NE, grad, avg, res, act;
     uint32_t base[NCTX], bkt[NCTX], idx[NCTX];
     int st[NIN];
     if (++k == bpp) k = 0;
@@ -72,7 +86,20 @@ void ppam_row(rowargs_t *a) {
     NW = (hasPrior && xx >= bpp) ? prior[xx - bpp] : N;
     NE = (hasPrior && xx + bpp < rb) ? prior[xx + bpp] : N;
     grad = clamp255(W + N - NW);
+    {
+      int d = abs_i(W - NW) + abs_i(N - NW) + abs_i(N - NE);
+      act = d == 0 ? 0 : d < 4 ? 1 : d < 8 ? 2 : d < 16 ? 3 : d < 32 ? 4 : d < 64 ? 5 : d < 128 ? 6 : 7;
+    }
     avg = (W + N + 1) >> 1;
+    int dW = 0, dN = 0, res2 = 0;
+    if (k > 1) {
+      /* the channel two before (R for B): its residual over its gradient */
+      intptr_t i = xx - 2;
+      int j = i >= bpp ? row[i - bpp] : 0;
+      int nd = hasPrior ? prior[i] : j;
+      int b = (hasPrior && i >= bpp) ? prior[i - bpp] : nd;
+      res2 = row[i] - clamp255(j + nd - b);
+    }
     if (k > 0) {
       intptr_t i = xx - 1;
       int j, nd, b;
@@ -80,37 +107,107 @@ void ppam_row(rowargs_t *a) {
       j = i >= bpp ? row[i - bpp] : 0;
       nd = hasPrior ? prior[i] : j;
       b = (hasPrior && i >= bpp) ? prior[i - bpp] : nd;
+      dW = res - j;             /* the previous channel's change from W */
+      dN = res - nd;            /* and from N */
       res -= clamp255(j + nd - b);
     } else res = 0;
     base[0] = hash3((uint32_t)k, (uint32_t)W, 1);
     base[1] = hash3((uint32_t)k, (uint32_t)N, 2);
-    base[2] = hash3((uint32_t)k, (uint32_t)grad, 3);
+    base[2] = hash3((uint32_t)k, (uint32_t)clamp255(N + dN), 3);
     base[3] = hash3((uint32_t)k, (uint32_t)avg + ((uint32_t)clamp255(NE) << 8), 4);
-    base[4] = hash3((uint32_t)k, (uint32_t)((W >> 2) | ((N >> 2) << 6) | ((NE >> 2) << 12)), 5);
-    base[5] = hash3((uint32_t)k, (uint32_t)clamp255(grad + res) | ((uint32_t)(res + 256) << 8), 6);
+    base[4] = hash3((uint32_t)k, (uint32_t)clamp255(W + dW), 5);
+    {
+      int NN = (hasPrior && a->prior2) ? a->prior2[xx] : N;
+      int WW = xx >= 2 * bpp ? row[xx - 2 * bpp] : W;
+      base[5] = hash3((uint32_t)k, (uint32_t)clamp255(grad + (k > 1 ? (res + res2) / 2 : res)) | ((uint32_t)(res2 + 256) << 8), 7);
+      base[6] = hash3((uint32_t)k, (uint32_t)clamp255(2 * N - NN) | ((uint32_t)clamp255(2 * W - WW) << 8), 8);
+    }
+    if (a->sample16) {
+      /* 16-bit samples: predicted as 16-bit values. The high byte by the
+         prediction's top bits; the low one by what the prediction leaves
+         once the high byte is known */
+      intptr_t s0 = xx - (k & 1);              /* the sample's high byte */
+      int w16, n16, nw16, g16, a16;
+      w16 = s0 >= bpp ? (row[s0 - bpp] << 8) | row[s0 - bpp + 1] : 0;
+      n16 = hasPrior ? (prior[s0] << 8) | prior[s0 + 1] : w16;
+      nw16 = (hasPrior && s0 >= bpp) ? (prior[s0 - bpp] << 8) | prior[s0 - bpp + 1] : n16;
+      g16 = w16 + n16 - nw16;
+      if (g16 < 0) g16 = 0;
+      if (g16 > 65535) g16 = 65535;
+      a16 = (w16 + n16 + 1) >> 1;
+      if ((k & 1) == 0) {
+        base[5] = hash3((uint32_t)k, (uint32_t)(g16 >> 4), 11);
+        base[6] = hash3((uint32_t)k, (uint32_t)(a16 >> 4), 12);
+      } else {
+        int hi = row[s0] << 8, lg = g16 - hi, la = a16 - hi;
+        if (lg < -1) lg = -1;
+        if (lg > 256) lg = 256;
+        if (la < -1) la = -1;
+        if (la > 256) la = 256;
+        base[5] = hash3((uint32_t)k, (uint32_t)(lg + 1), 13);
+        base[6] = hash3((uint32_t)k, (uint32_t)(la + 1) | ((uint32_t)(lg + 1) << 9), 14);
+      }
+    }
+    {
+      /* the whole pixel above (up to 4 bytes), with the bytes of this
+         pixel coded so far */
+      uint32_t np = 0, cur = 0;
+      intptr_t p0 = xx - k, nb = bpp < 4 ? bpp : 4;
+      for (intptr_t i = 0; i < nb; i++) np = (np << 8) | (hasPrior ? prior[p0 + i] : 0);
+      for (intptr_t i = 0; i < k; i++) cur = (cur << 8) | row[p0 + i];
+      base[7] = hash3((uint32_t)k * 0x1000193u ^ cur, np, 10);
+    }
 
     int value = enc ? row[xx] : 0;
     uint32_t partial = 1;
+    const intptr_t bpos = a->rowPos + xx;
+    intptr_t mptr = *a->mptr, mlen = *a->mlen;
+    int expected = mlen > 0 ? a->data[mptr] : 0;
+    int mbucket = mlen > 15 ? 15 : (int)mlen;
     for (int i = 0; i < NCTX; i++) bkt[i] = ((bucket_hash(base[i], 0) >> bshift) & bmask) << 4;
     for (int j = 7; j >= 0; j--) {
-      int node, dot = 0, p, bit, err;
-      int32_t *w;
+      int node, dot = 0, dot2, p, bit, err;
+      int32_t *w, *w2;
       if (j == 3)
         for (int i = 0; i < NCTX; i++) bkt[i] = ((bucket_hash(base[i], partial) >> bshift) & bmask) << 4;
       if (j >= 4) node = (int)partial;
       else node = (1 << (3 - j)) | (int)(partial & ((1u << (3 - j)) - 1));
       w = a->w + ((k & 15) * 8 + j) * NIN;
+      w2 = a->w + (128 + act * 8 + j) * NIN;
+      dot2 = 0;
       for (int i = 0; i < NCTX; i++) {
         idx[i] = bkt[i] + (uint32_t)node;
         st[i] = a->stretch[(a->t[i][idx[i]].q ^ 0x8000) >> 4];
         dot += (w[i] * st[i]) / 8192;
+        dot2 += (w2[i] * st[i]) / 8192;
       }
-      st[NCTX] = 256;
+      /* the match: while the bits so far agree with the byte it expects, its
+         next bit, as sure as matches of its length have been */
+      int mexp = -1;
+      if (mlen > 0 && ((uint32_t)(expected | 256) >> (j + 1)) == partial) {
+        mexp = (expected >> j) & 1;
+        int sp = a->stretch[(a->mm[mbucket * 2 + mexp].q ^ 0x8000) >> 4];
+        st[NCTX] = mexp ? sp : -sp;
+      } else st[NCTX] = 0;
       dot += (w[NCTX] * st[NCTX]) / 8192;
-      dot /= 8;
+      dot2 += (w2[NCTX] * st[NCTX]) / 8192;
+      st[NCTX + 1] = 256;
+      dot += (w[NCTX + 1] * st[NCTX + 1]) / 8192;
+      dot2 += (w2[NCTX + 1] * st[NCTX + 1]) / 8192;
+      /* two weight sets, by channel and by the area's activity, averaged */
+      dot = (dot + dot2) / 16;
       if (dot > smax) dot = smax;
       if (dot < -smax - 1) dot = -smax - 1;
       p = a->squash[dot + 2048];
+      if (p < 1) p = 1;
+      if (p > 65535) p = 65535;
+      /* the APM: the mixer's output refined by the channel and the bits of
+         the byte so far, interpolated between 33 points of its stretch */
+      int sidx = dot + 2048, lo = sidx >> 7, wt = sidx & 127;
+      uint16_t *ap = a->apm + (((k & 15) * 256 + partial) * 33);
+      int pa = (ap[lo] * (128 - wt) + ap[lo + 1] * wt) >> 7;
+      int pm = p;
+      p = (p + 3 * pa) >> 2;
       if (p < 1) p = 1;
       if (p > 65535) p = 65535;
       {
@@ -134,12 +231,20 @@ void ppam_row(rowargs_t *a) {
           }
         }
       }
-      err = ((bit << 16) - p) / 16;
+      {
+        int ai = lo + (wt >> 6), g = bit ? 65535 : 0;
+        ap[ai] = (uint16_t)(ap[ai] + (g - ap[ai]) / 64);
+      }
+      err = ((bit << 16) - pm) / 16;
       for (int i = 0; i < NIN; i++) {
         int v = w[i] + (st[i] * err * rate) / 65536;
         if (v > wMax) v = wMax;
         if (v < -wMax) v = -wMax;
         w[i] = v;
+        v = w2[i] + (st[i] * err * rate) / 65536;
+        if (v > wMax) v = wMax;
+        if (v < -wMax) v = -wMax;
+        w2[i] = v;
       }
       for (int i = 0; i < NCTX; i++) {
         ctr_t *c = &a->t[i][idx[i]];
@@ -149,9 +254,40 @@ void ppam_row(rowargs_t *a) {
         c->q = (uint16_t)((uint16_t)(pp + q) ^ 0x8000);
         if (c->n < limit && c->n < 255) c->n++;
       }
+      if (mexp >= 0) {
+        /* the counter learns whether the match was right */
+        ctr_t *c = &a->mm[mbucket * 2 + mexp];
+        int pp = c->q ^ 0x8000, target = (bit == mexp) ? 65535 : 1;
+        int64_t q = (int64_t)(target - pp) * a->recip[c->n];
+        q = (q + ((q >> 63) & 0xFFFF)) >> 16;
+        c->q = (uint16_t)((uint16_t)(pp + q) ^ 0x8000);
+        if (c->n < limit && c->n < 255) c->n++;
+      }
       partial = partial * 2 + (uint32_t)bit;
     }
     if (!enc) row[xx] = (uint8_t)(partial & 0xFF);
+    {
+      /* the match goes on or ends; then the last MINLEN bytes' hash, where
+         they were last, and a new match from there when there is none */
+      const int byte = (int)(partial & 0xFF);
+      if (mlen > 0 && a->data[mptr] == byte) { mlen++; mptr++; } else mlen = 0;
+      if (bpos + 1 >= MINLEN) {
+        uint32_t h = 0;
+        for (int i = 1; i <= MINLEN; i++) h = (h + a->data[bpos + 1 - i] + 1) * 2654435761u;
+        h >>= (32 - a->mbits);
+        if (mlen == 0) {
+          intptr_t cand = a->mtab[h];
+          if (cand > 0) {
+            intptr_t l = 0;
+            while (l < 32 && cand - 1 - l >= 0 && a->data[cand - 1 - l] == a->data[bpos - l]) l++;
+            if (l >= MINLEN) { mlen = l; mptr = cand; }
+          }
+        }
+        a->mtab[h] = (uint32_t)(bpos + 1);
+      }
+      if (mlen > 65535) mlen = 65535;
+      *a->mptr = mptr; *a->mlen = mlen;
+    }
   }
   *a->x1 = x1; *a->x2 = x2;
   if (!enc) *a->x = x;

@@ -61,15 +61,17 @@ implementation
 {$L ppamodelc.o}
 
 const
-  NCTX = 6;
-  NIN = NCTX + 1;               { the contexts and a bias }
+  NCTX = 8;
+  MATCH_BITS = 20;
+  MIN_MATCH_LEN = 6;
+  NIN = NCTX + 2;               { the contexts, the match model and a bias }
   TABLE_BITS = 22;
   TABLE_MASK = (1 shl TABLE_BITS) - 1;
   { a table is buckets of 16 counters, 64 bytes: the 15 nodes of one
     nibble's binary tree, so that a nibble's 4 bits read one cache line }
   BUCKET_BITS = TABLE_BITS - 4;
   COUNTER_LIMIT = 60;
-  MIXER_SETS = 16 * 8;          { channel (up to 16 bytes a pixel) x bit position }
+  MIXER_SETS = 16 * 8 + 8 * 8;  { channel (up to 16 bytes a pixel) x bit position; activity x bit position }
   W_MAX = 1 shl 19;
   LEARNING_RATE = 12;
   FILTER_LIMIT = 30;
@@ -106,6 +108,10 @@ type
     t: array[0..NCTX - 1] of array of TCounter;
     w: array[0..MIXER_SETS - 1, 0..NIN - 1] of Integer;
     filt: array[0..5, 1..7] of TAdaptiveBit;
+    apm: array of Word;     { [16][256][33] }
+    mtab: array of Cardinal;
+    mm: array[0..31] of TCounter;
+    mptr, mlen: SizeInt;
   end;
 
 type
@@ -124,6 +130,15 @@ type
     pos: PSizeInt;
     len: SizeInt;
     encoding: SizeInt;
+    apm: PWord;
+    prior2: PByte;
+    data: PByte;
+    rowPos: SizeInt;
+    mtab: PCardinal;
+    mbits: SizeInt;
+    mptr, mlen: PSizeInt;
+    mm: Pointer;
+    sample16: SizeInt;
   end;
 
 procedure ppam_row(var a: TRowArgs); cdecl; external name 'ppam_row';
@@ -138,6 +153,14 @@ begin
   for i := 0 to MIXER_SETS - 1 do
     for j := 0 to NIN - 1 do m.w[i, j] := (1 shl 16) div NCTX;
   for i := 0 to 5 do for j := 1 to 7 do m.filt[i, j].Init;
+  m.mtab := nil;
+  SetLength(m.mtab, 1 shl MATCH_BITS);
+  FillChar(m.mm, SizeOf(m.mm), 0);
+  m.mptr := 0; m.mlen := 0;
+  m.apm := nil;
+  SetLength(m.apm, 16 * 256 * 33);
+  for i := 0 to 16 * 256 - 1 do
+    for j := 0 to 32 do m.apm[i * 33 + j] := Squash(j * 128 - 2048);
 end;
 
 { hashes wrap around on purpose }
@@ -166,22 +189,210 @@ end;
 { The first counter of the bucket for hash h. Its counter 0 is not a tree
   node (a check there, emptying a bucket another context has, was tried:
   worse, 31/10/2026). }
+{$push}{$Q-}{$R-}
+{ the match model's hash of the MINLEN bytes before pos+1 (wraps around on
+  purpose) }
+function MatchHash(const d: TBytes; pos: SizeInt; bits: Integer): Cardinal;
+var i: Integer;
+begin
+  Result := 0;
+  for i := 1 to MIN_MATCH_LEN do Result := (Result + d[pos + 1 - i] + 1) * Cardinal(2654435761);
+  Result := Result shr (32 - bits);
+end;
+
+function PixelKey(k, cur: Cardinal): Cardinal; inline;
+begin
+  Result := (k * Cardinal($1000193)) xor cur;
+end;
+{$pop}
+
 function BucketOf(h: Cardinal): Cardinal; inline;
 begin
   Result := ((h shr (32 - BUCKET_BITS)) and ((1 shl BUCKET_BITS) - 1)) shl 4;
 end;
 
+{ One line of pixels, the Pascal reference of ppamodelc.c's ppam_row: the
+  same arithmetic, step by step, so that both give the same stream. }
+procedure PascalRow(var m: TModel; var px: TPixels; row, prior, rb: SizeInt; y: SizeInt;
+  enc: PArithEncoder; dec: PArithDecoder);
+var
+  bpp, x, k, i, s0, p0, nb, bpos, mptr, mlen, cand, l, ai: SizeInt;
+  hasPrior: Boolean;
+  W, N, NW, NE, NN, WW, grad, avg, res, res2, dW, dN, act, d, jj, nd, b: Integer;
+  w16, n16, nw16, g16, a16, hi, lg, la: Integer;
+  base, bkt, idx: array[0..NCTX - 1] of Cardinal;
+  st: array[0..NIN - 1] of Integer;
+  np, cur, partial, h: Cardinal;
+  value, expected, mbucket, j, node, dot, dot2, p, pm, bit, err, mexp, sp, sidx, lo, wt, pa, g, v, ws, ws2, byteV: Integer;
+  apBase: SizeInt;
+begin
+  bpp := px.bpp;
+  hasPrior := y > 0;
+  k := bpp - 1;
+  for x := 0 to rb - 1 do begin
+    Inc(k); if k = bpp then k := 0;
+    if x >= bpp then W := px.data[row + x - bpp] else W := 0;
+    if hasPrior then N := px.data[prior + x] else N := W;
+    if hasPrior and (x >= bpp) then NW := px.data[prior + x - bpp] else NW := N;
+    if hasPrior and (x + bpp < rb) then NE := px.data[prior + x + bpp] else NE := N;
+    grad := Clamp255(W + N - NW);
+    d := Abs(W - NW) + Abs(N - NW) + Abs(N - NE);
+    if d = 0 then act := 0 else if d < 4 then act := 1 else if d < 8 then act := 2
+    else if d < 16 then act := 3 else if d < 32 then act := 4 else if d < 64 then act := 5
+    else if d < 128 then act := 6 else act := 7;
+    avg := (W + N + 1) shr 1;
+    dW := 0; dN := 0; res2 := 0;
+    if k > 1 then begin
+      i := x - 2;
+      if i >= bpp then jj := px.data[row + i - bpp] else jj := 0;
+      if hasPrior then nd := px.data[prior + i] else nd := jj;
+      if hasPrior and (i >= bpp) then b := px.data[prior + i - bpp] else b := nd;
+      res2 := px.data[row + i] - Clamp255(jj + nd - b);
+    end;
+    if k > 0 then begin
+      i := x - 1;
+      res := px.data[row + i];
+      if i >= bpp then jj := px.data[row + i - bpp] else jj := 0;
+      if hasPrior then nd := px.data[prior + i] else nd := jj;
+      if hasPrior and (i >= bpp) then b := px.data[prior + i - bpp] else b := nd;
+      dW := res - jj;
+      dN := res - nd;
+      res := res - Clamp255(jj + nd - b);
+    end else res := 0;
+    base[0] := Hash(k, W, 1);
+    base[1] := Hash(k, N, 2);
+    base[2] := Hash(k, Clamp255(N + dN), 3);
+    base[3] := Hash(k, Cardinal(avg) + (Cardinal(Clamp255(NE)) shl 8), 4);
+    base[4] := Hash(k, Clamp255(W + dW), 5);
+    if hasPrior and (y > 1) then NN := px.data[prior - rb + x] else NN := N;
+    if x >= 2 * bpp then WW := px.data[row + x - 2 * bpp] else WW := W;
+    if k > 1 then v := (res + res2) div 2 else v := res;
+    base[5] := Hash(k, Cardinal(Clamp255(grad + v)) or (Cardinal(res2 + 256) shl 8), 7);
+    base[6] := Hash(k, Cardinal(Clamp255(2 * N - NN)) or (Cardinal(Clamp255(2 * W - WW)) shl 8), 8);
+    if px.info.depth = 16 then begin
+      s0 := x - (k and 1);
+      if s0 >= bpp then w16 := (px.data[row + s0 - bpp] shl 8) or px.data[row + s0 - bpp + 1] else w16 := 0;
+      if hasPrior then n16 := (px.data[prior + s0] shl 8) or px.data[prior + s0 + 1] else n16 := w16;
+      if hasPrior and (s0 >= bpp) then nw16 := (px.data[prior + s0 - bpp] shl 8) or px.data[prior + s0 - bpp + 1]
+      else nw16 := n16;
+      g16 := w16 + n16 - nw16;
+      if g16 < 0 then g16 := 0;
+      if g16 > 65535 then g16 := 65535;
+      a16 := (w16 + n16 + 1) shr 1;
+      if (k and 1) = 0 then begin
+        base[5] := Hash(k, g16 shr 4, 11);
+        base[6] := Hash(k, a16 shr 4, 12);
+      end else begin
+        hi := px.data[row + s0] shl 8; lg := g16 - hi; la := a16 - hi;
+        if lg < -1 then lg := -1;
+        if lg > 256 then lg := 256;
+        if la < -1 then la := -1;
+        if la > 256 then la := 256;
+        base[5] := Hash(k, lg + 1, 13);
+        base[6] := Hash(k, Cardinal(la + 1) or (Cardinal(lg + 1) shl 9), 14);
+      end;
+    end;
+    np := 0; cur := 0;
+    p0 := x - k;
+    if bpp < 4 then nb := bpp else nb := 4;
+    for i := 0 to nb - 1 do begin
+      np := np shl 8;
+      if hasPrior then np := np or px.data[prior + p0 + i];
+    end;
+    for i := 0 to k - 1 do cur := (cur shl 8) or px.data[row + p0 + i];
+    base[7] := Hash(PixelKey(k, cur), np, 10);
+
+    if enc <> nil then value := px.data[row + x] else value := 0;
+    partial := 1;
+    bpos := row + x;
+    mptr := m.mptr; mlen := m.mlen;
+    if mlen > 0 then expected := px.data[mptr] else expected := 0;
+    if mlen > 15 then mbucket := 15 else mbucket := mlen;
+    for i := 0 to NCTX - 1 do bkt[i] := BucketOf(BucketHash(base[i], 0));
+    for j := 7 downto 0 do begin
+      if j = 3 then
+        for i := 0 to NCTX - 1 do bkt[i] := BucketOf(BucketHash(base[i], partial));
+      if j >= 4 then node := partial
+      else node := (1 shl (3 - j)) or Integer(partial and ((1 shl (3 - j)) - 1));
+      ws := (k and 15) * 8 + j;
+      ws2 := 128 + act * 8 + j;
+      dot := 0; dot2 := 0;
+      for i := 0 to NCTX - 1 do begin
+        idx[i] := bkt[i] + Cardinal(node);
+        st[i] := STRETCH_TAB[(m.t[i][idx[i]].q xor $8000) shr 4];
+        Inc(dot, (m.w[ws, i] * st[i]) div 8192);
+        Inc(dot2, (m.w[ws2, i] * st[i]) div 8192);
+      end;
+      mexp := -1;
+      if (mlen > 0) and ((Cardinal(expected or 256) shr (j + 1)) = partial) then begin
+        mexp := (expected shr j) and 1;
+        sp := STRETCH_TAB[(m.mm[mbucket * 2 + mexp].q xor $8000) shr 4];
+        if mexp = 1 then st[NCTX] := sp else st[NCTX] := -sp;
+      end else st[NCTX] := 0;
+      Inc(dot, (m.w[ws, NCTX] * st[NCTX]) div 8192);
+      Inc(dot2, (m.w[ws2, NCTX] * st[NCTX]) div 8192);
+      st[NCTX + 1] := 256;
+      Inc(dot, (m.w[ws, NCTX + 1] * st[NCTX + 1]) div 8192);
+      Inc(dot2, (m.w[ws2, NCTX + 1] * st[NCTX + 1]) div 8192);
+      dot := (dot + dot2) div 16;
+      if dot > STRETCH_MAX then dot := STRETCH_MAX;
+      if dot < -STRETCH_MAX - 1 then dot := -STRETCH_MAX - 1;
+      p := SQUASH_TAB[dot + 2048];
+      if p < 1 then p := 1;
+      if p > 65535 then p := 65535;
+      sidx := dot + 2048; lo := sidx shr 7; wt := sidx and 127;
+      apBase := ((k and 15) * 256 + SizeInt(partial)) * 33;
+      pa := (m.apm[apBase + lo] * (128 - wt) + m.apm[apBase + lo + 1] * wt) shr 7;
+      pm := p;
+      p := (p + 3 * pa) shr 2;
+      if p < 1 then p := 1;
+      if p > 65535 then p := 65535;
+      if enc <> nil then begin bit := (value shr j) and 1; enc^.Encode(bit, p); end
+      else bit := dec^.Decode(p);
+      ai := lo + (wt shr 6);
+      if bit = 1 then g := 65535 else g := 0;
+      m.apm[apBase + ai] := Word(m.apm[apBase + ai] + (g - m.apm[apBase + ai]) div 64);
+      err := ((bit shl 16) - pm) div 16;
+      for i := 0 to NIN - 1 do begin
+        v := m.w[ws, i] + (st[i] * err * LEARNING_RATE) div 65536;
+        if v > W_MAX then v := W_MAX;
+        if v < -W_MAX then v := -W_MAX;
+        m.w[ws, i] := v;
+        v := m.w[ws2, i] + (st[i] * err * LEARNING_RATE) div 65536;
+        if v > W_MAX then v := W_MAX;
+        if v < -W_MAX then v := -W_MAX;
+        m.w[ws2, i] := v;
+      end;
+      for i := 0 to NCTX - 1 do CounterUpdate(m.t[i][idx[i]], bit, COUNTER_LIMIT);
+      if mexp >= 0 then CounterUpdate(m.mm[mbucket * 2 + mexp], Ord(bit = mexp), COUNTER_LIMIT);
+      partial := partial * 2 + Cardinal(bit);
+    end;
+    byteV := Integer(partial and $FF);
+    if dec <> nil then px.data[row + x] := byteV;
+    if (mlen > 0) and (px.data[mptr] = byteV) then begin Inc(mlen); Inc(mptr); end else mlen := 0;
+    if bpos + 1 >= MIN_MATCH_LEN then begin
+      h := MatchHash(px.data, bpos, MATCH_BITS);
+      if mlen = 0 then begin
+        cand := m.mtab[h];
+        if cand > 0 then begin
+          l := 0;
+          while (l < 32) and (cand - 1 - l >= 0) and (px.data[cand - 1 - l] = px.data[bpos - l]) do Inc(l);
+          if l >= MIN_MATCH_LEN then begin mlen := l; mptr := cand; end;
+        end;
+      end;
+      m.mtab[h] := Cardinal(bpos + 1);
+    end;
+    if mlen > 65535 then mlen := 65535;
+    m.mptr := mptr; m.mlen := mlen;
+  end;
+end;
+
 procedure CodeImage(var px: TPixels; enc: PArithEncoder; dec: PArithDecoder);
 var
   m: TModel;
-  pi_, y, x, rb, bpp, row, prior, k: SizeInt;
-  W, N, NW, NE, grad, avg, res, prevFilter, f, node, bit, j, i: Integer;
-  ctxBase: array[0..NCTX - 1] of Cardinal;
-  st: array[0..NIN - 1] of Integer;
-  idx, bkt: array[0..NCTX - 1] of Cardinal;
+  pi_, y, rb, bpp, row, prior: SizeInt;
+  prevFilter, f, node, bit, j, i: Integer;
   ra: TRowArgs;
-  dot, p, err, ws, b, value: Integer;
-  partial: Cardinal;
 
   function CodeBit(var c: TAdaptiveBit; bitIn, limit: Integer): Integer;
   begin
@@ -204,6 +415,11 @@ begin
   ra.bucketBits := BUCKET_BITS; ra.limit := COUNTER_LIMIT; ra.wMax := W_MAX;
   ra.rate := LEARNING_RATE; ra.stretchMax := STRETCH_MAX;
   ra.encoding := Ord(enc <> nil);
+  ra.apm := @m.apm[0];
+  if Length(px.data) > 0 then ra.data := @px.data[0] else ra.data := nil;
+  ra.mtab := @m.mtab[0]; ra.mbits := MATCH_BITS;
+  ra.mptr := @m.mptr; ra.mlen := @m.mlen; ra.mm := @m.mm[0];
+  ra.sample16 := Ord(px.info.depth = 16);
   for pi_ := 0 to High(px.passes) do begin
     rb := px.passes[pi_].rowBytes;
     for y := 0 to px.passes[pi_].height - 1 do begin
@@ -224,6 +440,8 @@ begin
         ra.row := @px.data[row];
         if y > 0 then begin ra.prior := @px.data[prior]; ra.hasPrior := 1; end
         else begin ra.prior := @px.data[row]; ra.hasPrior := 0; end;
+        if y > 1 then ra.prior2 := @px.data[prior - rb] else ra.prior2 := nil;
+        ra.rowPos := row;
         ra.rb := rb;
         if enc <> nil then begin
           { room for the worst: 16 bits out for every bit in }
@@ -238,67 +456,7 @@ begin
         ppam_row(ra);
         Continue;
       end;
-      k := bpp - 1;
-      for x := 0 to rb - 1 do begin
-        { x mod bpp, without a division }
-        Inc(k); if k = bpp then k := 0;
-        if x >= bpp then W := px.data[row + x - bpp] else W := 0;
-        if y > 0 then N := px.data[prior + x] else N := W;
-        if (y > 0) and (x >= bpp) then NW := px.data[prior + x - bpp] else NW := N;
-        if (y > 0) and (x + bpp < rb) then NE := px.data[prior + x + bpp] else NE := N;
-        grad := Clamp255(W + N - NW);
-        avg := (W + N + 1) shr 1;
-        { what the previous channel of this pixel left over its gradient }
-        if (k > 0) then begin
-          i := x - 1;
-          res := px.data[row + i];
-          if i >= bpp then j := px.data[row + i - bpp] else j := 0;
-          if y > 0 then node := px.data[prior + i] else node := j;
-          if (y > 0) and (i >= bpp) then b := px.data[prior + i - bpp] else b := node;
-          res := res - Clamp255(j + node - b);
-        end else res := 0;
-        ctxBase[0] := Hash(k, W, 1);
-        ctxBase[1] := Hash(k, N, 2);
-        ctxBase[2] := Hash(k, grad, 3);
-        ctxBase[3] := Hash(k, avg + (Cardinal(Clamp255(NE)) shl 8), 4);
-        ctxBase[4] := Hash(k, (W shr 2) or ((N shr 2) shl 6) or ((NE shr 2) shl 12), 5);
-        ctxBase[5] := Hash(k, Cardinal(Clamp255(grad + res)) or (Cardinal(res + 256) shl 8), 6);
-        if enc <> nil then value := px.data[row + x] else value := 0;
-        partial := 1;
-        for i := 0 to NCTX - 1 do bkt[i] := BucketOf(BucketHash(ctxBase[i], 0));
-        for j := 7 downto 0 do begin
-          if j = 3 then
-            for i := 0 to NCTX - 1 do bkt[i] := BucketOf(BucketHash(ctxBase[i], partial));
-          { the node in the nibble's tree: 1, then 2-3, 4-7, 8-15 }
-          if j >= 4 then node := partial
-          else node := (1 shl (3 - j)) or Integer(partial and ((1 shl (3 - j)) - 1));
-          ws := (k and 15) * 8 + j;
-          dot := 0;
-          for i := 0 to NCTX - 1 do begin
-            idx[i] := bkt[i] + Cardinal(node);
-            st[i] := STRETCH_TAB[(m.t[i][idx[i]].q xor $8000) shr 4];
-            Inc(dot, (m.w[ws, i] * st[i]) div 8192);
-          end;
-          st[NCTX] := 256;
-          Inc(dot, (m.w[ws, NCTX] * st[NCTX]) div 8192);
-          dot := dot div 8;
-          if dot > STRETCH_MAX then dot := STRETCH_MAX;
-          if dot < -STRETCH_MAX - 1 then dot := -STRETCH_MAX - 1;
-          p := SQUASH_TAB[dot + 2048];
-          if enc <> nil then begin bit := (value shr j) and 1; enc^.Encode(bit, p); end
-          else bit := dec^.Decode(p);
-          { the mixer learns from the error, the counters from the bit }
-          err := ((bit shl 16) - p) div 16;
-          for i := 0 to NIN - 1 do begin
-            m.w[ws, i] := m.w[ws, i] + (st[i] * err * LEARNING_RATE) div 65536;
-            if m.w[ws, i] > W_MAX then m.w[ws, i] := W_MAX;
-            if m.w[ws, i] < -W_MAX then m.w[ws, i] := -W_MAX;
-          end;
-          for i := 0 to NCTX - 1 do CounterUpdate(m.t[i][idx[i]], bit, COUNTER_LIMIT);
-          partial := partial * 2 + Cardinal(bit);
-        end;
-        if dec <> nil then px.data[row + x] := Byte(partial and $FF);
-      end;
+      PascalRow(m, px, row, prior, rb, y, enc, dec);
     end;
   end;
 end;

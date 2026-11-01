@@ -24,7 +24,7 @@ over a large corpus, is the oracle for the whole project.
 | 2b | `ppazlib` | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | in progress: zlib's choices exact |
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
 | 4 | `ppaarith` | binary arithmetic coder, adaptive bit counters, stretch and squash | done |
-| 5 | `ppamodel` | context modelling of the pixels, the deflate corrections and the raw bytes | prototype |
+| 5 | `ppamodel` | context modelling of the pixels, the deflate corrections and the raw bytes | second version |
 | 6 | `ppacodec` | the compressed stream, verified at compress time | done |
 | 7 | `ppaformat`, `ppacli` | the `.ppa` file (`FORMAT.md`) and the `ppa` command (`CLI.md`) | done |
 
@@ -246,6 +246,48 @@ payload, cuts: refused or the very original, never another file; each
 header case) and `pas/tests/cli.sh` (the command: every sample back, `-f`,
 `-n`, `list`, a damaged file refused with nothing written, usage errors).
 
+## Layer 5, second version (01/11/2026)
+
+Tuned on a set of 11 images of the corpus (`/mnt/IA_LAB/agentes/ppa/tune`:
+a 640x480 crop of the photo, RGBA frames, a synthetic diagram, a 16-bit
+RGBA image, palettes, 1-bit, a CgBI), coding only (`measure_model -e`),
+one change at a time, each kept only if the set got smaller. packPNG 2.0
+(WebP-lossless) on the same set as the yardstick: the first model already
+beat it on most images, and lost on the photo (4% bigger) and on the
+synthetic diagram (51% bigger).
+
+| change | set | photo | diagram |
+|---|---|---|---|
+| the first model | 1,218,054 | 388,482 | 28,537 |
+| an APM after the mixer (channel, bits so far, 33 points) | 1,214,341 | | |
+| a match model (the last time the 6 bytes before were seen) | 1,194,529 | 384,130 | 26,073 |
+| whole pixels as contexts (W's, N's, with this pixel's bytes so far) | 1,186,510 | 381,819 | 22,212 |
+| a second weight set, by the area's activity, averaged | 1,176,533 | 378,947 | 22,199 |
+| 16-bit samples predicted as 16-bit values | 1,174,662 | | |
+| **colour: W and N corrected by the previous channel's change** | **1,083,073** | **301,184** | **16,470** |
+| blue also from red's residual | 1,077,067 | 295,738 | 16,366 |
+| the two contexts the ablation showed redundant, out (8 contexts) | 1,078,750 | 296,265 | 16,499 |
+
+packPNG on the same: photo 372,715, diagram 18,844. Tried and not kept: the
+average corrected by colour (no gain), the APM keyed by the best prediction
+(-0.07%, a 2 MB table more).
+
+The ablation (each context's input zeroed, the set coded again) is what
+showed where the size is: before the colour contexts, the gradient
+corrected by the previous channel's residual was worth 155 KB and every
+other context 2 to 12 KB. A pixel's channels predict each other far
+better than its neighbours predict it; the contexts that use that, W + the
+previous channel's change from its W and N + its change from its N, are now
+the two that matter most (33 KB and 15 KB).
+
+The model now: 8 contexts (W; N; N + dN; the average with NE; W + dW; the
+gradient corrected by the residuals of the channels before; the linear
+extrapolations 2N - NN and 2W - WW, or for 16-bit samples the 16-bit
+predictions; the whole pixel above with this pixel's bytes so far), a match
+model, a bias; two weight sets (channel and bit; activity and bit)
+averaged; an APM; the counters by nibble in tables of 2^22. The C loop and
+the Pascal reference give the same streams.
+
 ## Speed, first pass (31/10/2026)
 
 Measured first, phase by phase (`measure_phases`), on the corpus's
@@ -315,4 +357,5 @@ APNG (4.6 MB, level 9): `ppa a` 148 s with one thread, 39.5 s with 8;
 | 31/10/2026 | layer 7, damaged `.ppa` files of `tests/png/` (20,062 variants, header to payload) | every one refused, none another file, no exception |
 | 31/10/2026 | the command on `tests/png/`, x86-64 and a 32-bit build | the same `.ppa` bytes on both |
 | 31/10/2026 | the six CI platforms (`.github/test.sh`) | the same `.ppa` bytes on all six |
+| 01/11/2026 | layer 5, second version, the corpus's 224 images | **16.7 MB = 50.89% of the zlib streams** (the first: 59.0%), every one decoded back; 383 s coding and decoding, one thread |
 | 31/10/2026 | layer 6, the corpus's 70 files of the family (32.9 MB) | **19.4 MB = 58.81%**, every one back; 211 image streams as images, 30 as bytes (13 not zlib's, 17 JNG JPEGs); 2,387 s for compressing, verifying and decompressing, one thread: the zlib parameter search and the model are the slow parts |

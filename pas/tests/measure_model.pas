@@ -3,7 +3,9 @@
   by the model and decoded again (they must come back), with the sizes:
   coded against the zlib stream the image came in.
 
-    measure_model <directory> [-v] }
+    measure_model <directory> [-v] [-e]
+
+  -e codes only (no decoding back): for tuning the model, quicker. }
 program measure_model;
 {$I ../ppa.inc}
 uses SysUtils, Classes, DateUtils, ppacrc, ppapng, ppadeflate, ppapixels, ppaarith, ppamodel;
@@ -18,9 +20,10 @@ var
   d, coded: TBytes; p: TPng; z: TZStream; info: TImageInfo; px, back: TPixels;
   e: TArithEncoder; dc: TArithDecoder;
   streamBytes, codedBytes, rawBytes, failures, images: Int64;
-  t0: TDateTime; crc: LongWord;
+  t0: TDateTime; crc: LongWord; encodeOnly: Boolean;
 begin
-  dir := ParamStr(1); verbose := ParamStr(2) = '-v';
+  dir := ParamStr(1); verbose := (ParamStr(2) = '-v') or (ParamStr(3) = '-v');
+  encodeOnly := (ParamStr(2) = '-e') or (ParamStr(3) = '-e');
   files := TStringList.Create; files.Sorted := True;
   if FindFirst(dir + '/*', faAnyFile, sr) = 0 then begin
     repeat if (sr.Attr and faDirectory) = 0 then files.Add(dir + '/' + sr.Name); until FindNext(sr) <> 0;
@@ -39,6 +42,7 @@ begin
       e.Init;
       CodeImage(px, @e, nil);
       coded := e.Finish;
+      if encodeOnly then back := px else begin
       { decode into a copy with the same layout }
       back := px;
       back.filters := nil; SetLength(back.filters, Length(px.filters));
@@ -48,6 +52,7 @@ begin
       if (Length(px.data) > 0) and not CompareMem(@back.data[0], @px.data[0], Length(px.data)) or
          (Length(px.filters) > 0) and not CompareMem(@back.filters[0], @px.filters[0], Length(px.filters)) then begin
         Inc(failures); Writeln('  FAIL decoded image differs, stream ', s, '  ', name);
+      end;
       end;
       Inc(images);
       Inc(streamBytes, Length(p.streams[s].data));
@@ -63,6 +68,6 @@ begin
   { the CRC-32 of every coded stream: the C loop and the Pascal one
     (PPA_NOC=1) must give the same }
   Writeln(Format('%d images: zlib streams %d bytes, model %d bytes = %.2f%% (%d bytes unfiltered), crc %.8x, %.1f s, %d failures',
-    [images, streamBytes, codedBytes, 100 * codedBytes / streamBytes, rawBytes, Crc32Final(crc), SecondSpan(Now, t0), failures]));
+    [images, streamBytes, codedBytes, 100 * codedBytes / streamBytes, rawBytes, Int64(Crc32Final(crc)), SecondSpan(Now, t0), failures]));
   if failures > 0 then Halt(1);
 end.
