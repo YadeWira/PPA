@@ -6,6 +6,11 @@ The successor of [packPNG](https://github.com/YadeWira/packPNG), with a
 format of its own, the way [PJA](https://github.com/YadeWira/PJA) followed
 packJPG.
 
+| Component | Status |
+|---|---|
+| CI | [![CI][ciBadge]][ciLink] |
+| Latest release | none yet |
+
 ```sh
 ppa a image.png          # -> image.ppa
 ppa x image.ppa          # -> image.png, the same file byte for byte
@@ -29,3 +34,6 @@ PNG_CORPUS=dir1:dir2 pas/run_tests.sh             # plus the round trip over tho
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+[ciBadge]: https://github.com/YadeWira/PPA/actions/workflows/ci.yml/badge.svg
+[ciLink]: https://github.com/YadeWira/PPA/actions/workflows/ci.yml
