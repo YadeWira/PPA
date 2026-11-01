@@ -5,7 +5,7 @@ Licensed under the MIT License (see LICENSE).
 Third-party work
 ----------------
 
-vendor/pja is PJA 0.6.0 (https://github.com/YadeWira/PJA, MIT, the same
+vendor/pja is PJA 0.6.1 (https://github.com/YadeWira/PJA, MIT, the same
 author), unmodified, for the JPEG inside a JNG; vendor/pja/NOTICE has its own
 third-party notes (IJG for arithmetic-coded JPEG, CharLS for JPEG-LS).
 pas/ppablake3.pas and pas/ppacpu.pas are PJA's pjablake3 and pjacpu under

@@ -29,7 +29,7 @@ over a large corpus, is the oracle for the whole project.
 | 7 | `ppaformat`, `ppacli` | the `.ppa` file (`FORMAT.md`) and the `ppa` command (`CLI.md`) | done |
 
 A JNG's JPEG (JDAT, and JDAA for its alpha) goes to PJA's codec: its Pascal
-units and C, vendored unmodified from PJA 0.6.0's release tarball
+units and C, vendored unmodified from PJA 0.6.1's release tarball
 (`vendor/pja`, as zpaq-std vendors it), with version 7's model. The JPEG is
 kept as its bytes when PJA does not take it or does not make it smaller.
 

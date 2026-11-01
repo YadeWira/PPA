@@ -1,7 +1,9 @@
-PJA 0.6.0 (tag v0.6.0, commit 8569253), https://github.com/YadeWira/PJA,
-from the vendor tarball pja-0.6.0-zpaqstd.tar.gz of its release (sha256
-46160d9b024df675b9a2c4858decc039b85e93feb60dc7d86e9a77b75fa906c7, as its
-SHA256SUMS says), copied unmodified, as zpaq-std vendors it.
+PJA 0.6.1 (tag v0.6.1, commit 3488d96), https://github.com/YadeWira/PJA,
+from the vendor tarball pja-0.6.1-zpaqstd.tar.gz of its release (sha256
+48b520f86c2d83a92ba94cd3391bc29032bb627f3a7445e5f4aee8ff8fa83a47, as its
+SHA256SUMS says), copied unmodified, as zpaq-std vendors it. 0.6.1 writes
+the same streams as 0.6.0; only its build changes (clang ~8% faster, with
+-fno-builtin).
 
 PPA uses it for the JPEG inside a JNG (its JDAT, and JDAA for the alpha):
 pjacodec.Compress with version 7's model, pjacodec.Decompress. MIT

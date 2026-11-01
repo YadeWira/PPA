@@ -1,11 +1,18 @@
-# PJA 0.6.0: the zpaq-std plugin, vendored
+# PJA 0.6.1: the zpaq-std plugin, vendored
 
-PJA (https://github.com/YadeWira/PJA), tag `v0.6.0`, commit `8569253`:
+PJA (https://github.com/YadeWira/PJA), tag `v0.6.1`, commit `3488d96`:
 only the sources the zpaq-std plugin is built from. MIT (`LICENSE`);
-`NOTICE` has the third-party notes. The same sources as the prototype of
-commit `9c3e61a` (zpaq-std's exp/v7) but for the version number.
+`NOTICE` has the third-party notes.
 
-## What is new
+0.6.1 changes no stream, no ZPAQL and nothing any codec takes: the 14
+codecs are 0.6.0's. PJA's releases now build the C with clang (about 8%
+faster than gcc on x86-64, the same bytes), and for that `build_c.sh`
+gives clang `-fno-builtin` and `pjav7c.c` zeroes and copies through
+clang's inline builtins, so the objects call no memset or memcpy with
+either compiler. Either compiler builds these sources; clang is the
+faster.
+
+## What is new in 0.6.0
 
 Four codecs, indices 10 to 13 of `zpaqstd_codecs_v1`; 0 to 9 are 0.5.3's,
 unchanged (streams, ZPAQL, what each takes):
@@ -33,14 +40,14 @@ unchanged (streams, ZPAQL, what each takes):
 
 ## Building
 
-FreePascal 3.2.2 and a C compiler (gcc or clang) for the same target. The C
-first (`pas/build_c.sh <dir> [flags]`: `-O3 -fwrapv -ffp-contract=off
--fno-stack-protector`, and `-fno-tree-loop-distribute-patterns` with gcc),
-then fpc with `-Fo<dir>` so `pjav7.pas`'s `{$L pjav7c.o}` and
+FreePascal 3.2.2 and a C compiler (clang, the faster, or gcc) for the same
+target. The C first (`pas/build_c.sh <dir> [flags]`: `-O3 -fwrapv
+-ffp-contract=off -fno-stack-protector`, and `-fno-builtin` with clang or
+`-fno-tree-loop-distribute-patterns` with gcc), then fpc with `-Fo<dir>` so `pjav7.pas`'s `{$L pjav7c.o}` and
 `{$L pjasysc.o}` find the objects. From this directory:
 
 ```sh
-export PJA_COMMIT=8569253
+export PJA_COMMIT=3488d96
 ```
 
 Linux x86_64 (position-independent C, `-fPIC`, and `-Cg`):
