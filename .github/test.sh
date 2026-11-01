@@ -53,5 +53,9 @@ echo "== layers 4 and 5"
 "$OUT/measure_model$EXE" tests/png | sed 's/, [0-9.]* s,/,/' > "$OUT/model.txt"
 cat "$OUT/model.txt"
 
+# each part's own hash too, to find which one differs when the job that
+# compares the platforms fails
+for part in streams zlib model ppa; do echo "$part: $(tr -d '\r' < "$OUT/$part.txt" | $SHA | cut -c1-16)"; done
+cat "$OUT/ppa.txt"
 cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" "$OUT/ppa.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
 echo "hash: $(cat hash.txt)"
