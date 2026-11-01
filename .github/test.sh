@@ -34,8 +34,9 @@ $FPC -O3 -dPPA_FAST -Fupas -Fipas -FU"$OUT/cu" -o"$OUT/ppa$EXE" pas/ppacli.pas >
 echo "== the command"
 sh pas/tests/cli.sh "$OUT/ppa$EXE" "$OUT/cli"
 # the samples' .ppa only: README.md, which cli.sh stores too, is text, and
-# git gives it CRLF line ends on Windows
-( cd "$OUT/cli/in" && for f in *.ppa; do [ "$f" = README.ppa ] || $SHA "$f"; done ) | tr -d '\r*' | sort > "$OUT/ppa.txt"
+# git gives it CRLF line ends on Windows. Only the hash and the name: the
+# tools print other separators on Windows ("hash *name")
+( cd "$OUT/cli/in" && for f in *.ppa; do [ "$f" = README.ppa ] || echo "$($SHA "$f" | cut -c1-64) $f"; done ) | tr -d '\r' | sort > "$OUT/ppa.txt"
 
 echo "== layer 1"
 "$OUT/test_png$EXE" tests/png 14 | tail -1
