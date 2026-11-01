@@ -37,8 +37,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Install Free Pascal
-        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: Install Free Pascal, and ImageMagick (tests/pxcheck.py checks pixels against it)
+        run: sudo apt-get update && sudo apt-get install -y fpc imagemagick
       - name: pas/run_tests.sh
         run: pas/run_tests.sh
 
