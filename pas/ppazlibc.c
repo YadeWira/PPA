@@ -7,31 +7,27 @@
 
 #define MAX_MATCH 258
 
-/* how many bytes a and b have equal from the start, up to top: 8 at a time
-   where the compiler gives a count of trailing zeros, the same count */
+static inline uint8_t win(const uint8_t *p, intptr_t n, intptr_t i) { return i < n ? p[i] : 0; }
+
+/* how many bytes a and b have equal from the start, up to top: 4 at a time
+   on little-endian machines, with a count of trailing zeros of 32 bits (a
+   64-bit one would call libgcc on 32-bit x86, and this object calls no
+   library); the same count either way */
 static inline intptr_t common(const uint8_t *a, const uint8_t *b, intptr_t from, intptr_t top) {
   intptr_t len = from;
-#if defined(__GNUC__) || defined(__clang__)
-  while (len + 8 <= top) {
-    uint64_t x, y, d;
-    __builtin_memcpy(&x, a + len, 8);
-    __builtin_memcpy(&y, b + len, 8);
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  while (len + 4 <= top) {
+    uint32_t x, y, d;
+    __builtin_memcpy(&x, a + len, 4);
+    __builtin_memcpy(&y, b + len, 4);
     d = x ^ y;
-    if (d) {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-      return len + (__builtin_ctzll(d) >> 3);
-#else
-      return len + (__builtin_clzll(d) >> 3);
-#endif
-    }
-    len += 8;
+    if (d) return len + (__builtin_ctz(d) >> 3);
+    len += 4;
   }
 #endif
   while (len < top && a[len] == b[len]) len++;
   return len;
 }
-
-static inline uint8_t win(const uint8_t *p, intptr_t n, intptr_t i) { return i < n ? p[i] : 0; }
 
 /* the longest match for the string at scan, walking the hash chain from
    cur; returns the best length (not yet capped to the lookahead) and sets
