@@ -516,8 +516,13 @@ begin
               if s >= 16 then PutBits(bw, clenSeq[i] shr 5, CLEN_EXTRA[s]);
             end;
           end;
-          BuildEnc(lit, litLen, 288);
-          BuildEnc(dst, distLen, 32);
+          if btype = btFixed then begin
+            BuildEnc(lit, FixedLit, 288);
+            BuildEnc(dst, FixedDist, 32);
+          end else begin
+            BuildEnc(lit, litLen, 288);
+            BuildEnc(dst, distLen, 32);
+          end;
           for i := firstToken to firstToken + nTokens - 1 do begin
             l := z.tokLen[i];
             if l = 0 then begin

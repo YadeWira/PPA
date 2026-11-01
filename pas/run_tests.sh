@@ -14,7 +14,7 @@ echo "== source guards"
 python3 "$PAS/collisions.py" "$PAS"
 
 echo "== build"
-for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib; do
+for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_pixels; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -44,5 +44,18 @@ done
 echo "== layer 2b: zlib's choices predicted"
 "$OUT/test_zlib" "$PPA/tests/png" | tail -1
 "$OUT/test_zlib" "$PPA/tests/png" | grep -q '16 told by their zlib parameters'
+
+echo "== layer 3: filtered lines <-> each line's filter and the image's bytes"
+"$OUT/test_pixels" "$PPA/tests/png" 16 | tail -1
+# what it unfilters are the pixels ImageMagick decodes
+rm -rf "$OUT/pxdump"; mkdir -p "$OUT/pxdump"
+"$OUT/test_pixels" "$PPA/tests/png" 1 -dump "$OUT/pxdump" > "$OUT/pxdump/list"
+python3 "$PPA/tests/pxcheck.py" "$OUT/pxdump"
+for d in "${dirs[@]}"; do
+  "$OUT/test_pixels" "$d" 1 | tail -1
+  rm -rf "$OUT/pxdump"; mkdir -p "$OUT/pxdump"
+  "$OUT/test_pixels" "$d" 1 -dump "$OUT/pxdump" > "$OUT/pxdump/list"
+  python3 "$PPA/tests/pxcheck.py" "$OUT/pxdump"
+done
 
 echo "all green"

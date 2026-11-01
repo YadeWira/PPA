@@ -22,7 +22,7 @@ over a large corpus, is the oracle for the whole project.
 | 1 | `ppapng` | file ↔ chunks + one data stream per image (IDAT, fdAT, JDAT, JDAA) + what is needed to cut them into the same chunks | done |
 | 2a | `ppadeflate` | zlib stream ↔ the bytes it holds + every choice its encoder made (blocks, codes, tokens, pad bits): the same bits back | done |
 | 2b | `ppazlib` | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | in progress: zlib's choices exact |
-| 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | |
+| 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
 | 4 | `ppaarith` | binary arithmetic coder and adaptive bit counters | |
 | 5 | `ppamodel` | context modelling of the pixels, the deflate corrections and the raw bytes | |
 | 6 | `ppacodec` | the compressed stream, verified at compress time | |
@@ -134,6 +134,22 @@ the longest); what costs is where the matches are and how long, which is
 exactly what zlib's lazy matching decides. Storing the parse is not the way:
 the choices have to be predicted, and only where the prediction fails told.
 
+## Layer 3: each line's filter
+
+`ppapixels.Unfilter` takes the bytes an image stream holds, finds the image
+from its header (`StreamImage`: an IDAT's IHDR, a JNG alpha's JHDR, an fdAT
+frame's fcTL), and splits them into each line's filter byte and the image's
+own bytes, unfiltered. Each Adam7 pass is its own sub-image, and a pass
+with no columns or rows has no lines. The bytes stay as the image has them:
+the bits that pad the last byte of a 1, 2 or 4-bit line are kept. With the
+filters recorded, `Refilter` gives back the same bytes. An image whose
+filter byte is above 4, or whose stream holds fewer bytes than it needs, is
+not taken; bytes after the image are kept.
+
+Tests: `test_pixels` (every image back; with `-dump`, `tests/pxcheck.py`
+checks the unfiltered bytes of the non-interlaced 8-bit gray, RGB and RGBA
+images against ImageMagick's decoding).
+
 ## Measurements
 
 | date | what | result |
@@ -145,3 +161,5 @@ the choices have to be predicted, and only where the prediction fails told.
 | 31/10/2026 | layer 2a, damaged streams of `tests/png/` (every bit of the first 512 bytes, cuts) | 68,264 variants, 51,275 decode, 0 failures |
 | 31/10/2026 | layer 2b, `tests/png/`'s 16 streams (ImageMagick, i.e. libpng and zlib) | 16/16 told by their zlib parameters (level 7 filtered or default, level 8), the same bits from the predicted choices |
 | 31/10/2026 | `measure_parse` on the corpus's streams | the parse alone, order 0: 26.6% of the streams |
+| 31/10/2026 | layer 2b, the corpus's 224 streams | 211 told by their zlib parameters (level 9 filtered the most, 78; level 7 default 62); 13 not zlib's: one dynamic block for the whole image (advpng-like optimizers) and one CgBI |
+| 31/10/2026 | layer 3, the corpus's 224 images (23 interlaced) | 224 taken and back; the 22 non-interlaced 8-bit gray/RGB/RGBA PNG ones the same pixels as ImageMagick |

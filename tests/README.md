@@ -10,8 +10,8 @@ suites flip every bit of them.
 
 | file | what it has |
 |---|---|
-| `rgb8.png`, `rgba8.png`, `gray8.png`, `gray1.png`, `palette.png`, `rgb16.png` | the colour types and depths as libpng writes them: RGB 8, RGBA 8, gray 8, gray 1 bit, a 16-colour palette, RGB 16 |
-| `interlaced.png` | Adam7 |
+| `rgb8.png`, `rgba8.png`, `gray8.png`, `gray1.png`, `palette.png`, `rgb16.png` | the colour types and depths as libpng writes them: RGB 8, RGBA 8, gray 8, gray 1 bit, a 16-colour palette, RGB 16 (`-depth 8` where it says 8: ImageMagick would keep its own 16) |
+| `interlaced.png` | RGB 8, Adam7 |
 | `idat_split.png` | `rgb8.png`'s stream cut into IDATs of 100 bytes, with an empty IDAT in the middle |
 | `bad_crc_trailer.png` | a tEXt with a wrong CRC, and bytes after IEND |
 | `cut_short.png` | `rgb8.png` cut at two thirds, in the middle of its IDAT |

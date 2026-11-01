@@ -57,15 +57,15 @@ def idat_of(cs):
 def main():
     os.makedirs(OUT, exist_ok=True)
     # the colour types and depths, as ImageMagick (libpng) writes them
-    write('rgb8.png', plasma(1, 64, 48, '-define', 'png:color-type=2'))
+    write('rgb8.png', plasma(1, 64, 48, '-depth', '8', '-define', 'png:color-type=2'))
     write('rgba8.png', plasma(2, 48, 48, '-alpha', 'set', '-channel', 'A', '-evaluate', 'set', '60%',
-                              '+channel', '-define', 'png:color-type=6'))
-    write('gray8.png', plasma(3, 64, 32, '-colorspace', 'gray', '-define', 'png:color-type=0'))
+                              '+channel', '-depth', '8', '-define', 'png:color-type=6'))
+    write('gray8.png', plasma(3, 64, 32, '-colorspace', 'gray', '-depth', '8', '-define', 'png:color-type=0'))
     write('gray1.png', plasma(4, 40, 24, '-colorspace', 'gray', '-monochrome', '-define', 'png:bit-depth=1'))
     write('palette.png', convert(['-seed', '5', '-size', '48x32', 'plasma:fractal', '-colors', '16',
                                   '-define', 'png:exclude-chunks=date,time'], 'png8'))
     write('rgb16.png', plasma(6, 32, 32, '-depth', '16', '-define', 'png:color-type=2'))
-    write('interlaced.png', plasma(7, 56, 40, '-interlace', 'PNG'))
+    write('interlaced.png', plasma(7, 56, 40, '-depth', '8', '-interlace', 'PNG'))
 
     base = open(os.path.join(OUT, 'rgb8.png'), 'rb').read()
     cs = chunks(base)
@@ -91,7 +91,7 @@ def main():
     w, h = struct.unpack('>II', ihdr[:8])
     frames = []
     for seed in (11, 12, 13):
-        frames.append(idat_of(chunks(plasma(seed, w, h, '-define', 'png:color-type=2'))))
+        frames.append(idat_of(chunks(plasma(seed, w, h, '-depth', '8', '-define', 'png:color-type=2'))))
     seq = 0
     out = [(b'IHDR', ihdr), (b'acTL', struct.pack('>II', 3, 0))]
     for k, fr in enumerate(frames):
