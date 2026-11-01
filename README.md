@@ -16,10 +16,17 @@ ppa a image.png          # -> image.ppa
 ppa x image.ppa          # -> image.png, the same file byte for byte
 ```
 
-**Work in progress: version 0.1.0, a first one.** Every layer of the codec
-works and the command does too, but its model is a first prototype and it
-is slow (one thread, the Pascal reference code). The status of each layer,
-and everything measured, is in [`doc/CODEC.md`](doc/CODEC.md).
+**Work in progress: version 0.1.0, no release yet.** Every layer of the
+codec works and the command does too, with three models for the pixels
+chosen image by image (a static one for photographs, quick to extract; an
+adaptive one; the slowest and smallest, which `--max` takes for every
+image). The status of each layer, and everything measured, is in
+[`doc/CODEC.md`](doc/CODEC.md).
+
+**The formats are not frozen before 1.0.0**: until then the stream and the
+`.ppa` may change without a promise of compatibility, and a file made with
+a 0.x version may not open in a later one. From 1.0.0 on, what is
+published is read forever.
 
 The original comes back **byte for byte**, and nothing is written under an
 output's name unless it verified: compressing decompresses the result and

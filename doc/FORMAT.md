@@ -15,6 +15,11 @@ The codec verifies its own stream when compressing (it decompresses it and
 compares), so what the hash protects against is damage **after** writing.
 No encryption.
 
+**Not frozen before 1.0.0** (the family's rule): until then this layout and
+the codec stream may change without a promise of compatibility, and a file
+made with a 0.x version may not open in a later one; the version byte only
+tells which one made it. From 1.0.0 on, what is published is read forever.
+
 ## Layout
 
 ```
