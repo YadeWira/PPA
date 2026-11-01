@@ -30,6 +30,7 @@ for d in "${dirs[@]}"; do "$OUT/test_png" "$d" 1 | tail -1; done
 
 echo "== layer 2a: zlib stream <-> its bytes and its encoder's choices"
 "$OUT/test_deflate" "$PPA/tests/png" 16 | tail -1
+PPA_NOC=1 "$OUT/test_deflate" "$PPA/tests/png" 16 | tail -1
 # what it decodes are the bytes zlib decodes
 rm -rf "$OUT/zdump"; mkdir -p "$OUT/zdump"
 "$OUT/test_deflate" "$PPA/tests/png" 1 -dump "$OUT/zdump" > "$OUT/zdump/list"

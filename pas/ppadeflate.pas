@@ -100,9 +100,31 @@ function Encode(const z: TZStream): TBytes;
 { Decode, Encode, and compare. }
 function VerifyRoundTrip(const a: TBytes; raw: Boolean; maxPlain: SizeInt; out z: TZStream): TZResult;
 
+var
+  { a block's tokens written in C (ppadeflatec.c); False: in Pascal, the
+    reference. PPA_NOC=1 in the environment makes it False }
+  UseDeflateC: Boolean = True;
+
 implementation
 
+
 uses ppacrc;
+
+{$L ppadeflatec.o}
+
+type
+  { ppadeflatec.c's ppad_tokens_t }
+  TTokensArgs = record
+    out_: PByte; n: PSizeInt; buf: PQWord; cnt: PInteger;
+    tokLen, tokVal: PWord; first, count: SizeInt;
+    lcode: PWord; llen: PByte;
+    dcode: PWord; dlen: PByte;
+    lenSym: PWord; distSym: PByte;
+    lenBase: PWord; lenExtra: PByte;
+    distBase: PWord; distExtra: PByte;
+  end;
+
+procedure ppad_tokens(var a: TTokensArgs); cdecl; external name 'ppad_tokens';
 
 const
   LEN_BASE: array[257..285] of Word = (
@@ -503,6 +525,7 @@ var
   bi, i: SizeInt;
   sym, s, l, d, k: Integer;
   ad: LongWord;
+  ta: TTokensArgs;
 begin
   bw := Default(TBitWriter);
   if not z.raw then begin
@@ -541,6 +564,17 @@ begin
             BuildEnc(lit, litLen, 288);
             BuildEnc(dst, distLen, 32);
           end;
+          if UseDeflateC and (nTokens > 0) then begin
+            { room for the worst: 48 bits a token }
+            if bw.n + 6 * nTokens + 16 > Length(bw.out_) then SetLength(bw.out_, 2 * (bw.n + 6 * nTokens + 16));
+            ta.out_ := @bw.out_[0]; ta.n := @bw.n; ta.buf := @bw.buf; ta.cnt := @bw.cnt;
+            ta.tokLen := @z.tokLen[0]; ta.tokVal := @z.tokVal[0]; ta.first := firstToken; ta.count := nTokens;
+            ta.lcode := @lit.code[0]; ta.llen := @lit.len[0]; ta.dcode := @dst.code[0]; ta.dlen := @dst.len[0];
+            ta.lenSym := @LenSym[3]; ta.distSym := @DistSym[1];
+            ta.lenBase := @LEN_BASE[257]; ta.lenExtra := @LEN_EXTRA[257];
+            ta.distBase := @DIST_BASE[0]; ta.distExtra := @DIST_EXTRA[0];
+            ppad_tokens(ta);
+          end else
           for i := firstToken to firstToken + nTokens - 1 do begin
             l := z.tokLen[i];
             if l = 0 then begin
@@ -613,5 +647,6 @@ begin
 end;
 
 initialization
+  UseDeflateC := GetEnvironmentVariable('PPA_NOC') <> '1';
   MakeTables;
 end.
