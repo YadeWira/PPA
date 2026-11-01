@@ -53,7 +53,7 @@ begin
   Writeln('  -th N, --threads=N threads (default: the processors, up to 8), one file each');
   Writeln('  --no-verify        a: do not decompress the result to check it first');
   Writeln('  --max              a: the slow model for every image (by default only where it is');
-  Writeln('                     10% smaller): smaller still, ten times slower to extract');
+  Writeln('                     much smaller): smaller still, ten to forty times slower to extract');
   Writeln('  --max-output=SIZE  x: refuse a declared original above SIZE (256M; K/M/G; 0 = none)');
   Writeln('  -n, --dry-run      do everything but write');
   Writeln('  -q, --quiet        only errors');

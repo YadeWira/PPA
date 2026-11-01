@@ -24,7 +24,7 @@ over a large corpus, is the oracle for the whole project.
 | 2b | `ppazlib` | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | in progress: zlib's choices exact |
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
 | 4 | `ppaarith` | binary arithmetic coder, adaptive bit counters, stretch and squash | done |
-| 5 | `ppafast`, `ppamodel` | modelling the pixels (the fast model by default, the slow one with `--max`), the deflate corrections and the raw bytes | fast model; slow one, second version |
+| 5 | `ppastatic`, `ppafast`, `ppamodel` | modelling the pixels (three models, chosen by image; the slow one for all with `--max`), the deflate corrections and the raw bytes | static and fast models; slow one, second version |
 | 6 | `ppacodec` | the compressed stream, verified at compress time | done |
 | 7 | `ppaformat`, `ppacli` | the `.ppa` file (`FORMAT.md`) and the `ppa` command (`CLI.md`) | done |
 
@@ -205,15 +205,16 @@ and the substreams, each its own arithmetic stream. Substream 0 holds:
   a byte model (orders 0 to 3, mixed): the kind of file; each chunk's type,
   length and CRC when wrong, and either the image stream it belongs to (and
   an fdAT's sequence number) or its data; the bytes after the end; and for
-  each image stream how it is kept (as bytes, as an image with the fast
-  model or with the slow one, as PJA's stream);
+  each image stream how it is kept (as bytes, as an image with the static,
+  the fast or the slow model, as PJA's stream);
 - then the image streams kept as **bytes**, in order (the byte model, one
   that goes on learning from stream to stream).
 
 And each image stream kept as an **image** follows, band by band, a
-substream each: `CodeImageFast` for the images of 8-bit samples that are
-not a palette, unless the slow model is much smaller (below);
-`CodeImageBand` for the others, and for every image with `--max`. A non-interlaced image goes in horizontal
+substream each: for the images of 8-bit samples that are not a palette,
+`EncodeImageStatic` (its own bytes, below), `CodeImageFast` or
+`CodeImageBand`, as the choice below says; `CodeImageBand` for the others,
+and for every image with `--max`. A non-interlaced image goes in horizontal
 bands of at least 2 MB unfiltered (`BAND_BYTES`), at most 16; an
 interlaced one in one. Each band has its own model and reads nothing
 before its own first line (its first line has none above, its match model
@@ -375,6 +376,55 @@ the deflate bits, the Adler-32:
 - **The filters, the CRC-32, the Adler-32, the deflate bit writer**: their
   bounds checked once, not at each byte (the filters a loop per filter
   type, the CRC four bytes at a time, the bit writer 32 bits at a time).
+
+## Layer 5, the static model (01/11/2026)
+
+The fast model still left PPA three times as slow as packPNG to
+decompress the 20 photos (26.4 s against 8.6 s): packPNG's own model
+(WebP lossless) costs next to nothing. `ppastatic` codes what the fast
+model codes at the cost of a table lookup a sample:
+
+- **The prediction**: LOCO-I's MED, and for a colour channel the channel
+  before plus MED of the differences to it. Blending eight predictors, as
+  the fast model does, gave only 1.3% more here: the counters' adaptation
+  is what used it.
+- **The residual**, folded and zigzagged to a symbol 0..255, in one of 64
+  contexts: an energy bin (the residuals around, the channel before's, the
+  gradient) by channel. Each context's frequencies (12 bits) are counted
+  over the band and sent before it; the symbols are coded by **rANS** (one
+  32-bit state, a byte at a time). Huffman codes were tried first: twice
+  the entropy on smooth photos, where the zero residual is more likely than
+  one half and Huffman cannot spend less than a bit.
+- **A band's substream**: the length of an arithmetic stream (the byte
+  model) holding the frequencies and the lines' filters, that stream, then
+  the rANS bytes. The decoder checks every table (each used context sums
+  to 4096) and never reads outside the substream.
+- The line loop in C (`ppastaticc.c`), its Pascal reference line for line,
+  the same streams from both.
+
+Measured on 01/11/2026, the 5 photos used to tune it: 110.4% of the slow
+model's size (the fast one: 102.4%); 7 generated images: drawings twice
+as large, photos 116-121%; the corpus's 152 images of 8-bit samples
+78.35% of their zlib streams (the slow model: 48.8%). Decoding a 1920x1080
+photo: about 0.12 s (the fast model: 0.85 s).
+
+**The choice** (`ChooseModel`, compressing only): the three models code a
+sample of the image (the lines in its middle, 256 KB, or all of it); the
+static model takes it unless it is more than 25% larger than the fast
+one, or the image is smaller than 256 KB (its tables would weigh, and its
+time does not matter); otherwise the slow model if it is 10% smaller than
+the fast one, else the fast one. Photographs take the static model,
+drawings the others. The corpus: 56.78% (the fast model and the slow one
+alone: 55.02%; the slow one everywhere: 51.03%).
+
+| the 20 photos, one thread | packPNG 2.0b | fast model | static model |
+|---|---|---|---|
+| `ppa x` | 8.7 s | 26.4 s | 14.7 s |
+| `ppa a` | 82.0 s | 67.0 s | 41.9 s |
+| size | 73.92% | 58.84% | 62.29% |
+
+What is left of `ppa x` is mostly zlib's choices rebuilt: about 0.45 s of
+the photo's 0.74 s.
 
 ## Speed, first pass (31/10/2026)
 

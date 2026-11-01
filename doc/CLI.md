@@ -13,7 +13,7 @@ ppa list FILE...            what each .ppa holds: original size, stored size, ex
 | `-f`, `--force` | replace an existing output, only with one that verified |
 | `-th N`, `--threads=N` | threads; by default the processors, up to 8. They go to files first, several at once, and what is left to each file's image streams (zlib's parameters when compressing, the deflate streams rebuilt when extracting). Each file's lines still come out in the order of the inputs; the `.ppa` is the same bytes whatever the threads |
 | `--no-verify` | `a`: do not decompress the stream to check it before writing. The hash still catches a codec bug when extracting |
-| `--max` | `a`: every image with the slow model (`ppamodel`): a few percent smaller on photographs, more on drawings, about ten times slower to extract. By default the images of 8-bit samples (gray, gray and alpha, RGB, RGBA) take the fast one, unless the slow one is at least 10% smaller on a sample of the image; `x` needs no switch |
+| `--max` | `a`: every image with the slow model (`ppamodel`): smaller still (a tenth on photographs, more on drawings), ten to forty times slower to extract. By default an image of 8-bit samples (gray, gray and alpha, RGB, RGBA) takes the static model, or where that loses much (drawings) the fast or the slow one, as a sample of the image shows; `x` needs no switch |
 | `--max-output=SIZE` | `x`: refuse a declared original above SIZE (`256M` by default, `K`/`M`/`G`, `0` = no limit) |
 | `-n`, `--dry-run` | do everything but write |
 | `-q`, `--quiet` | only errors |

@@ -30,7 +30,7 @@ sh pas/build_c.sh "$OUT/c" || { echo "the C part did not build (CC=${CC:-cc})"; 
 if [ "$(uname -s)" = Linux ] && command -v nm > /dev/null; then
   if nm "$OUT"/c/*.o | grep ' U '; then echo "FAIL: the C objects need a library"; exit 1; fi
 fi
-for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model measure_fast test_codec; do
+for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model measure_fast measure_static test_codec; do
   # shellcheck disable=SC2086
   $FPC -O2 -Fupas -Fipas -Fuvendor/pja/pas -Fivendor/pja/pas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/$prog$EXE" pas/tests/$prog.pas > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
@@ -71,10 +71,14 @@ cmp -s "$OUT/model.txt" "$OUT/model_pas.txt" || { echo "FAIL: the C and Pascal p
 cat "$OUT/fast.txt"
 PPA_NOC=1 "$OUT/measure_fast$EXE" tests/png | sed 's/, encode .*, \([0-9]* failures\)/, \1/' > "$OUT/fast_pas.txt"
 cmp -s "$OUT/fast.txt" "$OUT/fast_pas.txt" || { echo "FAIL: the C and Pascal fast models differ"; cat "$OUT/fast_pas.txt"; exit 1; }
+"$OUT/measure_static$EXE" tests/png | sed 's/, encode .*, \([0-9]* failures\)/, \1/' > "$OUT/static.txt"
+cat "$OUT/static.txt"
+PPA_NOC=1 "$OUT/measure_static$EXE" tests/png | sed 's/, encode .*, \([0-9]* failures\)/, \1/' > "$OUT/static_pas.txt"
+cmp -s "$OUT/static.txt" "$OUT/static_pas.txt" || { echo "FAIL: the C and Pascal static models differ"; cat "$OUT/static_pas.txt"; exit 1; }
 
 # each part's own hash too, to find which one differs when the job that
 # compares the platforms fails
-for part in streams zlib model fast ppa; do echo "$part: $(tr -d '\r' < "$OUT/$part.txt" | $SHA | cut -c1-16)"; done
+for part in streams zlib model fast static ppa; do echo "$part: $(tr -d '\r' < "$OUT/$part.txt" | $SHA | cut -c1-16)"; done
 cat "$OUT/ppa.txt"
-cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" "$OUT/fast.txt" "$OUT/ppa.txt" "$OUT/bands.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
+cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" "$OUT/fast.txt" "$OUT/static.txt" "$OUT/ppa.txt" "$OUT/bands.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
 echo "hash: $(cat hash.txt)"

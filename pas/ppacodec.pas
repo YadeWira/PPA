@@ -61,7 +61,7 @@ function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out w
 
 implementation
 
-uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppafast, ppathreads,
+uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppafast, ppastatic, ppathreads,
   pjacodec, pjamodel, pjav7;
 
 const
@@ -71,7 +71,9 @@ const
   MODE_JPEG = 2;
   { an image with ppafast's model (MODE_IMAGE: with ppamodel's) }
   MODE_FAST = 3;
-  IMAGE_MODES = [MODE_IMAGE, MODE_FAST];
+  { an image with ppastatic's model: its own bytes, not an arithmetic stream }
+  MODE_STATIC = 4;
+  IMAGE_MODES = [MODE_IMAGE, MODE_FAST, MODE_STATIC];
   { A non-interlaced image goes in horizontal bands of at least this many
     unfiltered bytes, at most MAX_BANDS, each its own arithmetic stream with
     its own model, coded and decoded in parallel. The count depends only on
@@ -80,9 +82,13 @@ const
     0.7%, 1.2%; a 1.9 MB RGBA frame in 2 bands 1.6%. }
   BAND_BYTES = 2 * 1024 * 1024;
   MAX_BANDS = 16;
-  { the slow model for an image the fast one takes only when it is this
-    many percent smaller on a sample of SAMPLE_BYTES (SlowMuchSmaller) }
+  { the model of an image of 8-bit samples (ChooseModel), by its size on a
+    sample of SAMPLE_BYTES: the static one unless STATIC_LOSS percent larger
+    than the fast one; the slow one where SLOW_GAIN percent smaller than
+    the fast one }
   SLOW_GAIN = 10;
+  STATIC_LOSS = 25;
+  STATIC_MIN_BYTES = 256 * 1024;
   SAMPLE_BYTES = 256 * 1024;
   INTERLACED_TRY_BYTES = 1024 * 1024;
 
@@ -263,20 +269,21 @@ begin
   Result := True;
 end;
 
-{ Whether the slow model makes an image (one the fast model takes) much
-  smaller: both code a sample of it, the lines in the middle (SAMPLE_BYTES
-  of them), or all of it when small; the slow one must be SLOW_GAIN percent
-  smaller. Drawings are where it is (up to half the size); photographs
-  are within a few percent either way, and keep the fast model. }
-function SlowMuchSmaller(var px: TPixels): Boolean;
-var y0, rows, rb, h: SizeInt; e: TArithEncoder; sFast, sSlow: SizeInt;
+{ Which model an image of 8-bit samples takes: the three code a sample of
+  it (the lines in the middle, SAMPLE_BYTES of them, or all of it when
+  small). The static one, the quickest by far to decompress, unless it is
+  more than STATIC_LOSS percent larger than the fast one (drawings); then
+  the slow one if it is SLOW_GAIN percent smaller than the fast one, else
+  the fast one. Photographs take the static model. }
+function ChooseModel(var px: TPixels): Integer;
+var y0, rows, rb, h: SizeInt; e: TArithEncoder; sStatic, sFast, sSlow: SizeInt;
 begin
-  Result := False;
+  Result := MODE_FAST;
   rb := px.passes[0].rowBytes; h := px.passes[0].height;
   if (rb = 0) or (h = 0) then Exit;
   if Length(px.passes) <> 1 then begin
     { interlaced: no band to take, the whole image or nothing }
-    if FilteredSize(px) > INTERLACED_TRY_BYTES then Exit;
+    if FilteredSize(px) > INTERLACED_TRY_BYTES then Exit(MODE_STATIC);
     y0 := 0; rows := High(SizeInt);
   end else begin
     rows := SAMPLE_BYTES div rb;
@@ -284,8 +291,13 @@ begin
     if rows >= h then begin y0 := 0; rows := h; end else y0 := (h - rows) div 2;
   end;
   e.Init; CodeImageFast(px, y0, rows, @e, nil); sFast := Length(e.Finish);
+  { a small image: its tables would weigh, and its time does not matter }
+  if FilteredSize(px) >= STATIC_MIN_BYTES then begin
+    sStatic := Length(EncodeImageStatic(px, y0, rows));
+    if Int64(sStatic) * 100 <= Int64(sFast) * (100 + STATIC_LOSS) then Exit(MODE_STATIC);
+  end;
   e.Init; CodeImageBand(px, y0, rows, @e, nil); sSlow := Length(e.Finish);
-  Result := Int64(sSlow) * 100 < Int64(sFast) * (100 - SLOW_GAIN);
+  if Int64(sSlow) * 100 < Int64(sFast) * (100 - SLOW_GAIN) then Result := MODE_IMAGE;
 end;
 
 { Whether stream s can be kept as an image, and its plan }
@@ -308,7 +320,7 @@ begin
   e.endPad := plan.z.endPad; e.tail := plan.z.tail;
   back := Encode(e);
   if (Length(back) <> Length(a)) or not CompareMem(@back[0], @a[0], Length(a)) then Exit;
-  if FastModel and FastEligible(info) and not SlowMuchSmaller(plan.px) then plan.mode := MODE_FAST
+  if FastModel and FastEligible(info) then plan.mode := ChooseModel(plan.px)
   else plan.mode := MODE_IMAGE;
   Result := True;
 end;
@@ -333,6 +345,10 @@ var
   procedure CodeBand(k: SizeInt);
   var e: TArithEncoder;
   begin
+    if plans[jobs[k].s].mode = MODE_STATIC then begin
+      subs[k] := EncodeImageStatic(plans[jobs[k].s].px, jobs[k].firstRow, jobs[k].rows);
+      Exit;
+    end;
     e.Init;
     if plans[jobs[k].s].mode = MODE_FAST then CodeImageFast(plans[jobs[k].s].px, jobs[k].firstRow, jobs[k].rows, @e, nil)
     else CodeImageBand(plans[jobs[k].s].px, jobs[k].firstRow, jobs[k].rows, @e, nil);
@@ -462,6 +478,7 @@ var
   maxSmall: Int64;
   nSubs: Int64; subLen, subPos: array of Int64;
   jobs: array of TBandJob; nJobs, nJpeg: SizeInt; jpegSub: array of SizeInt;
+  bandBad: array of Boolean;
 
   function Bad(const s: string): Boolean;
   begin
@@ -471,6 +488,11 @@ var
   procedure DecodeBand(k: SizeInt);
   var d: TArithDecoder;
   begin
+    if modes[jobs[k].s] = MODE_STATIC then begin
+      if not DecodeImageStatic(pxs[jobs[k].s], jobs[k].firstRow, jobs[k].rows, stream, subPos[k + 1], subLen[k + 1]) then
+        bandBad[k] := True;
+      Exit;
+    end;
     d.Init(Copy(stream, subPos[k + 1], subLen[k + 1]), 0);
     if modes[jobs[k].s] = MODE_FAST then CodeImageFast(pxs[jobs[k].s], jobs[k].firstRow, jobs[k].rows, nil, @d)
     else CodeImageBand(pxs[jobs[k].s], jobs[k].firstRow, jobs[k].rows, nil, @d);
@@ -585,7 +607,7 @@ begin
     p.streams[s].header := Int64(r.GetVar(nChunks)) - 1;
     p.streams[s].frame := Int64(r.GetVar(nChunks)) - 1;
     modes[s] := r.Get;
-    if not r.ok or (modes[s] > MODE_FAST) then Exit(Bad('bad structure'));
+    if not r.ok or (modes[s] > MODE_STATIC) then Exit(Bad('bad structure'));
     if (modes[s] = MODE_JPEG) and not (p.streams[s].kind in [skJdat, skJdaa]) then Exit(Bad('bad structure'));
     if modes[s] in IMAGE_MODES then begin
       prms[s].level := r.Get; prms[s].strategy := r.Get; prms[s].memLevel := r.Get; prms[s].wbits := r.Get;
@@ -617,7 +639,7 @@ begin
       CodeBytes(rm, p.streams[s].data, 0, streamLen[s], nil, @dec);
     end else if modes[s] in IMAGE_MODES then begin
       if not StreamImage(p, s, info) or not InitLayout(info, pxs[s]) then Exit(Bad('bad image header'));
-      if (modes[s] = MODE_FAST) and not FastEligible(info) then Exit(Bad('bad structure'));
+      if (modes[s] in [MODE_FAST, MODE_STATIC]) and not FastEligible(info) then Exit(Bad('bad structure'));
       if FilteredSize(pxs[s]) + Int64(Length(pxTails[s])) > MAX_INFLATE_RATIO * streamLen[s] + 1024 then
         Exit(Bad('image larger than its stream can hold'));
       Inc(nJobs, BandCount(pxs[s]));
@@ -634,6 +656,7 @@ begin
     if modes[s] = MODE_JPEG then begin jpegSub[s] := i; Inc(i); end;
   { each band from its own substream, in parallel }
   jobs := nil; SetLength(jobs, nJobs);
+  bandBad := nil; SetLength(bandBad, nJobs);
   nJobs := 0;
   for s := 0 to nStreams - 1 do
     if modes[s] in IMAGE_MODES then AddBands(jobs, nJobs, s, pxs[s]);
@@ -641,6 +664,8 @@ begin
     for i := nJobs - 1 downto 0 do DecodeBand(i)
   else
     ParallelFor(nJobs, BandThreads, @DecodeBand);
+  for i := 0 to nJobs - 1 do
+    if bandBad[i] then Exit(Bad('image band damaged'));
   for s := 0 to nStreams - 1 do
     if modes[s] in IMAGE_MODES then begin
       pxs[s].tail := pxTails[s];
