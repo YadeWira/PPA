@@ -77,9 +77,9 @@ begin
   Result := Result xor (Result shr 15);
 end;
 
-function Slot(base, partial: Cardinal): Cardinal; inline;
+function Slot(ctx, partial: Cardinal): Cardinal; inline;
 begin
-  Result := ((base shr (32 - TABLE_BITS)) xor ((partial * Cardinal(2654435761)) shr (32 - TABLE_BITS))) and TABLE_MASK;
+  Result := ((ctx shr (32 - TABLE_BITS)) xor ((partial * Cardinal(2654435761)) shr (32 - TABLE_BITS))) and TABLE_MASK;
 end;
 {$pop}
 
