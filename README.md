@@ -33,11 +33,12 @@ The command is described in [`doc/CLI.md`](doc/CLI.md), the file in
 ## Building and tests
 
 ```sh
-fpc -O3 -dPPA_FAST -Fupas -Fipas -FUbuild -obuild/ppa pas/ppacli.pas      # the command
+sh pas/build_c.sh build/c                                                   # the C part
+fpc -O3 -dPPA_FAST -Fupas -Fipas -Fobuild/c -FUbuild -obuild/ppa pas/ppacli.pas   # the command
 ```
 
 ```sh
-pas/run_tests.sh                                  # needs fpc 3.2.2 and python3
+pas/run_tests.sh                                  # needs fpc 3.2.2, a C compiler and python3
 PNG_CORPUS=dir1:dir2 pas/run_tests.sh             # plus the round trip over those directories
 ```
 

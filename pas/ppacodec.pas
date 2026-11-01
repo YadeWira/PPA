@@ -168,9 +168,9 @@ begin
   if not ppadeflate.Decode(a, not IsZlibHeader(a), MAX_IMAGE_BYTES, plan.z).Ok then Exit;
   if not StreamImage(p, s, info) then Exit;
   if not Unfilter(plan.z.plain, info, plan.px) then Exit;
-  if not FindZlibParams(plan.z, plan.prm) then Exit;
-  { the choices zlib makes, written, must be the stream }
-  ZlibChoices(plan.z.plain, plan.prm, nil, e);
+  { the choices zlib makes with them (all of them: the search compared
+    every block), written, must be the stream }
+  if not FindZlibParams(plan.z, plan.prm, e) then Exit;
   e.raw := plan.z.raw; e.header := plan.z.header; e.adlerOk := plan.z.adlerOk;
   e.endPad := plan.z.endPad; e.tail := plan.z.tail;
   back := Encode(e);

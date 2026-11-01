@@ -24,8 +24,16 @@
 unit ppazlib;
 
 {$I ppa.inc}
-{$ifopt R-}{$fatal ppazlib: range checks ($R+) are mandatory}{$endif}
-{$ifopt Q-}{$fatal ppazlib: overflow checks ($Q+) are mandatory}{$endif}
+{ PPA_FAST: the release build, without range and overflow checks, as the
+  model's. The predictor only indexes its own arrays with its own values
+  (the parameters are validated before it runs), never with what a stream
+  says; the checked build is the reference and gives the same choices. }
+{$ifdef PPA_FAST}
+  {$R-}{$Q-}
+{$else}
+  {$ifopt R-}{$fatal ppazlib: range checks ($R+) are mandatory}{$endif}
+  {$ifopt Q-}{$fatal ppazlib: overflow checks ($Q+) are mandatory}{$endif}
+{$endif}
 
 interface
 
@@ -57,6 +65,9 @@ function ZlibChoices(const plain: TBytes; const prm: TZlibParams; ref: PZStream;
   levels from the header's FLEVEL (any with a bare deflate stream), the
   window from its CINFO up to 15, every strategy and memLevel. }
 function FindZlibParams(const z: TZStream; out prm: TZlibParams): Boolean;
+{ The same, also giving the choices found (z's blocks and tokens, made by
+  zlib with prm) }
+function FindZlibParams(const z: TZStream; out prm: TZlibParams; out choices: TZStream): Boolean;
 
 { The zlib header zlib writes for these parameters }
 function ZlibHeader(const prm: TZlibParams): Word;
@@ -664,11 +675,18 @@ begin
 end;
 
 function FindZlibParams(const z: TZStream; out prm: TZlibParams): Boolean;
-var lvMin, lvMax, wbMin, lv, st, ml, wb: Integer; e: TZStream;
+var e: TZStream;
+begin
+  Result := FindZlibParams(z, prm, e);
+end;
+
+function FindZlibParams(const z: TZStream; out prm: TZlibParams; out choices: TZStream): Boolean;
+var lvMin, lvMax, wbMin, lv, st, ml, wb: Integer;
 const ML_ORDER: array[0..8] of Integer = (8, 9, 7, 6, 5, 4, 3, 2, 1);
 begin
   Result := False;
   prm := Default(TZlibParams);
+  choices := Default(TZStream);
   case z.header[1] shr 6 of
     0: begin lvMin := 1; lvMax := 1; end;
     1: begin lvMin := 2; lvMax := 5; end;
@@ -684,7 +702,7 @@ begin
           { huffman and rle do not depend on the level }
           if (st in [Z_HUFFMAN_ONLY, Z_RLE]) and (lv <> lvMin) then Continue;
           prm.level := lv; prm.strategy := st; prm.memLevel := ML_ORDER[ml]; prm.wbits := wb;
-          if ZlibChoices(z.plain, prm, @z, e) then Exit(True);
+          if ZlibChoices(z.plain, prm, @z, choices) then Exit(True);
         end;
 end;
 

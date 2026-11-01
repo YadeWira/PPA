@@ -6,7 +6,7 @@
     measure_model <directory> [-v] }
 program measure_model;
 {$I ../ppa.inc}
-uses SysUtils, Classes, DateUtils, ppapng, ppadeflate, ppapixels, ppaarith, ppamodel;
+uses SysUtils, Classes, DateUtils, ppacrc, ppapng, ppadeflate, ppapixels, ppaarith, ppamodel;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);
@@ -18,7 +18,7 @@ var
   d, coded: TBytes; p: TPng; z: TZStream; info: TImageInfo; px, back: TPixels;
   e: TArithEncoder; dc: TArithDecoder;
   streamBytes, codedBytes, rawBytes, failures, images: Int64;
-  t0: TDateTime;
+  t0: TDateTime; crc: LongWord;
 begin
   dir := ParamStr(1); verbose := ParamStr(2) = '-v';
   files := TStringList.Create; files.Sorted := True;
@@ -27,7 +27,7 @@ begin
     FindClose(sr);
   end;
   streamBytes := 0; codedBytes := 0; rawBytes := 0; failures := 0; images := 0;
-  t0 := Now;
+  t0 := Now; crc := CRC32_INIT;
   for i := 0 to files.Count - 1 do begin
     d := ReadFile(files[i]);
     name := ExtractFileName(files[i]);
@@ -52,6 +52,7 @@ begin
       Inc(images);
       Inc(streamBytes, Length(p.streams[s].data));
       Inc(codedBytes, Length(coded));
+      crc := Crc32Update(crc, coded, 0, Length(coded));
       Inc(rawBytes, Length(px.data));
       if verbose then
         Writeln(Format('  %8d -> %8d (%6.2f%%)  %dx%d ct%d d%d  stream %d  %s',
@@ -59,7 +60,9 @@ begin
            info.width, info.height, info.colorType, info.depth, s, name]));
     end;
   end;
-  Writeln(Format('%d images: zlib streams %d bytes, model %d bytes = %.2f%% (%d bytes unfiltered), %.1f s, %d failures',
-    [images, streamBytes, codedBytes, 100 * codedBytes / streamBytes, rawBytes, SecondSpan(Now, t0), failures]));
+  { the CRC-32 of every coded stream: the C loop and the Pascal one
+    (PPA_NOC=1) must give the same }
+  Writeln(Format('%d images: zlib streams %d bytes, model %d bytes = %.2f%% (%d bytes unfiltered), crc %.8x, %.1f s, %d failures',
+    [images, streamBytes, codedBytes, 100 * codedBytes / streamBytes, rawBytes, Crc32Final(crc), SecondSpan(Now, t0), failures]));
   if failures > 0 then Halt(1);
 end.

@@ -50,13 +50,24 @@ type
 procedure CodeBytes(var m: TByteModel; var data: TBytes; first, n: SizeInt;
   enc: PArithEncoder; dec: PArithDecoder);
 
+var
+  { the pixel loop in C (ppamodelc.c); False: in Pascal, the reference.
+    PPA_NOC=1 in the environment makes it False: the suite codes the same
+    images both ways and demands the same streams }
+  UseC: Boolean = True;
+
 implementation
+
+{$L ppamodelc.o}
 
 const
   NCTX = 6;
   NIN = NCTX + 1;               { the contexts and a bias }
-  TABLE_BITS = 20;
+  TABLE_BITS = 22;
   TABLE_MASK = (1 shl TABLE_BITS) - 1;
+  { a table is buckets of 16 counters, 64 bytes: the 15 nodes of one
+    nibble's binary tree, so that a nibble's 4 bits read one cache line }
+  BUCKET_BITS = TABLE_BITS - 4;
   COUNTER_LIMIT = 60;
   MIXER_SETS = 16 * 8;          { channel (up to 16 bytes a pixel) x bit position }
   W_MAX = 1 shl 19;
@@ -70,6 +81,7 @@ type
   TCounter = record
     q: Word;
     n: Byte;
+    pad: Byte;      { 4 bytes: 16 to a cache line }
   end;
 
 function CounterP(const c: TCounter): Integer; inline;
@@ -77,12 +89,16 @@ begin
   Result := c.q xor $8000;
 end;
 
+{ TAdaptiveBit.Update, on the stored form }
 procedure CounterUpdate(var c: TCounter; bit, limit: Integer); inline;
-var a: TAdaptiveBit;
+var p, target: Integer; q: Int64;
 begin
-  a.p := c.q xor $8000; a.n := c.n;
-  a.Update(bit, limit);
-  c.q := a.p xor $8000; c.n := a.n;
+  p := c.q xor $8000;
+  if bit <> 0 then target := PROB_ONE - 1 else target := 1;
+  q := Int64(target - p) * RECIPROCAL[c.n];
+  q := SarInt64(q + (SarInt64(q, 63) and $FFFF), 16);
+  c.q := Word(p + q) xor $8000;
+  if (c.n < limit) and (c.n < MAX_LIMIT) then Inc(c.n);
 end;
 
 type
@@ -91,6 +107,26 @@ type
     w: array[0..MIXER_SETS - 1, 0..NIN - 1] of Integer;
     filt: array[0..5, 1..7] of TAdaptiveBit;
   end;
+
+type
+  { ppamodelc.c's rowargs_t }
+  TRowArgs = record
+    row, prior: PByte;
+    rb, bpp, hasPrior: SizeInt;
+    t: array[0..NCTX - 1] of Pointer;
+    w: PInteger;
+    recip: PInteger;
+    stretchTab: PSmallInt;
+    squashTab: PWord;
+    bucketBits, limit, wMax, rate, stretchMax: SizeInt;
+    x1, x2, x: PCardinal;
+    buf: PByte;
+    pos: PSizeInt;
+    len: SizeInt;
+    encoding: SizeInt;
+  end;
+
+procedure ppam_row(var a: TRowArgs); cdecl; external name 'ppam_row';
 
 procedure InitModel(var m: TModel);
 var i, j: Integer;
@@ -112,15 +148,27 @@ begin
   Result := Result xor (Result shr 15);
 end;
 
-function Slot(ctx, partial: Cardinal): Cardinal; inline;
+{ the hash of a context and a nibble (0: the byte's first; 16 + the first
+  nibble: its second): its high bits choose the bucket, its low 16 bits
+  are the bucket's check }
+function BucketHash(ctx, nib: Cardinal): Cardinal; inline;
 begin
-  Result := ((ctx shr (32 - TABLE_BITS)) xor ((partial * Cardinal(2654435761)) shr (32 - TABLE_BITS))) and TABLE_MASK;
+  Result := ctx xor (nib * Cardinal(2654435761));
+  Result := Result xor (Result shr 13) * Cardinal(2246822519);
 end;
 {$pop}
 
 function Clamp255(v: Integer): Integer; inline;
 begin
   if v < 0 then Result := 0 else if v > 255 then Result := 255 else Result := v;
+end;
+
+{ The first counter of the bucket for hash h. Its counter 0 is not a tree
+  node (a check there, emptying a bucket another context has, was tried:
+  worse, 31/10/2026). }
+function BucketOf(h: Cardinal): Cardinal; inline;
+begin
+  Result := ((h shr (32 - BUCKET_BITS)) and ((1 shl BUCKET_BITS) - 1)) shl 4;
 end;
 
 procedure CodeImage(var px: TPixels; enc: PArithEncoder; dec: PArithDecoder);
@@ -130,7 +178,8 @@ var
   W, N, NW, NE, grad, avg, res, prevFilter, f, node, bit, j, i: Integer;
   ctxBase: array[0..NCTX - 1] of Cardinal;
   st: array[0..NIN - 1] of Integer;
-  idx: array[0..NCTX - 1] of Cardinal;
+  idx, bkt: array[0..NCTX - 1] of Cardinal;
+  ra: TRowArgs;
   dot, p, err, ws, b, value: Integer;
   partial: Cardinal;
 
@@ -145,6 +194,16 @@ begin
   InitModel(m);
   bpp := px.bpp;
   prevFilter := 5;
+  ra := Default(TRowArgs);
+  ra.bpp := bpp;
+  for i := 0 to NCTX - 1 do ra.t[i] := @m.t[i][0];
+  ra.w := @m.w[0, 0];
+  ra.recip := @RECIPROCAL[0];
+  ra.stretchTab := @STRETCH_TAB[0];
+  ra.squashTab := @SQUASH_TAB[0];
+  ra.bucketBits := BUCKET_BITS; ra.limit := COUNTER_LIMIT; ra.wMax := W_MAX;
+  ra.rate := LEARNING_RATE; ra.stretchMax := STRETCH_MAX;
+  ra.encoding := Ord(enc <> nil);
   for pi_ := 0 to High(px.passes) do begin
     rb := px.passes[pi_].rowBytes;
     for y := 0 to px.passes[pi_].height - 1 do begin
@@ -160,8 +219,29 @@ begin
       prevFilter := f;
       row := px.passes[pi_].first + y * rb;
       prior := row - rb;
+      if UseC then begin
+        if rb = 0 then Continue;
+        ra.row := @px.data[row];
+        if y > 0 then begin ra.prior := @px.data[prior]; ra.hasPrior := 1; end
+        else begin ra.prior := @px.data[row]; ra.hasPrior := 0; end;
+        ra.rb := rb;
+        if enc <> nil then begin
+          { room for the worst: 16 bits out for every bit in }
+          if enc^.n + 16 * rb + 64 > Length(enc^.d) then SetLength(enc^.d, 2 * (enc^.n + 16 * rb + 64));
+          ra.x1 := @enc^.x1; ra.x2 := @enc^.x2; ra.x := nil;
+          ra.buf := @enc^.d[0]; ra.pos := @enc^.n; ra.len := Length(enc^.d);
+        end else begin
+          ra.x1 := @dec^.x1; ra.x2 := @dec^.x2; ra.x := @dec^.x;
+          if Length(dec^.d) > 0 then ra.buf := @dec^.d[0] else ra.buf := nil;
+          ra.pos := @dec^.p; ra.len := Length(dec^.d);
+        end;
+        ppam_row(ra);
+        Continue;
+      end;
+      k := bpp - 1;
       for x := 0 to rb - 1 do begin
-        k := x mod bpp;
+        { x mod bpp, without a division }
+        Inc(k); if k = bpp then k := 0;
         if x >= bpp then W := px.data[row + x - bpp] else W := 0;
         if y > 0 then N := px.data[prior + x] else N := W;
         if (y > 0) and (x >= bpp) then NW := px.data[prior + x - bpp] else NW := N;
@@ -185,17 +265,26 @@ begin
         ctxBase[5] := Hash(k, Cardinal(Clamp255(grad + res)) or (Cardinal(res + 256) shl 8), 6);
         if enc <> nil then value := px.data[row + x] else value := 0;
         partial := 1;
+        for i := 0 to NCTX - 1 do bkt[i] := BucketOf(BucketHash(ctxBase[i], 0));
         for j := 7 downto 0 do begin
+          if j = 3 then
+            for i := 0 to NCTX - 1 do bkt[i] := BucketOf(BucketHash(ctxBase[i], partial));
+          { the node in the nibble's tree: 1, then 2-3, 4-7, 8-15 }
+          if j >= 4 then node := partial
+          else node := (1 shl (3 - j)) or Integer(partial and ((1 shl (3 - j)) - 1));
           ws := (k and 15) * 8 + j;
           dot := 0;
           for i := 0 to NCTX - 1 do begin
-            idx[i] := Slot(ctxBase[i], partial);
-            st[i] := Stretch(CounterP(m.t[i][idx[i]]));
+            idx[i] := bkt[i] + Cardinal(node);
+            st[i] := STRETCH_TAB[(m.t[i][idx[i]].q xor $8000) shr 4];
             Inc(dot, (m.w[ws, i] * st[i]) div 8192);
           end;
           st[NCTX] := 256;
           Inc(dot, (m.w[ws, NCTX] * st[NCTX]) div 8192);
-          p := Squash(dot div 8);
+          dot := dot div 8;
+          if dot > STRETCH_MAX then dot := STRETCH_MAX;
+          if dot < -STRETCH_MAX - 1 then dot := -STRETCH_MAX - 1;
+          p := SQUASH_TAB[dot + 2048];
           if enc <> nil then begin bit := (value shr j) and 1; enc^.Encode(bit, p); end
           else bit := dec^.Decode(p);
           { the mixer learns from the error, the counters from the bit }
@@ -285,4 +374,6 @@ begin
   end;
 end;
 
+initialization
+  UseC := GetEnvironmentVariable('PPA_NOC') <> '1';
 end.

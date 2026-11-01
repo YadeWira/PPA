@@ -67,17 +67,19 @@ var
   { RECIPROCAL[n] = 65536 / (n + 1.5), rounded: the rate after n bits }
   RECIPROCAL: array[0..MAX_LIMIT] of Integer;
 
+var
+  { the tables behind Stretch and Squash, in the interface so that the
+    model can index them inline }
+  STRETCH_TAB: array[0..4095] of SmallInt;
+  { squash at x = -2048 .. 2047, step 1, as a 16-bit probability }
+  SQUASH_TAB: array[0..4095] of Word;
+
 { ln(p / (1 - p)) * 256, p in 1/4096 (12 bits), clamped to +-STRETCH_MAX }
 function Stretch(p16: Integer): Integer;
 { the inverse: a 16-bit probability in [1, 65535] }
 function Squash(x: Integer): Integer;
 
 implementation
-
-var
-  STRETCH_TAB: array[0..4095] of SmallInt;
-  { squash at x = -2048 .. 2047, step 1, as a 16-bit probability }
-  SQUASH_TAB: array[0..4095] of Word;
 
 function Split(x1, x2: Cardinal; p: Integer): Cardinal; inline;
 begin

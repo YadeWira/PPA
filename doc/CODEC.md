@@ -246,6 +246,40 @@ payload, cuts: refused or the very original, never another file; each
 header case) and `pas/tests/cli.sh` (the command: every sample back, `-f`,
 `-n`, `list`, a damaged file refused with nothing written, usage errors).
 
+## Speed, first pass (31/10/2026)
+
+Measured first, phase by phase (`measure_phases`), on the corpus's
+1920x1280 photo (4.8 MB of zlib stream, 7.4 MB unfiltered). Before: the
+model took 8.7 s to code it and 9.0 s to decode it, zlib's predictor 2.2 s
+a run, and compressing ran it three times (the search, the check, the
+verification).
+
+- **The predictor without range checks** in the release build (`PPA_FAST`,
+  as the model): it only indexes its own arrays with its own values. 2.2 s
+  to 1.1 s a run. And the search's own choices (it compared every block)
+  are the check: one run less.
+- **The model's counters in buckets of 16**, the 15 nodes of a nibble's
+  binary tree in one 64-byte cache line: two table lookups a byte and a
+  context instead of eight. Tables of 2^22 counters (with 2^20 the buckets
+  cost 2.4% of size; with 2^22 the model is 2.9% smaller than before). A
+  check in each bucket's spare counter, emptying a bucket another context
+  has, was tried and was worse (+7%).
+- **The pixel loop in C** (`pas/ppamodelc.c`, as PJA's `pjav7c.c`): Pascal
+  owns every table and buffer, C codes one line with the coder inline;
+  `PPA_NOC=1` runs the Pascal reference, and the suite demands the same
+  streams from both (and CI on all six platforms). 6.4 s to 4.2 s.
+
+With tables small enough for the cache the C loop takes 3.1 s: about
+2 MB/s is this model's own cost (lpaq's order), not memory's. Further speed
+has to come from less work a bit, as PJA's version 7, and from threads.
+
+| the photo | before | after |
+|---|---|---|
+| `ppa a` (verifying) | 25.4 s | 13.0 s |
+| `ppa a --no-verify` | | 6.3 s |
+| `ppa x` | 10.6 s | 5.8 s |
+| size | 72.13% | 70.05% |
+
 ## Measurements
 
 | date | what | result |

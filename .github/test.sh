@@ -20,14 +20,19 @@ if command -v sha256sum > /dev/null; then SHA="sha256sum"; else SHA="shasum -a 2
 rm -rf "$OUT"; mkdir -p "$OUT/u" "$OUT/z" "$OUT/cu"
 
 echo "== build"
+# the C part (CC: the platform's C compiler). A compiler given by its full
+# path (MSYS2's MinGW-w64 gcc on Windows) needs its own folder on PATH for
+# its DLLs and its cc1/as.
+case ${CC:-} in /*) PATH=$(dirname "$CC"):$PATH; export PATH ;; esac
+sh pas/build_c.sh "$OUT/c" || { echo "the C part did not build (CC=${CC:-cc})"; exit 1; }
 for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model; do
   # shellcheck disable=SC2086
-  $FPC -O2 -Fupas -Fipas -FU"$OUT/u" -o"$OUT/$prog$EXE" pas/tests/$prog.pas > "$OUT/fpc.log" 2>&1 \
+  $FPC -O2 -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/$prog$EXE" pas/tests/$prog.pas > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
 
 # shellcheck disable=SC2086
-$FPC -O3 -dPPA_FAST -Fupas -Fipas -FU"$OUT/cu" -o"$OUT/ppa$EXE" pas/ppacli.pas > "$OUT/fpc.log" 2>&1 \
+$FPC -O3 -dPPA_FAST -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/cu" -o"$OUT/ppa$EXE" pas/ppacli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 "$OUT/ppa$EXE" --version
 
@@ -53,6 +58,8 @@ echo "== layers 4 and 5"
 "$OUT/test_arith$EXE" | tail -1
 "$OUT/measure_model$EXE" tests/png | sed 's/, [0-9.]* s,/,/' > "$OUT/model.txt"
 cat "$OUT/model.txt"
+PPA_NOC=1 "$OUT/measure_model$EXE" tests/png | sed 's/, [0-9.]* s,/,/' > "$OUT/model_pas.txt"
+cmp -s "$OUT/model.txt" "$OUT/model_pas.txt" || { echo "FAIL: the C and Pascal pixel loops differ"; cat "$OUT/model_pas.txt"; exit 1; }
 
 # each part's own hash too, to find which one differs when the job that
 # compares the platforms fails
