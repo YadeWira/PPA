@@ -1,0 +1,152 @@
+# Every platform PPA supports (the same six as PJA) builds the layer tests
+# and runs them on the repository's samples (.github/test.sh), recording a
+# hash of what they found; the last job checks that it is the same
+# everywhere. Linux x86-64 also runs the full suite (pas/run_tests.sh),
+# damage tests included.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux-x64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Free Pascal
+        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: Test
+        run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-linux-x64
+          path: hash.txt
+
+  linux-x64-suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Free Pascal
+        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: pas/run_tests.sh
+        run: pas/run_tests.sh
+
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Free Pascal
+        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: Test
+        run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-linux-arm64
+          path: hash.txt
+
+  linux-x86:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the 32-bit C library
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y libc6:i386
+      - name: Install the 32-bit Free Pascal
+        run: scripts/fpc-i386.sh /tmp/fpc-i386
+      - name: Test
+        env:
+          FPC: /tmp/fpc-i386/fpc
+        run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-linux-x86
+          path: hash.txt
+
+  macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Free Pascal
+        run: brew install fpc
+      - name: Test
+        run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-macos-arm64
+          path: hash.txt
+
+  windows-x64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Free Pascal (win32 and win64)
+        shell: pwsh
+        run: |
+          $url = 'https://sourceforge.net/projects/freepascal/files/Win32/3.2.2/fpc-3.2.2.win32.and.win64.exe/download'
+          curl.exe -L --fail --retry 3 -o "$env:TEMP\fpc-setup.exe" $url
+          Start-Process -Wait -FilePath "$env:TEMP\fpc-setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-'
+          $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
+          if (-not $fpc) { throw 'fpc.exe not found after the installer' }
+          Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+      - name: Test
+        shell: bash
+        env:
+          FPC: fpc -Px86_64
+        run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-windows-x64
+          path: hash.txt
+
+  windows-x86:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Free Pascal (win32 and win64)
+        shell: pwsh
+        run: |
+          $url = 'https://sourceforge.net/projects/freepascal/files/Win32/3.2.2/fpc-3.2.2.win32.and.win64.exe/download'
+          curl.exe -L --fail --retry 3 -o "$env:TEMP\fpc-setup.exe" $url
+          Start-Process -Wait -FilePath "$env:TEMP\fpc-setup.exe" -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-'
+          $fpc = Get-ChildItem C:\FPC -Recurse -Filter fpc.exe | Select-Object -First 1
+          if (-not $fpc) { throw 'fpc.exe not found after the installer' }
+          Split-Path $fpc.FullName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding ascii
+      - name: Test
+        shell: bash
+        env:
+          FPC: fpc -Pi386
+        run: sh .github/test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hash-windows-x86
+          path: hash.txt
+
+  determinism:
+    needs: [linux-x64, linux-arm64, linux-x86, macos-arm64, windows-x64, windows-x86]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hash-*
+      - name: Compare the hashes
+        run: |
+          for f in hash-*/*; do echo "$f: $(cat "$f")"; done
+          n=$(cat hash-*/* | sort -u | wc -l)
+          if [ "$n" -ne 1 ]; then
+            echo "the layers found different things on different platforms" >&2
+            exit 1
+          fi
+          echo "the same on every platform"

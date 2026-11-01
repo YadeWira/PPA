@@ -87,6 +87,7 @@ type
     adlerOk: Boolean;                { the 4 bytes after the data are its Adler-32 }
     tail: TBytes;                    { what follows (the Adler-32 when not adlerOk) }
   end;
+  PZStream = ^TZStream;
 
 { Whether the 2 bytes at a[0..1] are a zlib header deflate can follow. }
 function IsZlibHeader(const a: TBytes): Boolean;

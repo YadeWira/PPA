@@ -14,7 +14,7 @@ echo "== source guards"
 python3 "$PAS/collisions.py" "$PAS"
 
 echo "== build"
-for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt; do
+for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -40,5 +40,9 @@ for d in "${dirs[@]}"; do
   "$OUT/test_deflate" "$d" 1 -dump "$OUT/zdump" > "$OUT/zdump/list"
   python3 "$PPA/tests/zcheck.py" "$OUT/zdump"
 done
+
+echo "== layer 2b: zlib's choices predicted"
+"$OUT/test_zlib" "$PPA/tests/png" | tail -1
+"$OUT/test_zlib" "$PPA/tests/png" | grep -q '16 told by their zlib parameters'
 
 echo "all green"

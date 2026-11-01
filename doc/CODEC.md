@@ -21,7 +21,7 @@ over a large corpus, is the oracle for the whole project.
 |---|---|---|---|
 | 1 | `ppapng` | file ↔ chunks + one data stream per image (IDAT, fdAT, JDAT, JDAA) + what is needed to cut them into the same chunks | done |
 | 2a | `ppadeflate` | zlib stream ↔ the bytes it holds + every choice its encoder made (blocks, codes, tokens, pad bits): the same bits back | done |
-| 2b | | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | next |
+| 2b | `ppazlib` | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | in progress: zlib's choices exact |
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | |
 | 4 | `ppaarith` | binary arithmetic coder and adaptive bit counters | |
 | 5 | `ppamodel` | context modelling of the pixels, the deflate corrections and the raw bytes | |
@@ -84,6 +84,56 @@ Tests: `test_deflate` (every stream back bit for bit; with `-dump`,
 and cuts: decoded or not, never different, never an exception; and the cap
 on the bytes a stream may hold).
 
+## Layer 2b: predicting the choices
+
+### zlib's own choices (`ppazlib`)
+
+Most PNGs are written by libpng, that is by zlib. `ppazlib` is a port of
+zlib 1.3.2's deflate.c and trees.c, cut down to what decides the bits: the
+hash chains and `longest_match`, `deflate_fast` (levels 1-3), `deflate_slow`
+(4-9), `deflate_rle`, `deflate_huff`, the symbol buffer that ends a block
+(`lit_bufsize - 1` symbols), and `_tr_flush_block`'s choice between stored,
+fixed and dynamic, with `build_tree`, `gen_bitlen` and the run-length coding
+of the code lengths. Given the bytes and (level, strategy, memLevel,
+windowBits), it gives the blocks and tokens zlib gives, as a `TZStream` that
+layer 2a's `Encode` writes. A stream zlib wrote is then told by those four
+numbers.
+
+It takes the whole input at once. zlib gives the same bits when fed in
+pieces, as libpng feeds it a row at a time, since it decides only with
+`MIN_LOOKAHEAD` bytes ahead or at the end. Positions are absolute: what
+zlib's sliding window forgets is always further back than `MAX_DIST`. The
+slide does decide whether a block may still be stored (its start must be in
+the window), which is followed. Level 0 is not there yet.
+
+`test_zlib` looks for the parameters: levels from the header's FLEVEL, the
+window from its CINFO up to 15 (libpng may write a smaller CINFO than it
+used), every strategy and memLevel; a candidate is dropped at its first
+token that differs. A stream found is then encoded from the predicted
+choices and must give the same bits.
+
+### What not predicting costs
+
+`measure_parse` (31/10/2026) estimates what storing the choices costs when
+the bytes are known, with a predictor simple enough for a ZPAQL decoder:
+per token literal or match, the match's length, and its distance as a rank
+among the earlier positions starting with the same 3 bytes (most recent
+first) that match at least as long. Order-0 entropy, on the corpus's 224
+streams (32.8 MB):
+
+| part | bytes |
+|---|---|
+| literal or match | 2,924,729 |
+| match lengths | 5,417,378 |
+| distance ranks (97.7% rank 0) | 187,682 |
+| dynamic headers, as written | 175,158 |
+| total | 8,705,012 = 26.6% of the streams |
+
+The distance is almost free given the bytes (zlib takes the most recent of
+the longest); what costs is where the matches are and how long, which is
+exactly what zlib's lazy matching decides. Storing the parse is not the way:
+the choices have to be predicted, and only where the prediction fails told.
+
 ## Measurements
 
 | date | what | result |
@@ -93,3 +143,5 @@ on the bytes a stream may hold).
 | 31/10/2026 | layer 1, the PNG family in the shared sample corpus (77 files: 47 PNG/APNG, 13 MNG, 13 JNG, 7 that are not of the family) | 70/70 back byte for byte, 7 NotPng |
 | 31/10/2026 | layer 2a, the zlib streams of that corpus (224: 1,272 dynamic blocks, 3 stored, 1 fixed; 12 bare deflate from CgBI) | 224/224 back bit for bit, the same bytes as zlib; 7.7 s |
 | 31/10/2026 | layer 2a, damaged streams of `tests/png/` (every bit of the first 512 bytes, cuts) | 68,264 variants, 51,275 decode, 0 failures |
+| 31/10/2026 | layer 2b, `tests/png/`'s 16 streams (ImageMagick, i.e. libpng and zlib) | 16/16 told by their zlib parameters (level 7 filtered or default, level 8), the same bits from the predicted choices |
+| 31/10/2026 | `measure_parse` on the corpus's streams | the parse alone, order 0: 26.6% of the streams |
