@@ -368,6 +368,33 @@ APNG (4.6 MB, level 9): `ppa a` 148 s with one thread, 39.5 s with 8;
 | `ppa x` | 10.6 s | 5.8 s |
 | size | 72.13% | 70.05% |
 
+**The model's loop, again** (01/11/2026). Measured with valgrind
+(callgrind for the instructions, cachegrind for the branches) and the
+clock: ~860 instructions a bit, 2.6 mispredicted branches a bit, a third of
+them one line. Three changes, all giving the same streams bit for bit:
+
+- **The counters without a branch**: `n += n < limit`, and the update's
+  product in 32 bits unsigned (|target - p| < 2^16, recip[n] < 2^16: the
+  floor of |product| / 2^16 with the sign put back is the truncation the
+  64-bit product had). The model's loop 17% quicker.
+- **The tables in one block aligned to 2 MiB**: a bucket is one cache
+  line, and the system can back the tables with large pages (before, about
+  half of them were). 15% on the photo.
+- **The mixer on vectors** (GCC's and clang's vector types: SSE2, NEON, or
+  plain code), its rows padded to 12 weights (`NINP`). Each lane does what
+  the Pascal does to one input. 17% fewer instructions, a few percent of
+  time.
+
+Tried and left out: the arithmetic decoder without a branch, fetching the
+second nibble's buckets ahead (1, 2 or 3 bits ahead), unrolling the bit
+loop, -O2: none above the noise.
+
+| the 20 photos, `-th 1` | before | after |
+|---|---|---|
+| `ppa a` | 300.4 s | 240.8 s |
+| `ppa x` | 155.1 s | 116.0 s |
+| size | 23,569,576 | the same bytes |
+
 ## Measurements
 
 | date | what | result |
@@ -389,5 +416,6 @@ APNG (4.6 MB, level 9): `ppa a` 148 s with one thread, 39.5 s with 8;
 | 31/10/2026 | the six CI platforms (`.github/test.sh`) | the same `.ppa` bytes on all six |
 | 01/11/2026 | layer 5, second version, the corpus's 224 images | **16.7 MB = 50.89% of the zlib streams** (the first: 59.0%), every one decoded back; 383 s coding and decoding, one thread |
 | 01/11/2026 | JNG through PJA 0.6.0 (v7), the corpus's 13 JNG files (85,403 bytes) | 63.48% (as bytes: 88.54%), every one back |
+| 01/11/2026 | the model's loop without its two costly branches, its tables aligned, its mixer on vectors; the 20 photos, one thread | the same `.ppa` bytes; `ppa x` 155.1 s -> 116.0 s, `ppa a` 300.4 s -> 240.8 s |
 | 01/11/2026 | the command, 8 threads, bands, the whole corpus (77 files) | every one back byte for byte; the 70 of the family 32.9 MB -> **16.8 MB = 51.11%** (was 58.81%), the 7 others stored; `ppa a` 220 s, `ppa x` 111 s |
 | 31/10/2026 | layer 6, the corpus's 70 files of the family (32.9 MB) | **19.4 MB = 58.81%**, every one back; 211 image streams as images, 30 as bytes (13 not zlib's, 17 JNG JPEGs); 2,387 s for compressing, verifying and decompressing, one thread: the zlib parameter search and the model are the slow parts |

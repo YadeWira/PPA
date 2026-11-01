@@ -69,11 +69,13 @@ const
   MATCH_BITS = 20;
   MIN_MATCH_LEN = 6;
   NIN = NCTX + 2;               { the contexts, the match model and a bias }
+  NINP = 12;                    { a weight set's row in memory: NIN and zeros, whole vectors for the C }
   TABLE_BITS = 22;
   TABLE_MASK = (1 shl TABLE_BITS) - 1;
   { a table is buckets of 16 counters, 64 bytes: the 15 nodes of one
     nibble's binary tree, so that a nibble's 4 bits read one cache line }
   BUCKET_BITS = TABLE_BITS - 4;
+  TABLE_ALIGN = 2 * 1024 * 1024;
   COUNTER_LIMIT = 60;
   MIXER_SETS = 16 * 8 + 8 * 8;  { channel (up to 16 bytes a pixel) x bit position; activity x bit position }
   W_MAX = 1 shl 19;
@@ -108,9 +110,11 @@ begin
 end;
 
 type
+  PCounter = ^TCounter;
   TModel = record
-    t: array[0..NCTX - 1] of array of TCounter;
-    w: array[0..MIXER_SETS - 1, 0..NIN - 1] of Integer;
+    tall: array of TCounter;                  { the tables' memory, with room to align }
+    t: array[0..NCTX - 1] of PCounter;        { the tables, in tall }
+    w: array[0..MIXER_SETS - 1, 0..NINP - 1] of Integer;
     filt: array[0..5, 1..7] of TAdaptiveBit;
     apm: array of Word;     { [16][256][33] }
     mtab: array of Cardinal;
@@ -149,14 +153,19 @@ type
 procedure ppam_row(var a: TRowArgs); cdecl; external name 'ppam_row';
 
 procedure InitModel(var m: TModel);
-var i, j: Integer;
+var i, j: Integer; a: PtrUInt;
 begin
-  for i := 0 to NCTX - 1 do begin
-    m.t[i] := nil;
-    SetLength(m.t[i], TABLE_MASK + 1);   { zeros: every counter at 1/2 }
-  end;
+  { one block for every table, zeros (every counter at 1/2), the tables
+    aligned to 2 MiB: a bucket is then one cache line, and a system that
+    backs memory with large pages can back all of it }
+  m.tall := nil;
+  SetLength(m.tall, NCTX * (TABLE_MASK + 1) + TABLE_ALIGN div SizeOf(TCounter));
+  a := (TABLE_ALIGN - PtrUInt(@m.tall[0]) mod TABLE_ALIGN) mod TABLE_ALIGN;
+  for i := 0 to NCTX - 1 do
+    m.t[i] := PCounter(PByte(@m.tall[0]) + a) + i * (TABLE_MASK + 1);
   for i := 0 to MIXER_SETS - 1 do
-    for j := 0 to NIN - 1 do m.w[i, j] := (1 shl 16) div NCTX;
+    for j := 0 to NINP - 1 do
+      if j < NIN then m.w[i, j] := (1 shl 16) div NCTX else m.w[i, j] := 0;
   for i := 0 to 5 do for j := 1 to 7 do m.filt[i, j].Init;
   m.mtab := nil;
   SetLength(m.mtab, 1 shl MATCH_BITS);
@@ -419,7 +428,7 @@ begin
   prevFilter := 5;
   ra := Default(TRowArgs);
   ra.bpp := bpp;
-  for i := 0 to NCTX - 1 do ra.t[i] := @m.t[i][0];
+  for i := 0 to NCTX - 1 do ra.t[i] := m.t[i];
   ra.w := @m.w[0, 0];
   ra.recip := @RECIPROCAL[0];
   ra.stretchTab := @STRETCH_TAB[0];

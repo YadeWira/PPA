@@ -13,6 +13,22 @@
 
 #define NCTX 8
 #define NIN (NCTX + 2)   /* the contexts, the match model and a bias */
+#define NINP 12          /* a weight set's row: NIN and zeros (ppamodel's NINP) */
+
+/* The mixer works on whole rows, NINP lanes, in GCC's and clang's vector
+   types: SSE2 on x86, NEON on arm64, plain code where there is neither.
+   Each lane does exactly what the Pascal does to one input (a division
+   truncates toward zero: x / 2^s is (x + (x < 0 ? 2^s - 1 : 0)) >> s), so
+   the sums and the weights are the reference's, bit for bit. */
+typedef int32_t v4 __attribute__((vector_size(16)));
+#define NV (NINP / 4)
+
+/* macros, not functions: a vector passed or returned has no ABI where
+   the build has no vector unit (32-bit x86 without SSE) */
+#define LOAD4(v, p) __builtin_memcpy(&(v), (p), sizeof(v4))
+#define STORE4(p, v) __builtin_memcpy((p), &(v), sizeof(v4))
+#define DIV_POW2(x, s) (((x) + (((x) >> 31) & ((1 << (s)) - 1))) >> (s))
+#define HSUM4(v) ((v)[0] + (v)[1] + (v)[2] + (v)[3])
 #define MINLEN 6
 
 /* ppamodel's TCounter: the probability as p xor 0x8000, its count */
@@ -59,6 +75,19 @@ static inline uint32_t bucket_hash(uint32_t ctx, uint32_t nib) {
   return r ^ ((r >> 13) * 2246822519u);
 }
 
+/* ppamodel's CounterUpdate: p moves toward the target by recip[n] / 65536
+   of the way, the product truncated toward zero, and n counts up to nmax.
+   No branch, no 64-bit product: |target - p| < 2^16 and recip[n] < 2^16, so
+   |product| fits 32 bits unsigned, and truncating toward zero is the floor
+   of |product| / 2^16 with the sign put back. */
+static inline void ctr_update(ctr_t *c, int target, const int32_t *recip, int nmax) {
+  int pp = c->q ^ 0x8000, d = target - pp, sg = d >> 31;
+  uint32_t m = ((uint32_t)((d ^ sg) - sg) * (uint32_t)recip[c->n]) >> 16;
+  int q = ((int)m ^ sg) - sg;
+  c->q = (uint16_t)((uint16_t)(pp + q) ^ 0x8000);
+  c->n = (uint8_t)(c->n + (c->n < nmax));
+}
+
 static inline int abs_i(int v) { return v < 0 ? -v : v; }
 static inline int clamp255(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
 
@@ -76,11 +105,18 @@ void ppam_row(rowargs_t *a) {
   uint8_t *buf = a->buf;
   const intptr_t len = a->len;
   intptr_t k = bpp - 1;
+  ctr_t *t[NCTX];
+  const int16_t *stretch = a->stretch;
+  const int32_t *recip = a->recip;
+  const int nmax = limit < 255 ? limit : 255;
+  for (int i = 0; i < NCTX; i++) t[i] = a->t[i];
+  /* the inputs past NIN stay 0: their lanes add nothing, change no weight */
 
   for (intptr_t xx = 0; xx < rb; xx++) {
     int W, N, NW, NE, grad, avg, res, act;
     uint32_t base[NCTX], bkt[NCTX], idx[NCTX];
-    int st[NIN];
+    int32_t st[NINP];
+    for (int i = NIN; i < NINP; i++) st[i] = 0;
     if (++k == bpp) k = 0;
     W = xx >= bpp ? row[xx - bpp] : 0;
     N = hasPrior ? prior[xx] : W;
@@ -167,35 +203,38 @@ void ppam_row(rowargs_t *a) {
     int mbucket = mlen > 15 ? 15 : (int)mlen;
     for (int i = 0; i < NCTX; i++) bkt[i] = ((bucket_hash(base[i], 0) >> bshift) & bmask) << 4;
     for (int j = 7; j >= 0; j--) {
-      int node, dot = 0, dot2, p, bit, err;
+      int node, dot, dot2, p, bit, err;
       int32_t *w, *w2;
       if (j == 3)
         for (int i = 0; i < NCTX; i++) bkt[i] = ((bucket_hash(base[i], partial) >> bshift) & bmask) << 4;
       if (j >= 4) node = (int)partial;
       else node = (1 << (3 - j)) | (int)(partial & ((1u << (3 - j)) - 1));
-      w = a->w + ((k & 15) * 8 + j) * NIN;
-      w2 = a->w + (128 + act * 8 + j) * NIN;
-      dot2 = 0;
+      w = a->w + ((k & 15) * 8 + j) * NINP;
+      w2 = a->w + (128 + act * 8 + j) * NINP;
       for (int i = 0; i < NCTX; i++) {
         idx[i] = bkt[i] + (uint32_t)node;
-        st[i] = a->stretch[(a->t[i][idx[i]].q ^ 0x8000) >> 4];
-        dot += (w[i] * st[i]) / 8192;
-        dot2 += (w2[i] * st[i]) / 8192;
+        st[i] = stretch[(t[i][idx[i]].q ^ 0x8000) >> 4];
       }
       /* the match: while the bits so far agree with the byte it expects, its
          next bit, as sure as matches of its length have been */
       int mexp = -1;
       if (mlen > 0 && ((uint32_t)(expected | 256) >> (j + 1)) == partial) {
         mexp = (expected >> j) & 1;
-        int sp = a->stretch[(a->mm[mbucket * 2 + mexp].q ^ 0x8000) >> 4];
+        int sp = stretch[(a->mm[mbucket * 2 + mexp].q ^ 0x8000) >> 4];
         st[NCTX] = mexp ? sp : -sp;
       } else st[NCTX] = 0;
-      dot += (w[NCTX] * st[NCTX]) / 8192;
-      dot2 += (w2[NCTX] * st[NCTX]) / 8192;
       st[NCTX + 1] = 256;
-      dot += (w[NCTX + 1] * st[NCTX + 1]) / 8192;
-      dot2 += (w2[NCTX + 1] * st[NCTX + 1]) / 8192;
-      /* two weight sets, by channel and by the area's activity, averaged */
+      {
+        /* two weight sets, by channel and by the area's activity, averaged */
+        v4 s1 = {0, 0, 0, 0}, s2 = {0, 0, 0, 0}, sv, wv, pr;
+        for (int v = 0; v < NV; v++) {
+          LOAD4(sv, st + 4 * v);
+          LOAD4(wv, w + 4 * v); pr = wv * sv; s1 += DIV_POW2(pr, 13);
+          LOAD4(wv, w2 + 4 * v); pr = wv * sv; s2 += DIV_POW2(pr, 13);
+        }
+        dot = HSUM4(s1);
+        dot2 = HSUM4(s2);
+      }
       dot = (dot + dot2) / 16;
       if (dot > smax) dot = smax;
       if (dot < -smax - 1) dot = -smax - 1;
@@ -237,32 +276,30 @@ void ppam_row(rowargs_t *a) {
         ap[ai] = (uint16_t)(ap[ai] + (g - ap[ai]) / 64);
       }
       err = ((bit << 16) - pm) / 16;
-      for (int i = 0; i < NIN; i++) {
-        int v = w[i] + (st[i] * err * rate) / 65536;
-        if (v > wMax) v = wMax;
-        if (v < -wMax) v = -wMax;
-        w[i] = v;
-        v = w2[i] + (st[i] * err * rate) / 65536;
-        if (v > wMax) v = wMax;
-        if (v < -wMax) v = -wMax;
-        w2[i] = v;
+      {
+        const v4 er = {err * rate, err * rate, err * rate, err * rate};
+        const v4 hi = {wMax, wMax, wMax, wMax}, lo = -hi;
+        for (int v = 0; v < NV; v++) {
+          v4 d, x, m;
+          LOAD4(d, st + 4 * v); d = d * er; d = DIV_POW2(d, 16);
+          LOAD4(x, w + 4 * v); x += d;
+          m = x > hi; x = (x & ~m) | (hi & m);
+          m = x < lo; x = (x & ~m) | (lo & m);
+          STORE4(w + 4 * v, x);
+          LOAD4(x, w2 + 4 * v); x += d;
+          m = x > hi; x = (x & ~m) | (hi & m);
+          m = x < lo; x = (x & ~m) | (lo & m);
+          STORE4(w2 + 4 * v, x);
+        }
       }
       for (int i = 0; i < NCTX; i++) {
-        ctr_t *c = &a->t[i][idx[i]];
-        int pp = c->q ^ 0x8000, target = bit ? 65535 : 1;
-        int64_t q = (int64_t)(target - pp) * a->recip[c->n];
-        q = (q + ((q >> 63) & 0xFFFF)) >> 16;
-        c->q = (uint16_t)((uint16_t)(pp + q) ^ 0x8000);
-        if (c->n < limit && c->n < 255) c->n++;
+        ctr_t *c = &t[i][idx[i]];
+        ctr_update(c, bit ? 65535 : 1, recip, nmax);
       }
       if (mexp >= 0) {
         /* the counter learns whether the match was right */
         ctr_t *c = &a->mm[mbucket * 2 + mexp];
-        int pp = c->q ^ 0x8000, target = (bit == mexp) ? 65535 : 1;
-        int64_t q = (int64_t)(target - pp) * a->recip[c->n];
-        q = (q + ((q >> 63) & 0xFFFF)) >> 16;
-        c->q = (uint16_t)((uint16_t)(pp + q) ^ 0x8000);
-        if (c->n < limit && c->n < 255) c->n++;
+        ctr_update(c, (bit == mexp) ? 65535 : 1, recip, nmax);
       }
       partial = partial * 2 + (uint32_t)bit;
     }
