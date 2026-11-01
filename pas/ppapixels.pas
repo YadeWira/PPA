@@ -69,7 +69,17 @@ function Unfilter(const plain: TBytes; const info: TImageInfo; out px: TPixels):
 { px -> the filtered bytes }
 function Refilter(const px: TPixels): TBytes;
 
+
+var
+  { a line filtered with Paeth in C (ppapixc.c); False: in Pascal, the
+    reference. PPA_NOC=1 in the environment makes it False }
+  UsePixC: Boolean = True;
+
 implementation
+
+{$L ppapixc.o}
+
+procedure ppap_paeth_filter(cur, prior, dst: PByte; rb, bpp: SizeInt); cdecl; external name 'ppap_paeth_filter';
 
 const
   ADAM7_X0: array[0..6] of Integer = (0, 4, 0, 2, 0, 1, 0);
@@ -190,7 +200,9 @@ begin
     if prior = nil then begin
       for x := 0 to bpp - 1 do if x < rb then dst[x] := cur[x];
       for x := bpp to rb - 1 do dst[x] := Byte(cur[x] - cur[x - bpp]);
-    end else begin
+    end else if UsePixC then
+      ppap_paeth_filter(cur, prior, dst, rb, bpp)
+    else begin
       for x := 0 to bpp - 1 do if x < rb then dst[x] := Byte(cur[x] - prior[x]);
       for x := bpp to rb - 1 do begin
         a := cur[x - bpp]; b := prior[x]; c := prior[x - bpp];
@@ -309,4 +321,6 @@ begin
   if Length(px.tail) > 0 then Move(px.tail[0], Result[o], Length(px.tail));
 end;
 
+initialization
+  UsePixC := GetEnvironmentVariable('PPA_NOC') <> '1';
 end.

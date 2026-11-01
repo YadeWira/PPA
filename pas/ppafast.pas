@@ -45,8 +45,8 @@ const
   QT = 4;
   Q_EB = 1;
   FM_PAD = 2;
-  H_BITS = 20;            { the hashed counters: 2^20 }
-  C_BITS = 20;            { the last value of each exact neighbourhood: 2^20 }
+  H_BITS = 18;            { the hashed counters: 2^18 (1 MB) }
+  C_BITS = 16;            { the last value of each exact neighbourhood: 2^16 }
   M_BITS = 18;            { the match model's positions: 2^18 }
   FILTER_LIMIT = 30;
   W_LIMIT = 131071;       { a weight's bound: four inputs and the bias stay inside 32 bits }

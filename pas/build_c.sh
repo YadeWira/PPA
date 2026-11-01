@@ -29,7 +29,7 @@ case "$CC $*" in
   *-m32*|*i686*|*i386*) FLAGS="$FLAGS -fno-pic" ;;
 esac
 mkdir -p "$OUT"
-for f in ppamodelc ppafastc ppazlibc; do
+for f in ppamodelc ppafastc ppazlibc ppapixc; do
   # shellcheck disable=SC2086
   $CC $FLAGS "$@" -c "$HERE/$f.c" -o "$OUT/$f.o"
 done

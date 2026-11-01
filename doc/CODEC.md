@@ -361,7 +361,7 @@ animation frames 20-36%, tiny frames (22x22) twice as large.
 both models code a sample of the image, the lines in its middle (256 KB
 of them) or all of it when smaller, and the slow model takes the image
 when it is at least 10% smaller there. Photographs stay with the fast one;
-the corpus goes from 57.37% (every image fast) to 54.88% (the slow model
+the corpus goes from 57.37% (every image fast) to 55.02% (the slow model
 everywhere: 51.03%). The sample costs about 0.3 s a photo when
 compressing. `--max` takes the slow model for every image.
 

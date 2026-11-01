@@ -70,6 +70,10 @@ static inline int clamp_rare(int v, int lo, int hi) {
 }
 static inline int clamp255(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
 static inline int iabs(int v) { return v < 0 ? -v : v; }
+static inline int imin(int a, int b) { return a < b ? a : b; }
+static inline int imax(int a, int b) { return a > b ? a : b; }
+/* LOCO-I's MED, W, N or W + N - NW: the median of the three, without a branch */
+static inline int med3(int a, int b, int c) { return imax(imin(a, b), imin(imax(a, b), c)); }
 
 /* ppaarith's counter update, as ppamodelc.c's ctr_update but on p itself */
 /* p moves toward the target by recip[n] / 65536 of the way (the product's
@@ -207,18 +211,16 @@ void ppaf_row(fm_args_t *a) {
       const int W = cur[i - nc], N = up[i], NW = up[i - nc], NE = up[i + nc];
       int pr[NP];
       if (ch == 0 || ch == 3 || nc < 3) {
-        const int mx = W > N ? W : N, mn = W < N ? W : N;
         pr[0] = W; pr[1] = N; pr[2] = NE; pr[3] = W + N - NW;
-        pr[4] = NW >= mx ? mn : NW <= mn ? mx : W + N - NW;
+        pr[4] = med3(W, N, W + N - NW);
         pr[5] = (W + NE + 1) >> 1;
         pr[6] = 2 * W - cur[i - 2 * nc]; pr[7] = 2 * N - up2[i];
       } else {
         /* a colour channel: its difference to the channel before, predicted */
         const int dW = W - cur[i - nc - 1], dN = N - up[i - 1], dNW = NW - up[i - nc - 1], dNE = NE - up[i + nc - 1];
         const int dWW = cur[i - 2 * nc] - cur[i - 2 * nc - 1], dNN = up2[i] - up2[i - 1];
-        const int mx = dW > dN ? dW : dN, mn = dW < dN ? dW : dN;
         pr[0] = xPrev + dW; pr[1] = xPrev + dN; pr[2] = xPrev + dNE; pr[3] = xPrev + dW + dN - dNW;
-        pr[4] = xPrev + (dNW >= mx ? mn : dNW <= mn ? mx : dW + dN - dNW);
+        pr[4] = xPrev + med3(dW, dN, dW + dN - dNW);
         pr[5] = xPrev + ((dW + dNE + 1) >> 1);
         pr[6] = xPrev + 2 * dW - dWW; pr[7] = xPrev + 2 * dN - dNN;
       }

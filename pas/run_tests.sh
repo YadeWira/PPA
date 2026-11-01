@@ -49,6 +49,7 @@ echo "== layer 2b: zlib's choices predicted"
 
 echo "== layer 3: filtered lines <-> each line's filter and the image's bytes"
 "$OUT/test_pixels" "$PPA/tests/png" 16 | tail -1
+PPA_NOC=1 "$OUT/test_pixels" "$PPA/tests/png" 16 | tail -1
 # what it unfilters are the pixels ImageMagick decodes
 rm -rf "$OUT/pxdump"; mkdir -p "$OUT/pxdump"
 "$OUT/test_pixels" "$PPA/tests/png" 1 -dump "$OUT/pxdump" > "$OUT/pxdump/list"

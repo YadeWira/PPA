@@ -145,12 +145,52 @@ typedef struct {
   intptr_t skipBits;             /* the tables t3, t4, t8: 2^skipBits positions each */
 } zdeflate_t;
 
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define ZD_LE 1
+#endif
+
+static inline uint64_t zd_load8(const uint8_t *p) { uint64_t v; __builtin_memcpy(&v, p, 8); return v; }
+
+#ifndef ZD_PF
+#define ZD_PF 4
+#endif
 static inline void zd_skip(zdeflate_t *s, intptr_t str) {
   const uint8_t *p = s->plain;
   const intptr_t i = str & s->wmask, n = s->n;
-  s->ord[i] = s->cnt[s->insH]++;
-  const uint32_t k3 = p[str] | (uint32_t)p[str + 1] << 8 | (uint32_t)p[str + 2] << 16;
   const int sb = (int)s->skipBits;
+  s->ord[i] = s->cnt[s->insH]++;
+#ifdef ZD_LE
+  if (str + ZD_PF + 8 <= n) {
+    /* little-endian, 8 bytes to read: the keys out of one load (the 3 and 4
+       first bytes are its low ones), and the tables' slots a few positions
+       ahead fetched meanwhile (a hint: nothing depends on it) */
+    const uint64_t f8 = zd_load8(p + str + ZD_PF);
+    const uint32_t f4 = (uint32_t)f8, f3 = f4 & 0xFFFFFFu;
+    __builtin_prefetch(&s->t3[(f3 * 2654435761u) >> (32 - sb)]);
+    __builtin_prefetch(&s->t4[(f4 * 2246822519u) >> (32 - sb)]);
+    __builtin_prefetch(&s->t8[(uint32_t)((f8 * 0x9E3779B97F4A7C15ull) >> (64 - sb))]);
+    const uint64_t k8 = zd_load8(p + str);
+    const uint32_t k4 = (uint32_t)k8, k3 = k4 & 0xFFFFFFu;
+    uint32_t h = (k3 * 2654435761u) >> (32 - sb);
+    intptr_t c = s->t3[h];
+    /* c < str: its 8 bytes are there too */
+    s->nx3[i] = (c == 0 || str - c >= s->wsize) ? 0 : ((uint32_t)zd_load8(p + c) & 0xFFFFFFu) == k3 ? c : -1;
+    s->t3[h] = (uint32_t)str;
+    h = (k4 * 2246822519u) >> (32 - sb);
+    c = s->t4[h];
+    s->nx4[i] = (c == 0 || str - c >= s->wsize) ? 0 : (uint32_t)zd_load8(p + c) == k4 ? c : -1;
+    s->t4[h] = (uint32_t)str;
+    h = (uint32_t)((k8 * 0x9E3779B97F4A7C15ull) >> (64 - sb));
+    c = s->t8[h];
+    s->nx8[i] = (c == 0 || str - c >= s->wsize) ? 0 : zd_load8(p + c) == k8 ? c : -1;
+    s->t8[h] = (uint32_t)str;
+    return;
+  }
+#endif
+  /* near the end, or not little-endian: the keys a byte at a time (the
+     hashes may differ from the fast path's: only collisions do, and a
+     collision only ever costs zlib's walk) */
+  const uint32_t k3 = p[str] | (uint32_t)p[str + 1] << 8 | (uint32_t)p[str + 2] << 16;
   uint32_t h = (k3 * 2654435761u) >> (32 - sb);
   intptr_t c = s->t3[h];
   if (c == 0 || str - c >= s->wsize) s->nx3[i] = 0;
@@ -165,12 +205,16 @@ static inline void zd_skip(zdeflate_t *s, intptr_t str) {
     s->t4[h] = (uint32_t)str;
   } else s->nx4[i] = -1;
   if (str + 7 < n) {
-    uint64_t k8, kc;
-    __builtin_memcpy(&k8, p + str, 8);
+    uint64_t k8 = 0, kc;
+    for (int b = 7; b >= 0; b--) k8 = k8 << 8 | p[str + b];
     h = (uint32_t)((k8 * 0x9E3779B97F4A7C15ull) >> (64 - sb));
     c = s->t8[h];
     if (c == 0 || str - c >= s->wsize) s->nx8[i] = 0;
-    else { __builtin_memcpy(&kc, p + c, 8); s->nx8[i] = kc == k8 ? c : -1; }
+    else {
+      kc = 0;
+      for (int b = 7; b >= 0; b--) kc = kc << 8 | p[c + b];
+      s->nx8[i] = kc == k8 ? c : -1;
+    }
     s->t8[h] = (uint32_t)str;
   } else s->nx8[i] = -1;
 }
