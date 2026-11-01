@@ -35,6 +35,10 @@ type
   PArithDecoder = ^TArithDecoder;
 
 procedure CodeImage(var px: TPixels; enc: PArithEncoder; dec: PArithDecoder);
+{ The same for lines firstRow .. firstRow + rows - 1 of a non-interlaced
+  image (a band), with a model of its own: bands code and decode
+  independently. An interlaced image is always coded whole. }
+procedure CodeImageBand(var px: TPixels; firstRow, rows: SizeInt; enc: PArithEncoder; dec: PArithDecoder);
 
 type
   { The model of plain bytes (a file's chunks, streams kept as bytes):
@@ -139,6 +143,7 @@ type
     mptr, mlen: PSizeInt;
     mm: Pointer;
     sample16: SizeInt;
+    bandStart: SizeInt;
   end;
 
 procedure ppam_row(var a: TRowArgs); cdecl; external name 'ppam_row';
@@ -213,7 +218,7 @@ end;
 
 { One line of pixels, the Pascal reference of ppamodelc.c's ppam_row: the
   same arithmetic, step by step, so that both give the same stream. }
-procedure PascalRow(var m: TModel; var px: TPixels; row, prior, rb: SizeInt; y: SizeInt;
+procedure PascalRow(var m: TModel; var px: TPixels; row, prior, rb: SizeInt; y, y0, bandStart: SizeInt;
   enc: PArithEncoder; dec: PArithDecoder);
 var
   bpp, x, k, i, s0, p0, nb, bpos, mptr, mlen, cand, l, ai: SizeInt;
@@ -227,7 +232,8 @@ var
   apBase: SizeInt;
 begin
   bpp := px.bpp;
-  hasPrior := y > 0;
+  { the band's first line has none above: bands decode independently }
+  hasPrior := y > y0;
   k := bpp - 1;
   for x := 0 to rb - 1 do begin
     Inc(k); if k = bpp then k := 0;
@@ -264,7 +270,7 @@ begin
     base[2] := Hash(k, Clamp255(N + dN), 3);
     base[3] := Hash(k, Cardinal(avg) + (Cardinal(Clamp255(NE)) shl 8), 4);
     base[4] := Hash(k, Clamp255(W + dW), 5);
-    if hasPrior and (y > 1) then NN := px.data[prior - rb + x] else NN := N;
+    if hasPrior and (y > y0 + 1) then NN := px.data[prior - rb + x] else NN := N;
     if x >= 2 * bpp then WW := px.data[row + x - 2 * bpp] else WW := W;
     if k > 1 then v := (res + res2) div 2 else v := res;
     base[5] := Hash(k, Cardinal(Clamp255(grad + v)) or (Cardinal(res2 + 256) shl 8), 7);
@@ -370,13 +376,13 @@ begin
     byteV := Integer(partial and $FF);
     if dec <> nil then px.data[row + x] := byteV;
     if (mlen > 0) and (px.data[mptr] = byteV) then begin Inc(mlen); Inc(mptr); end else mlen := 0;
-    if bpos + 1 >= MIN_MATCH_LEN then begin
+    if bpos + 1 - bandStart >= MIN_MATCH_LEN then begin
       h := MatchHash(px.data, bpos, MATCH_BITS);
       if mlen = 0 then begin
         cand := m.mtab[h];
         if cand > 0 then begin
           l := 0;
-          while (l < 32) and (cand - 1 - l >= 0) and (px.data[cand - 1 - l] = px.data[bpos - l]) do Inc(l);
+          while (l < 32) and (cand - 1 - l >= bandStart) and (px.data[cand - 1 - l] = px.data[bpos - l]) do Inc(l);
           if l >= MIN_MATCH_LEN then begin mlen := l; mptr := cand; end;
         end;
       end;
@@ -388,7 +394,13 @@ begin
 end;
 
 procedure CodeImage(var px: TPixels; enc: PArithEncoder; dec: PArithDecoder);
+begin
+  CodeImageBand(px, 0, High(SizeInt), enc, dec);
+end;
+
+procedure CodeImageBand(var px: TPixels; firstRow, rows: SizeInt; enc: PArithEncoder; dec: PArithDecoder);
 var
+  y0, y1: SizeInt;
   m: TModel;
   pi_, y, rb, bpp, row, prior: SizeInt;
   prevFilter, f, node, bit, j, i: Integer;
@@ -422,7 +434,13 @@ begin
   ra.sample16 := Ord(px.info.depth = 16);
   for pi_ := 0 to High(px.passes) do begin
     rb := px.passes[pi_].rowBytes;
-    for y := 0 to px.passes[pi_].height - 1 do begin
+    { a band of a non-interlaced image, or every line }
+    y0 := 0; y1 := px.passes[pi_].height - 1;
+    if Length(px.passes) = 1 then begin
+      if firstRow > y0 then y0 := firstRow;
+      if (rows < High(SizeInt) - firstRow) and (firstRow + rows - 1 < y1) then y1 := firstRow + rows - 1;
+    end;
+    for y := y0 to y1 do begin
       { the line's filter: 3 bits, a binary tree }
       if enc <> nil then f := px.filters[px.passes[pi_].firstLine + y] else f := 0;
       node := 1;
@@ -438,9 +456,10 @@ begin
       if UseC then begin
         if rb = 0 then Continue;
         ra.row := @px.data[row];
-        if y > 0 then begin ra.prior := @px.data[prior]; ra.hasPrior := 1; end
+        if y > y0 then begin ra.prior := @px.data[prior]; ra.hasPrior := 1; end
         else begin ra.prior := @px.data[row]; ra.hasPrior := 0; end;
-        if y > 1 then ra.prior2 := @px.data[prior - rb] else ra.prior2 := nil;
+        if y > y0 + 1 then ra.prior2 := @px.data[prior - rb] else ra.prior2 := nil;
+        ra.bandStart := px.passes[pi_].first + y0 * rb;
         ra.rowPos := row;
         ra.rb := rb;
         if enc <> nil then begin
@@ -456,7 +475,7 @@ begin
         ppam_row(ra);
         Continue;
       end;
-      PascalRow(m, px, row, prior, rb, y, enc, dec);
+      PascalRow(m, px, row, prior, rb, y, y0, px.passes[pi_].first + y0 * rb, enc, dec);
     end;
   end;
 end;

@@ -30,7 +30,7 @@ sh pas/build_c.sh "$OUT/c" || { echo "the C part did not build (CC=${CC:-cc})"; 
 if [ "$(uname -s)" = Linux ] && command -v nm > /dev/null; then
   if nm "$OUT"/c/*.o | grep ' U '; then echo "FAIL: the C objects need a library"; exit 1; fi
 fi
-for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model; do
+for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model test_codec; do
   # shellcheck disable=SC2086
   $FPC -O2 -Fupas -Fipas -Fo"$OUT/c" -FU"$OUT/u" -o"$OUT/$prog$EXE" pas/tests/$prog.pas > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
@@ -59,6 +59,8 @@ tail -1 "$OUT/zlib.txt"
 grep -q ', 0 failures' "$OUT/zlib.txt"
 echo "== layer 3"
 "$OUT/test_pixels$EXE" tests/png 16 | tail -1
+echo "== layer 6, bands (4 KB ones, decoded last first)"
+PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec$EXE" tests/png 14 | sed 's/; [0-9.]* s;/;/' | tee "$OUT/bands.txt"
 echo "== layers 4 and 5"
 "$OUT/test_arith$EXE" | tail -1
 "$OUT/measure_model$EXE" tests/png | sed 's/, [0-9.]* s,/,/' > "$OUT/model.txt"
@@ -70,5 +72,5 @@ cmp -s "$OUT/model.txt" "$OUT/model_pas.txt" || { echo "FAIL: the C and Pascal p
 # compares the platforms fails
 for part in streams zlib model ppa; do echo "$part: $(tr -d '\r' < "$OUT/$part.txt" | $SHA | cut -c1-16)"; done
 cat "$OUT/ppa.txt"
-cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" "$OUT/ppa.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
+cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" "$OUT/ppa.txt" "$OUT/bands.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
 echo "hash: $(cat hash.txt)"

@@ -72,6 +72,8 @@ PPA_NOC=1 "$OUT/measure_model" "$PPA/tests/png" | tail -1 > "$OUT/model_pas.txt"
 
 echo "== layer 6: the codec (every file compressed, verified, decompressed)"
 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
+# bands: 4 KB ones, so that the samples have several, decoded last first
+PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 for d in "${dirs[@]}"; do "$OUT/test_codec" "$d" 1 | tail -1; done
 
 echo "== layer 7: the .ppa file and the command"

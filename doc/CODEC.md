@@ -197,16 +197,34 @@ with a prototype of each when the ZPAQL is written.
 ## Layer 6: the stream
 
 `ppacodec.Compress` takes a whole file. The stream is one version byte
-(`STREAM_VERSION`, 1) and then everything through one arithmetic coder:
+(`STREAM_VERSION`, 1), the count and lengths of its substreams (varints),
+and the substreams, each its own arithmetic stream. Substream 0 holds:
 
 - the file's structure, written as bytes (numbers as varints) and coded with
   a byte model (orders 0 to 3, mixed): the kind of file; each chunk's type,
   length and CRC when wrong, and either the image stream it belongs to (and
   an fdAT's sequence number) or its data; the bytes after the end; and for
   each image stream how it is kept;
-- then each image stream in order: as an **image** (`CodeImage`), or as its
-  **bytes** (the byte model, one that goes on learning from stream to
-  stream).
+- then the image streams kept as **bytes**, in order (the byte model, one
+  that goes on learning from stream to stream).
+
+And each image stream kept as an **image** follows, band by band, a
+substream each (`CodeImageBand`). A non-interlaced image goes in horizontal
+bands of at least 2 MB unfiltered (`BAND_BYTES`), at most 16; an
+interlaced one in one. Each band has its own model and reads nothing
+before its own first line (its first line has none above, its match model
+looks no further back): bands are coded and decoded in parallel, on the
+codec's threads. The count depends only on the image, so the file is the
+same on every machine and with any number of threads. Measured on
+01/11/2026, a band costs size: the 7.2 MB photo in 2, 4, 8, 16 bands
++0.3%, +0.7%, +1.2%, +2.1%; a 1.9 MB RGBA frame in 2 and 4 bands +1.6% and
++3.3%. 2 MB bands put the photo in 3 (about +0.5%).
+
+For the tests, `PPA_TEST_BAND_BYTES` makes the bands smaller (the suite's
+samples get several each; a stream made so decodes only with the same
+value) and `PPA_TEST_BANDS_REVERSE=1` decodes them last first, on one
+thread: a band that read another's bytes would fail (PJA's
+`PJA_BANDS_REVERSE`).
 
 An image stream is kept as an image when its deflate stream decodes, its
 image fits its header, zlib's parameters are found and give its very bits
@@ -323,6 +341,10 @@ chains walked, up to 4,096 candidates a position in flat areas. `longest_match`
 went to C too (`pas/ppazlibc.c`, the same choices as the Pascal, 8 bytes
 compared at a time): 3.1 s to 2.1 s. What is left is walking the chains.
 
+**Bands** (01/11/2026, layer 6): the photo, one stream in 3 bands: `ppa a`
+21.7 s with one thread, 12.1 s with 8; `ppa x` 11.3 s, 5.7 s. What is left
+in series is the one stream's inflate, zlib parameter search and rebuild.
+
 **Threads.** The command gives its threads to files first and what is left
 to each file's image streams (`ppathreads.ParallelFor`): their zlib
 parameters when compressing, their deflate streams rebuilt when
@@ -358,4 +380,5 @@ APNG (4.6 MB, level 9): `ppa a` 148 s with one thread, 39.5 s with 8;
 | 31/10/2026 | the command on `tests/png/`, x86-64 and a 32-bit build | the same `.ppa` bytes on both |
 | 31/10/2026 | the six CI platforms (`.github/test.sh`) | the same `.ppa` bytes on all six |
 | 01/11/2026 | layer 5, second version, the corpus's 224 images | **16.7 MB = 50.89% of the zlib streams** (the first: 59.0%), every one decoded back; 383 s coding and decoding, one thread |
+| 01/11/2026 | the command, 8 threads, bands, the whole corpus (77 files) | every one back byte for byte; the 70 of the family 32.9 MB -> **16.8 MB = 51.11%** (was 58.81%), the 7 others stored; `ppa a` 220 s, `ppa x` 111 s |
 | 31/10/2026 | layer 6, the corpus's 70 files of the family (32.9 MB) | **19.4 MB = 58.81%**, every one back; 211 image streams as images, 30 as bytes (13 not zlib's, 17 JNG JPEGs); 2,387 s for compressing, verifying and decompressing, one thread: the zlib parameter search and the model are the slow parts |

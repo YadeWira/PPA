@@ -46,6 +46,7 @@ typedef struct {
   intptr_t *mptr, *mlen;
   ctr_t *mm;
   intptr_t sample16;       /* 16-bit samples: two bytes each, high first */
+  intptr_t bandStart;      /* where the band starts in data: nothing before it is read */
 } rowargs_t;
 
 static inline uint32_t hash3(uint32_t a, uint32_t b, uint32_t c) {
@@ -271,7 +272,7 @@ void ppam_row(rowargs_t *a) {
          they were last, and a new match from there when there is none */
       const int byte = (int)(partial & 0xFF);
       if (mlen > 0 && a->data[mptr] == byte) { mlen++; mptr++; } else mlen = 0;
-      if (bpos + 1 >= MINLEN) {
+      if (bpos + 1 - a->bandStart >= MINLEN) {
         uint32_t h = 0;
         for (int i = 1; i <= MINLEN; i++) h = (h + a->data[bpos + 1 - i] + 1) * 2654435761u;
         h >>= (32 - a->mbits);
@@ -279,7 +280,7 @@ void ppam_row(rowargs_t *a) {
           intptr_t cand = a->mtab[h];
           if (cand > 0) {
             intptr_t l = 0;
-            while (l < 32 && cand - 1 - l >= 0 && a->data[cand - 1 - l] == a->data[bpos - l]) l++;
+            while (l < 32 && cand - 1 - l >= a->bandStart && a->data[cand - 1 - l] == a->data[bpos - l]) l++;
             if (l >= MINLEN) { mlen = l; mptr = cand; }
           }
         }
