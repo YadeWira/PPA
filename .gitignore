@@ -5,3 +5,5 @@
 build/
 __pycache__/
 hash.txt
+credenciales.md
+handoff.md
