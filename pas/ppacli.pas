@@ -927,7 +927,7 @@ var crashTarget: PInteger = nil;
 procedure CrashTest;
 var w: string;
 begin
-  w := GetEnvironmentVariable('PPA_TEST_CRASH');
+  w := SysUtils.GetEnvironmentVariable('PPA_TEST_CRASH');
   if w = 'range' then raise ERangeError.Create('Range check error (PPA_TEST_CRASH)');
   if w = 'access' then crashTarget^ := 1;
 end;
@@ -1271,7 +1271,7 @@ begin
   { the writes beside the work: when each is flushed, and --stats does not
     time them }
   if (command in [cmCompress, cmExtract]) and SyncToDisk and not dryRun and not stats and
-     (GetEnvironmentVariable('PPA_SYNC_INLINE') = '') then StartCommitter;
+     (SysUtils.GetEnvironmentVariable('PPA_SYNC_INLINE') = '') then StartCommitter;
   pool := nil;
   SetLength(pool, workers - 1);
   { a thread the system refuses (a host at its limit) leaves the files to

@@ -217,9 +217,9 @@ function JpegSimd: string;
 var sse41: Boolean;
 begin
   Result := '';
-  sse41 := HasSse41 and (GetEnvironmentVariable('PJA_NOASM') <> '1');
+  sse41 := HasSse41 and (SysUtils.GetEnvironmentVariable('PJA_NOASM') <> '1');
   if sse41 then Result := 'sse4.1';
-  if sse41 and HasAvx2 and (GetEnvironmentVariable('PJA_NOAVX2') <> '1') then Result := Result + ' avx2';
+  if sse41 and HasAvx2 and (SysUtils.GetEnvironmentVariable('PJA_NOAVX2') <> '1') then Result := Result + ' avx2';
   if Result = '' then Result := 'plain';
 end;
 
