@@ -62,9 +62,10 @@ sh pas/lib/build.sh "$OUT/lib" > "$OUT/lib.log" 2>&1 || { cat "$OUT/lib.log"; ec
 LIBF=$(tail -1 "$OUT/lib.log")
 # its C objects call no library either (the DLL has no C runtime)
 # (the objects' own symbols aside: ppa7z.o calls ppafilter.o)
+# (the 32-bit PIC objects name the GOT, which the linker makes: not a library)
 if [ "$(uname -s)" = Linux ] && command -v nm > /dev/null; then
   nm "$OUT"/lib/c/*.o | awk '$2 ~ /^[TDBR]$/ {print $3}' | sort -u > "$OUT/lib/defined.txt"
-  nm -u "$OUT"/lib/c/*.o | awk 'NF {print $NF}' | grep -v ':$' | sort -u | comm -23 - "$OUT/lib/defined.txt" > "$OUT/lib/undefined.txt"
+  nm -u "$OUT"/lib/c/*.o | awk 'NF {print $NF}' | grep -v ':$' | grep -vx '_GLOBAL_OFFSET_TABLE_' | sort -u | comm -23 - "$OUT/lib/defined.txt" > "$OUT/lib/undefined.txt"
   if [ -s "$OUT/lib/undefined.txt" ]; then cat "$OUT/lib/undefined.txt"; echo "FAIL: libppa's C objects need a library"; exit 1; fi
 fi
 # the test finds the library by its rpath alone (no DYLD_LIBRARY_PATH: on
