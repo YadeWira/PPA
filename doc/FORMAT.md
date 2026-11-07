@@ -16,9 +16,10 @@ compares), so what the hash protects against is damage **after** writing.
 No encryption.
 
 **Not frozen before 1.0.0** (the family's rule): until then this layout and
-the codec stream may change without a promise of compatibility, and a file
-made with a 0.x version may not open in a later one; the version byte only
-tells which one made it. From 1.0.0 on, what is published is read forever.
+the codec stream may change, each change with a new version number, and
+what a published release wrote is still read by every later one (a later
+release's file may not open in an earlier one, which says so). From 1.0.0
+on the formats are fixed. `doc/STABILITY.md` lists the versions.
 
 ## Layout
 
