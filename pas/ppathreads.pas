@@ -10,7 +10,7 @@ unit ppathreads;
 
 interface
 
-uses SysUtils, Classes;
+uses SysUtils, Classes, ppajoin;
 
 type
   TItemProc = procedure(i: SizeInt) is nested;
@@ -35,7 +35,8 @@ type
   end;
   PShared = ^TShared;
 
-  TWorker = class(TThread)
+  { joined without TThread.WaitFor's 100 ms naps (ppajoin) }
+  TWorker = class(TJoinThread)
     sh: PShared;
     procedure Execute; override;
   end;
@@ -75,13 +76,22 @@ begin
   if k > n then k := n;
   pool := nil;
   SetLength(pool, k - 1);
-  for i := 0 to High(pool) do begin
-    pool[i] := TWorker.Create(True);
-    pool[i].sh := @sh;
-    pool[i].Start;
+  { a thread the system refuses (a host at its limit) leaves the items to
+    the ones it gave and to this one: the same result, only slower }
+  k := 0;
+  while k < Length(pool) do begin
+    try
+      pool[k] := TWorker.Create(True);
+    except
+      on EThread do Break;
+    end;
+    pool[k].sh := @sh;
+    pool[k].Start;
+    Inc(k);
   end;
+  SetLength(pool, k);
   Work(@sh);
-  for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+  for i := 0 to High(pool) do begin pool[i].Join; pool[i].Free; end;
   if sh.failed > 0 then raise Exception.Create(sh.failure);
 end;
 

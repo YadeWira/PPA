@@ -36,6 +36,8 @@ for prog in test_png test_deflate test_zlib test_pixels test_arith measure_model
     || { cat "$OUT/fpc.log"; exit 1; }
 done
 
+# the commit, for ppa --version and ppa report ({$I %PPA_COMMIT%})
+PPA_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || true); export PPA_COMMIT
 # shellcheck disable=SC2086
 $FPC -O3 -dPPA_FAST -dPJA_FAST -Fupas -Fipas -Fuvendor/pja/pas -Fivendor/pja/pas -Fo"$OUT/c" -FU"$OUT/cu" -o"$OUT/ppa$EXE" pas/ppacli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }

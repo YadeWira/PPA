@@ -38,41 +38,57 @@ const
   STREAM_VERSION = 1;
 
 var
-  { threads for one file: its image streams' zlib parameters (Compress)
-    and their deflate streams rebuilt (Decompress) go to as many. 1: none,
-    everything in the calling thread. }
-  CodecThreads: Integer = 1;
   { the images ppafast takes (8-bit samples, not a palette) with it, about
     ten times as quick to decompress; False: every image with ppamodel's
     slower model, a few percent smaller (ppa --max) }
   FastModel: Boolean = True;
+  { For the tests and ppa selftest only: every image a model can take goes
+    with MODE_IMAGE, MODE_FAST or MODE_STATIC instead of the one
+    ChooseModel picks (-1), so small samples run each model (the stream
+    says each image's model: it decodes as any other). From the
+    environment: PPA_TEST_MODEL=slow, fast or static. }
+  TestModel: Integer = -1;
+
+const
+  { how each image stream is kept, the byte the stream writes for it }
+  MODE_BYTES = 0;
+  { the slow model (ppamodel) }
+  MODE_IMAGE = 1;
+  { a JNG's JPEG through PJA's codec }
+  MODE_JPEG = 2;
+  { the fast adaptive model (ppafast) }
+  MODE_FAST = 3;
+  { the static model (ppastatic) }
+  MODE_STATIC = 4;
+  MODE_NAMES: array[MODE_BYTES..MODE_STATIC] of string = ('bytes', 'slow model', 'JPEG (PJA)', 'fast model',
+    'static model');
 
 type
   TCodecStats = record
     images, imageBytes: Integer;      { image streams kept as images, and their bytes }
     rawStreams, rawBytes: Integer;    { image streams kept as bytes }
+    { the image streams kept each way, and the bands the images were cut into }
+    modes: array[MODE_BYTES..MODE_STATIC] of Integer;
+    bands: Integer;
   end;
 
-{ data -> stream; False (with why) if the file is not taken. }
+{ data -> stream; False (with why) if the file is not taken. threads: one
+  file's image streams (their zlib parameters) and bands go to as many; 1:
+  everything in the calling thread. The stream is the same whatever the
+  threads. }
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; verify: Boolean = True): Boolean;
-{ stream -> data; maxOut caps the file. False (with why) on any damage. }
-function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string): Boolean;
+  out stats: TCodecStats; verify: Boolean = True; threads: Integer = 1): Boolean;
+{ stream -> data; maxOut caps the file. False (with why) on any damage.
+  threads: the bands decoded and the deflate streams rebuilt on as many. }
+function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
+  threads: Integer = 1): Boolean;
 
 implementation
 
-uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppafast, ppastatic, ppathreads,
+uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppafast, ppastatic, ppathreads, ppastage,
   pjacodec, pjamodel, pjav7;
 
 const
-  MODE_BYTES = 0;
-  MODE_IMAGE = 1;
-  { a JNG's JPEG (JDAT, JDAA) through PJA's codec, its stream a substream }
-  MODE_JPEG = 2;
-  { an image with ppafast's model (MODE_IMAGE: with ppamodel's) }
-  MODE_FAST = 3;
-  { an image with ppastatic's model: its own bytes, not an arithmetic stream }
-  MODE_STATIC = 4;
   IMAGE_MODES = [MODE_IMAGE, MODE_FAST, MODE_STATIC];
   { A non-interlaced image goes in horizontal bands of at least this many
     unfiltered bytes, at most MAX_BANDS, each its own arithmetic stream with
@@ -109,9 +125,9 @@ const
   MAX_BANDS_AT_ONCE_32 = 4;
 
 { the threads for bands: the codec's, fewer on 32 bits (memory) }
-function BandThreads: Integer;
+function BandThreads(threads: Integer): Integer;
 begin
-  Result := CodecThreads;
+  Result := threads;
   if (SizeOf(Pointer) = 4) and (Result > MAX_BANDS_AT_ONCE_32) then Result := MAX_BANDS_AT_ONCE_32;
 end;
 
@@ -322,13 +338,15 @@ begin
   if (Length(back) <> Length(a)) or not CompareMem(@back[0], @a[0], Length(a)) then Exit;
   if FastModel and FastEligible(info) then plan.mode := ChooseModel(plan.px)
   else plan.mode := MODE_IMAGE;
+  if (TestModel = MODE_IMAGE) or ((TestModel in [MODE_FAST, MODE_STATIC]) and FastEligible(info)) then
+    plan.mode := TestModel;
   Result := True;
 end;
 
 { ---------------------------------------------------------------- compress }
 
 function CompressRaw(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats): Boolean;
+  out stats: TCodecStats; threads: Integer): Boolean;
 var
   p: TPng; r: TPngResult; w: TWriter; meta: TBytes;
   plans: array of TStreamPlan;
@@ -359,6 +377,7 @@ begin
   Result := False;
   stream := nil;
   stats := Default(TCodecStats);
+  StageEnter(stParse);
   r := ppapng.Decompose(data, p);
   if not r.Ok then begin why := 'not a PNG, MNG or JNG file'; Exit; end;
 
@@ -366,8 +385,9 @@ begin
   SetLength(plans, Length(p.streams));
   { each stream's plan on its own: the zlib parameter search is the slow
     part, and the streams' are independent }
-  ParallelFor(Length(p.streams), CodecThreads, @PlanOne);
+  ParallelFor(Length(p.streams), threads, @PlanOne);
   for s := 0 to High(p.streams) do begin
+    Inc(stats.modes[plans[s].mode]);
     if plans[s].mode in IMAGE_MODES + [MODE_JPEG] then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
     else begin Inc(stats.rawStreams); Inc(stats.rawBytes, Length(p.streams[s].data)); end;
   end;
@@ -425,7 +445,9 @@ begin
   for s := 0 to High(p.streams) do
     if plans[s].mode in IMAGE_MODES then AddBands(jobs, nJobs, s, plans[s].px);
   subs := nil; SetLength(subs, nJobs);
-  ParallelFor(nJobs, BandThreads, @CodeBand);
+  stats.bands := nJobs;
+  StageEnter(stEncode);
+  ParallelFor(nJobs, BandThreads(threads), @CodeBand);
 
   { then each JNG JPEG's PJA stream, in order }
   nJpeg := 0;
@@ -448,25 +470,36 @@ begin
   Result := True;
 end;
 
+function DecompressRaw(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
+  threads: Integer; stages: Boolean): Boolean; forward;
+function DecompressSafe(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
+  threads: Integer; stages: Boolean): Boolean; forward;
+
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; verify: Boolean): Boolean;
-var back: TBytes; why2: string;
+  out stats: TCodecStats; verify: Boolean; threads: Integer): Boolean;
+var back: TBytes; why2: string; was: TStage;
 begin
   why := '';
-  Result := CompressRaw(data, stream, why, stats);
-  if not Result or not verify then Exit;
-  if not Decompress(stream, Length(data), back, why2) or (Length(back) <> Length(data)) or
+  was := StageEnter(stNone);
+  StageEnter(was);
+  Result := CompressRaw(data, stream, why, stats, threads);
+  if not Result or not verify then begin StageEnter(was); Exit; end;
+  { the verification's decode and rebuild count as verify }
+  StageEnter(stVerify);
+  if not DecompressSafe(stream, Length(data), back, why2, threads, False) or (Length(back) <> Length(data)) or
      ((Length(data) > 0) and not CompareMem(@back[0], @data[0], Length(data))) then begin
     why := 'the codec did not give the same file back (a PPA bug: please report it)';
     if why2 <> '' then why := why + ': ' + why2;
     stream := nil;
     Result := False;
   end;
+  StageEnter(was);
 end;
 
 { ---------------------------------------------------------------- decompress }
 
-function DecompressRaw(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string): Boolean;
+function DecompressRaw(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
+  threads: Integer; stages: Boolean): Boolean;
 var
   dec: TArithDecoder; bm, rm: TByteModel;
   metaLen: Cardinal; meta: TBytes; r: TReader;
@@ -538,6 +571,7 @@ begin
   subPos := nil; SetLength(subPos, nSubs);
   subPos[0] := r.pos;
   for i := 1 to nSubs - 1 do subPos[i] := subPos[i - 1] + subLen[i - 1];
+  if stages then StageEnter(stDecode);
   dec.Init(Copy(stream, subPos[0], subLen[0]), 0);
   metaLen := dec.Direct(32);
   { the structure holds the file's chunks other than the image data, and
@@ -663,9 +697,10 @@ begin
   if BandsReverse then
     for i := nJobs - 1 downto 0 do DecodeBand(i)
   else
-    ParallelFor(nJobs, BandThreads, @DecodeBand);
+    ParallelFor(nJobs, BandThreads(threads), @DecodeBand);
   for i := 0 to nJobs - 1 do
     if bandBad[i] then Exit(Bad('image band damaged'));
+  if stages then StageEnter(stRebuild);
   for s := 0 to nStreams - 1 do
     if modes[s] in IMAGE_MODES then begin
       pxs[s].tail := pxTails[s];
@@ -674,7 +709,7 @@ begin
     end;
   { then each image's deflate stream, zlib's choices written: independent,
     on as many threads as given }
-  ParallelFor(nStreams, CodecThreads, @Rebuild);
+  ParallelFor(nStreams, threads, @Rebuild);
   for s := 0 to nStreams - 1 do
     if (modes[s] in IMAGE_MODES + [MODE_JPEG]) and (Length(p.streams[s].data) <> streamLen[s]) then
       Exit(Bad('image stream damaged or of another length'));
@@ -683,10 +718,21 @@ begin
   Result := True;
 end;
 
-function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string): Boolean;
+function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
+  threads: Integer): Boolean;
+var was: TStage;
+begin
+  was := StageEnter(stNone);
+  StageEnter(was);
+  Result := DecompressSafe(stream, maxOut, data, why, threads, True);
+  StageEnter(was);
+end;
+
+function DecompressSafe(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
+  threads: Integer; stages: Boolean): Boolean;
 begin
   try
-    Result := DecompressRaw(stream, maxOut, data, why);
+    Result := DecompressRaw(stream, maxOut, data, why, threads, stages);
   except
     on e: Exception do begin
       { a damaged stream must not get here; if one does, it is refused, not
@@ -704,4 +750,7 @@ initialization
   BandBytes := StrToInt64Def(GetEnvironmentVariable('PPA_TEST_BAND_BYTES'), BAND_BYTES);
   if BandBytes < 1 then BandBytes := BAND_BYTES;
   BandsReverse := GetEnvironmentVariable('PPA_TEST_BANDS_REVERSE') = '1';
+  if GetEnvironmentVariable('PPA_TEST_MODEL') = 'slow' then TestModel := MODE_IMAGE
+  else if GetEnvironmentVariable('PPA_TEST_MODEL') = 'fast' then TestModel := MODE_FAST
+  else if GetEnvironmentVariable('PPA_TEST_MODEL') = 'static' then TestModel := MODE_STATIC;
 end.

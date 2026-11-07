@@ -28,7 +28,7 @@ unit ppaformat;
 
 interface
 
-uses SysUtils, ppablake3;
+uses SysUtils, ppablake3, ppacodec;
 
 const
   FORMAT_VERSION = 1;
@@ -40,6 +40,13 @@ const
     colour shrinks a lot more than a photo). The user's cap still applies. }
   MAX_EXPANSION_RATIO = 65536;
   MAX_EXT = 15;
+
+var
+  { For the tests and ppa selftest only: a codec stream no smaller than the
+    original is written all the same, not the original stored, so that the
+    stream of a small sample is what gets compared. From the environment:
+    PPA_TEST_KEEP_STREAM=1. }
+  TestKeepStream: Boolean = False;
 
 type
   TFormatError = (
@@ -61,19 +68,26 @@ function ValidExtension(const ext: string): Boolean;
 
 { original -> .ppa. ext: the original's extension (left out if not valid).
   stored when the codec does not take the file or does not make it smaller;
-  why says why it was stored ('' when it was not). }
+  why says why it was stored ('' when it was not). threads: the codec's
+  (ppacodec.Compress); stats: what the codec did with it. }
 function Pack(const original: TBytes; const ext: string; verify: Boolean;
-  out ppa: TBytes; out stored: Boolean; out why: string): Boolean;
+  out ppa: TBytes; out stored: Boolean; out why: string; threads: Integer = 1): Boolean;
+function Pack(const original: TBytes; const ext: string; verify: Boolean;
+  out ppa: TBytes; out stored: Boolean; out why: string; out stats: TCodecStats; threads: Integer): Boolean;
 { The header and descriptor, validated }
 function Inspect(const ppa: TBytes; out d: TDescriptor): TFormatError;
 { .ppa -> original. maxOut: the caller's cap (0 = none). detail: the
-  codec's reason when it is feDamaged. }
+  codec's reason when it is feDamaged. On feHashMismatch, original is what
+  the codec gave (for x's --keep-corrupt, which keeps it under another
+  name); on any other error it is empty. }
 function Unpack(const ppa: TBytes; maxOut: QWord; out original: TBytes;
-  out d: TDescriptor; out detail: string): TFormatError;
+  out d: TDescriptor; out detail: string; threads: Integer = 1): TFormatError;
+{ The bytes start as a .ppa does (its magic) }
+function IsPpa(const d: TBytes): Boolean;
 
 implementation
 
-uses ppacodec;
+uses ppastage;
 
 const
   MAGIC: array[0..3] of Byte = (Ord('P'), Ord('P'), Ord('A'), 1);
@@ -154,17 +168,33 @@ begin
   Result := ValidateSizes(d.stored, d.origSize, d.payloadLen);
 end;
 
+function IsPpa(const d: TBytes): Boolean;
+var i: Integer;
+begin
+  Result := Length(d) >= 4;
+  if Result then
+    for i := 0 to 3 do if d[i] <> MAGIC[i] then Exit(False);
+end;
+
 function Pack(const original: TBytes; const ext: string; verify: Boolean;
-  out ppa: TBytes; out stored: Boolean; out why: string): Boolean;
+  out ppa: TBytes; out stored: Boolean; out why: string; threads: Integer): Boolean;
+var stats: TCodecStats;
+begin
+  Result := Pack(original, ext, verify, ppa, stored, why, stats, threads);
+end;
+
+function Pack(const original: TBytes; const ext: string; verify: Boolean;
+  out ppa: TBytes; out stored: Boolean; out why: string; out stats: TCodecStats; threads: Integer): Boolean;
 var
-  stream, payload: TBytes; stats: TCodecStats; e: string; h: THash16;
+  stream, payload: TBytes; e: string; h: THash16;
   pos, i: SizeInt; check: LongWord;
 begin
   Result := False;
-  ppa := nil; why := '';
+  ppa := nil; why := ''; stored := False;
+  stats := Default(TCodecStats);
   if Length(original) = 0 then begin why := 'empty file'; Exit; end;
-  stored := not Compress(original, stream, why, stats, verify);
-  if not stored and (Length(stream) >= Length(original)) then begin
+  stored := not Compress(original, stream, why, stats, verify, threads);
+  if not stored and (Length(stream) >= Length(original)) and not TestKeepStream then begin
     stored := True; why := 'the codec does not make it smaller';
   end;
   if stored then payload := original else payload := stream;
@@ -174,7 +204,9 @@ begin
     stored := True; payload := original; why := 'the codec stream is outside the format''s limits';
     if ValidateSizes(stored, Length(original), Length(payload)) <> feNone then Exit;
   end;
+  StageEnter(stHash);
   h := Blake3_128(original);
+  StageEnter(stNone);
   SetLength(ppa, HEADER_SIZE + 8 + 16 + 1 + Length(e) + 4 + Length(payload));
   for i := 0 to 3 do ppa[i] := MAGIC[i];
   ppa[4] := FORMAT_VERSION;
@@ -196,7 +228,7 @@ begin
 end;
 
 function Unpack(const ppa: TBytes; maxOut: QWord; out original: TBytes;
-  out d: TDescriptor; out detail: string): TFormatError;
+  out d: TDescriptor; out detail: string; threads: Integer): TFormatError;
 var stream: TBytes; h: THash16; i: Integer;
 begin
   original := nil; detail := '';
@@ -206,14 +238,19 @@ begin
   if d.stored then original := Copy(ppa, d.payloadPos, d.payloadLen)
   else begin
     stream := Copy(ppa, d.payloadPos, d.payloadLen);
-    if not Decompress(stream, Int64(d.origSize), original, detail) then begin
+    if not Decompress(stream, Int64(d.origSize), original, detail, threads) then begin
+      StageEnter(stNone);
       original := nil; Exit(feDamaged);
     end;
   end;
-  if QWord(Length(original)) <> d.origSize then begin original := nil; Exit(feSizeMismatch); end;
+  if QWord(Length(original)) <> d.origSize then begin StageEnter(stNone); original := nil; Exit(feSizeMismatch); end;
+  StageEnter(stHash);
   h := Blake3_128(original);
+  StageEnter(stNone);
   for i := 0 to 15 do
-    if h[i] <> d.hash[i] then begin original := nil; Exit(feHashMismatch); end;
+    if h[i] <> d.hash[i] then Exit(feHashMismatch);
 end;
 
+initialization
+  TestKeepStream := GetEnvironmentVariable('PPA_TEST_KEEP_STREAM') = '1';
 end.

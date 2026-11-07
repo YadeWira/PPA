@@ -106,6 +106,19 @@ images in several files (a PNG and an MNG of the same photo, an animation
 and its frames), and the generated set is five images written many ways,
 whose `.ppa` files are nearly the same bytes.
 
+## Something went wrong?
+
+```sh
+ppa report image.png     # a bug report (no pixels, no metadata, no folders) and a link that opens the issue
+ppa selftest             # the samples inside the binary, compressed and extracted on both code paths
+ppa info image.png       # the file's chunks and image streams, and what PPA does with it
+ppa t image.ppa          # extract and verify, write nothing
+```
+
+A bug in PPA ends the run with exit status 3 and says to run `ppa report`.
+Outputs reach the disk before they take their names, and Ctrl-C or a kill
+leaves no half-written file behind ([`doc/CLI.md`](doc/CLI.md)).
+
 ## Building and tests
 
 ```sh

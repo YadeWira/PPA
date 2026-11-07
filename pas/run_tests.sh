@@ -99,5 +99,7 @@ echo "== layer 7: the .ppa file and the command"
 $FPC -O3 -dPPA_FAST -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fu"$PPA/vendor/pja/pas" -Fi"$PPA/vendor/pja/pas" -Fo"$OUT/c" -FU"$OUT/cli" -o"$OUT/ppa" "$PAS/ppacli.pas" > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 (cd "$PPA" && sh pas/tests/cli.sh "$OUT/ppa" "$OUT/clitest")
+# the samples inside the binary (ppa selftest) are this code's .ppa
+python3 "$PPA/tools/gen_selftest.py" --check "$OUT/ppa"
 
 echo "all green"

@@ -1,147 +1,478 @@
-{ The ppa command (doc/CLI.md).
+{ The ppa command: files of the PNG family to .ppa and back. doc/CLI.md has
+  the switches and the reasons behind them. Its shape is PJA's (0.9.7,
+  pas/pjacli.pas): the same commands, switches, writes and exit statuses.
 
-    ppa a [options] FILE...    image.png -> image.ppa
-    ppa x [options] FILE...    image.ppa -> image.png (the original's extension)
-    ppa list FILE...           what each .ppa holds
+    ppa a [options] FILE...     compress: image.png -> image.ppa
+    ppa x [options] FILE...     extract:  image.ppa -> image.png (the original's extension)
+    ppa list FILE...            what each .ppa holds
+    ppa t FILE...               test: extract and verify, write nothing
+    ppa info FILE...            the structure of each file, and what PPA does with it
+    ppa report [FILE]           a bug report, and a link to open an issue with it
+    ppa bench FILE...           how fast this machine compresses and extracts them
+    ppa selftest                the samples inside the binary, on both code paths
+    ppa --version               the build, the system and the code path
 
-  Nothing is written under an output's name unless it verified: `a`
-  decompresses its own stream and compares (unless --no-verify), `x` checks
-  the size and the hash; and the output goes to a temporary name first,
-  renamed only when complete. An existing output is not replaced without
-  -f. Several files go to several threads (-th), and each file's lines
-  come out in the order of the inputs. Exit status: 0 every file went
-  through, 1 any failed, 2 usage. }
+  Nothing is written under an output's name unless it verified: `a` checks
+  that its stream decompresses to the input, `x` that the size and the hash
+  match. Every output goes to a temporary first, reaches the disk, and only
+  then takes its name (ppafs). An existing output is only replaced with -f.
+  Exit status: 0 every file went through, 1 any failed, 2 usage, 3 a bug in
+  PPA. }
 program ppa;
 
 {$I ppa.inc}
+{$ifopt R-}{$fatal ppacli: range checks ($R+) are mandatory}{$endif}
+{$ifopt Q-}{$fatal ppacli: overflow checks ($Q+) are mandatory}{$endif}
 
 uses
-  {$ifdef UNIX} cthreads, {$endif}
-  SysUtils, Classes, ppaformat, ppablake3, ppacodec, ppacpu;
+  {$ifdef UNIX} cthreads, BaseUnix, {$endif}
+  {$ifdef MSWINDOWS} Windows, {$endif}
+  SysUtils, Classes, ppablake3, ppaformat, ppacodec, ppafs, ppathreads, ppajoin,
+  { the commands for reporting and checking (doc/CLI.md) }
+  ppastage, ppainfo, ppasysinfo, ppareport, ppabench, ppaselftest;
 
 const
-  VERSION = '0.1.0';
+  DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
+  { the largest input read whole into memory }
+  MAX_INPUT = QWord(1) shl 31;
 
 type
-  { a file to do, and what it says, printed when every file before it is done }
-  TJob = record
-    name: string;
-    outText, errText: string;
-    failed, done: Boolean;
-  end;
+  TCommand = (cmNone, cmCompress, cmExtract, cmList, cmTest, cmInfo, cmReport, cmBench, cmSelftest);
 
 var
-  cmd, outPath, outDir: string;
-  force, quiet, dryRun, noVerify: Boolean;
-  maxOut: QWord = 256 * 1024 * 1024;
+  command: TCommand;
+  inputs: TStringList;
+  outArg: string;          { -o: a name, or a directory }
+  outDir: string;          { --output-dir }
+  force, keepCorrupt, dryRun, quiet, noVerify, cleanTemps: Boolean;
   threads: Integer;
-  jobs: array of TJob;
-  nextJob, nextPrint, failures: LongInt;
-  printLock: TRTLCriticalSection;
+  { --stats, --json; report's --with-file; bench's -r }
+  stats, jsonOut, withFile: Boolean;
+  runs: Integer;
+  runsGiven: Boolean;
+  { -th or --threads given }
+  thGiven: Boolean;
+  { --path }
+  pathGiven: Boolean;
+  pathWanted: TCodePath;
+  { files that met a bug (an exception that is not about the file, or the
+    codec's own check failing) }
+  bugs: Integer;
+  bugFile: string;
+  maxOutput: QWord;
+  errors: Integer;
+  { threads per file when the files are not shared out by size (one
+    worker); each job's own are TFileJob.threads }
+  bandThreads: Integer;
 
-procedure Usage;
+type
+  { One input: what it printed and whether it failed. Files are processed
+    in parallel, and their lines come out in the order of the inputs. }
+  TFileJob = record
+    name, outText, errText: string;
+    index: Integer;
+    failed, done: Boolean;
+    { a bug in PPA, not something about the file }
+    bug: Boolean;
+    { --json: the object of this file; errors: what failed, for it }
+    node: TInfoNode;
+    errors: string;
+    { the bytes read and written (the summary of --stats and --json) }
+    inBytes, outBytes: Int64;
+    { the input's size when the files were ordered (0: not looked at), and
+      the threads it was given for its image streams and bands (Work) }
+    size: Int64;
+    threads: Integer;
+    { the bands `a` cut its images into (--stats) }
+    bands: Integer;
+    { its output handed to the committer (Defer): the job ends there }
+    deferred: Boolean;
+  end;
+  PFileJob = ^TFileJob;
+
+threadvar
+  CurJob: PFileJob;
+
+var
+  jobs: array of TFileJob;
+
+var
+  { the arguments, in UTF-8 on every system }
+  args: array of string;
+
+{$ifdef MSWINDOWS}
+function CommandLineToArgvW(cmd: PWideChar; out n: Integer): PPWideChar; stdcall; external 'shell32.dll';
+
+{ ParamStr goes through the ANSI code page on Windows, and a name like
+  "fotoñandú.png" does not survive it: the arguments are read in UTF-16
+  and kept in UTF-8, the code page the whole program then runs in (so the
+  RTL's file functions and ppafs open the right file). }
+procedure ReadArgs;
+var w: PPWideChar; n, i: Integer;
 begin
-  Writeln('PPA ', VERSION, ': lossless recompression of PNG, APNG, MNG and JNG files');
+  DefaultSystemCodePage := CP_UTF8;
+  DefaultFileSystemCodePage := CP_UTF8;
+  w := CommandLineToArgvW(GetCommandLineW, n);
+  args := nil;
+  SetLength(args, n);
+  for i := 0 to n - 1 do args[i] := UTF8Encode(UnicodeString(w[i]));
+  LocalFree(HLOCAL(w));
+end;
+{ cmd passes a pattern such as *.png as it is (Windows leaves that to each
+  program): an input with * or ? in its name becomes the files that match,
+  in order of name; the folder part is taken as written. A pattern that
+  matches nothing stays, and fails as such (ReadWhole). }
+procedure ExpandWildcards;
+var all, found: TStringList; i: Integer; a, dir: string; sr: TUnicodeSearchRec;
+begin
+  all := TStringList.Create;
+  found := TStringList.Create;
+  for i := 0 to inputs.Count - 1 do begin
+    a := inputs[i];
+    if LastDelimiter('*?', a) <= LastDelimiter('\/:', a) then begin all.Add(a); Continue; end;
+    dir := Copy(a, 1, LastDelimiter('\/:', a));
+    found.Clear;
+    if FindFirst(UnicodeString(UTF8Decode(a)), faAnyFile, sr) = 0 then begin
+      repeat
+        if sr.Attr and faDirectory = 0 then found.Add(dir + UTF8Encode(sr.Name));
+      until FindNext(sr) <> 0;
+      FindClose(sr);
+    end;
+    if found.Count = 0 then all.Add(a)
+    else begin
+      found.Sort;
+      all.AddStrings(found);
+    end;
+  end;
+  found.Free;
+  inputs.Free;
+  inputs := all;
+end;
+{$else}
+procedure ReadArgs;
+var i: Integer;
+begin
+  args := nil;
+  SetLength(args, ParamCount + 1);
+  for i := 0 to ParamCount do args[i] := ParamStr(i);
+end;
+{$endif}
+
+function ArgCount: Integer;
+begin Result := High(args); end;
+
+procedure Fail(const msg: string);
+begin
+  CurJob^.failed := True;
+  CurJob^.errText := CurJob^.errText + 'ppa: ' + msg + LineEnding;
+  if CurJob^.errors <> '' then CurJob^.errors := CurJob^.errors + '; ';
+  CurJob^.errors := CurJob^.errors + msg;
+end;
+
+{ a line for people: --json prints the file's object instead }
+procedure Say(const line: string);
+begin
+  if jsonOut then Exit;
+  CurJob^.outText := CurJob^.outText + line + LineEnding;
+end;
+
+{ a field of the file's --json object }
+function JobNode: TInfoNode;
+begin
+  Result := CurJob^.node;
+end;
+
+{ an exception about the file or the system (a read, a write, memory),
+  not a bug in PPA }
+function NotABug(e: Exception): Boolean;
+begin
+  Result := (e is EInOutError) or (e is EStreamError) or (e is EOSError) or (e is EOutOfMemory);
+end;
+
+{ What could not be written to the output (a full disk, a closed pipe):
+  said once, and what is still in the buffer dropped, or the RTL would
+  fail on it again at the end with a runtime error }
+procedure OutputFailed(const why: string);
+begin
+  TextRec(Output).BufPos := 0;
+  InOutRes := 0;
+  Writeln(StdErr, 'ppa: could not write the output: ', why);
+end;
+
+{ The end: the output flushed first, so that a write that fails says so
+  and ends with 1 (not a bug, and not 0) }
+procedure Finish(code: Integer);
+begin
+  try
+    Flush(Output);
+  except
+    on e: Exception do begin
+      OutputFailed(e.Message);
+      if code = 0 then code := 1;
+    end;
+  end;
+  Halt(code);
+end;
+
+procedure Usage(code: Integer);
+begin
+  Writeln('ppa ', VERSION, ' - lossless recompression of PNG, APNG, MNG and JNG files');
   Writeln;
-  Writeln('  ppa a [options] FILE...    compress: image.png -> image.ppa');
-  Writeln('  ppa x [options] FILE...    extract: image.ppa -> image.png, byte for byte');
-  Writeln('  ppa list FILE...           what each .ppa holds');
+  Writeln('usage: ppa a [options] FILE...     compress to .ppa');
+  Writeln('       ppa x [options] FILE...     extract from .ppa, byte for byte');
+  Writeln('       ppa list FILE...            show what each .ppa holds');
+  Writeln('       ppa t FILE...               test each .ppa: extract and verify, write nothing');
+  Writeln('       ppa info FILE...            the structure of each file, and what PPA does with it');
+  Writeln('       ppa report [FILE] [-o REPORT.txt] [--with-file]');
+  Writeln('                                   a bug report (no pixels, no metadata contents) and');
+  Writeln('                                   a link to open an issue with it');
+  Writeln('       ppa bench FILE... [-r N]    time a, a --no-verify and x (best of N runs)');
+  Writeln('       ppa selftest                the samples inside ppa, on both code paths');
+  Writeln('       ppa --version, -V           the build, the system and the code path');
   Writeln;
-  Writeln('  -o PATH            output name (one input), or a directory');
-  Writeln('  --output-dir=DIR   output directory');
-  Writeln('  -f, --force        replace an existing output (only with one that verified)');
-  Writeln('  -th N, --threads=N threads (default: the processors, up to 8), one file each');
-  Writeln('  --no-verify        a: do not decompress the result to check it first');
-  Writeln('  --max              a: the slow model for every image (by default only where it is');
-  Writeln('                     much smaller): smaller still, ten to forty times slower to extract');
-  Writeln('  --max-output=SIZE  x: refuse a declared original above SIZE (256M; K/M/G; 0 = none)');
-  Writeln('  -n, --dry-run      do everything but write');
-  Writeln('  -q, --quiet        only errors');
-  Writeln('  --version');
+  Writeln('  -o PATH              output name (one input), or directory (ends in / or exists)');
+  Writeln('  --output-dir=DIR     output directory');
+  Writeln('  -f, --force          replace an existing output (only with something that verified)');
+  Writeln('  -th N, --threads=N   threads (default: the processors, up to 8): several');
+  Writeln('                       files at once, and spare ones to a large file''s images');
+  Writeln('  --max                a: the slow model for every image: smaller still (a tenth on');
+  Writeln('                       photographs, more on drawings), ten to forty times slower to');
+  Writeln('                       extract; x needs no switch');
+  Writeln('  --no-verify          a: do not decompress the stream to check it before writing:');
+  Writeln('                       faster, but a codec bug would only show when extracting');
+  Writeln('                       (the hash catches it then)');
+  Writeln('  --max-output=SIZE    x, t: refuse a declared original above SIZE (256M; 0 = no limit)');
+  Writeln('  --keep-corrupt       x: keep output that does not verify as NAME.corrupt');
+  Writeln('  --no-sync            do not wait for each output to reach the disk: a few');
+  Writeln('                       percent faster, but a power cut may leave it empty');
+  Writeln('  --clean-temps        delete the temporaries an interrupted run left where');
+  Writeln('                       this one writes (only PPA''s, old, of no live process)');
+  Writeln('  -n, --dry-run        do everything but write');
+  Writeln('  -q, --quiet          only errors');
+  Writeln('  --stats              a, x, t: where each file''s time went, threads and bands');
+  Writeln('  --json               a, x, t, info, list: a JSON object per file, then a summary');
+  Writeln('  -r N                 bench: runs of each, the best counts (default 3)');
+  Writeln('  --path=PATH          the hot loops in c (the default) or pascal (their');
+  Writeln('                       reference): the same output, slower');
+  Writeln('  --                   the rest are files');
+  Writeln;
+  Writeln('exit status: 0 all went through, 1 a file failed, 2 usage error, 3 a bug in PPA');
+  Writeln('bugs: ppa report FILE, then ', ISSUES_URL);
+  Finish(code);
 end;
 
-procedure Say(var j: TJob; const s: string);
+procedure UsageError(const msg: string);
 begin
-  if not quiet then j.outText := j.outText + s + LineEnding;
+  Writeln(StdErr, 'ppa: ', msg);
+  Writeln(StdErr, 'ppa: see ppa --help');
+  Halt(2);
 end;
 
-procedure Err(var j: TJob; const s: string);
+{ "256M", "1G", "1000K", "12345"; False if it is none of those }
+function ParseSize(s: string; out v: QWord): Boolean;
+var mult: QWord; n: QWord; c: Char;
 begin
-  j.failed := True;
-  j.errText := j.errText + 'ppa: ' + s + LineEnding;
+  Result := False;
+  if s = '' then Exit;
+  mult := 1;
+  c := UpCase(s[Length(s)]);
+  case c of
+    'K': mult := QWord(1) shl 10;
+    'M': mult := QWord(1) shl 20;
+    'G': mult := QWord(1) shl 30;
+  end;
+  if mult > 1 then Delete(s, Length(s), 1);
+  if not TryStrToQWord(s, n) then Exit;
+  if (n > 0) and (n > High(QWord) div mult) then Exit;
+  v := n * mult;
+  Result := True;
 end;
 
-function ReadAll(var j: TJob; const f: string; out d: TBytes): Boolean;
+{ where the command is among the arguments (past a leading --path) }
+function CommandIndex: Integer;
+begin
+  Result := 1;
+  while (Result < ArgCount) and (Copy(args[Result], 1, 7) = '--path=') do Inc(Result);
+end;
+
+procedure TakePath(const v: string);
+begin
+  if not ParseCodePath(v, pathWanted) then UsageError('--path: c or pascal, not "' + v + '"');
+  pathGiven := True;
+end;
+
+{ "--path pascal": the value goes after an equals sign (next: where it is) }
+procedure PathSpaced(next: Integer);
+begin
+  if next <= ArgCount then UsageError('"--path ' + args[next] + '": write --path=' + args[next])
+  else UsageError('--path needs a value: --path=c or --path=pascal');
+end;
+
+procedure ParseArgs;
+var i: Integer; a, v: string; n: Integer; onlyFiles: Boolean;
+
+  function NextValue: string;
+  begin
+    if i >= ArgCount then UsageError(a + ' needs a value');
+    Inc(i);
+    Result := args[i];
+  end;
+
+begin
+  command := cmNone; inputs := TStringList.Create;
+  outArg := ''; outDir := ''; force := False; keepCorrupt := False; dryRun := False; quiet := False;
+  noVerify := False; cleanTemps := False;
+  stats := False; jsonOut := False; withFile := False; runs := 3; runsGiven := False; thGiven := False;
+  pathGiven := False;
+  threads := DefaultThreads;
+  maxOutput := DEFAULT_MAX_OUTPUT;
+  ReadArgs;
+  if ArgCount = 0 then Usage(2);
+  { --path may come before the command too }
+  i := 1;
+  while (i < ArgCount) and (Copy(args[i], 1, 7) = '--path=') do begin
+    TakePath(Copy(args[i], 8, MaxInt));
+    Inc(i);
+  end;
+  a := args[i];
+  if a = '--path' then PathSpaced(i + 1);
+  if (a = '-h') or (a = '--help') then Usage(0);
+  if (a = '--version') or (a = '-V') then begin
+    if pathGiven then SetCodePath(pathWanted);
+    Writeln('ppa ', VERSION);
+    Write(SystemText(False));
+    Finish(0);
+  end;
+  if a = 'a' then command := cmCompress
+  else if a = 'x' then command := cmExtract
+  else if a = 'list' then command := cmList
+  else if a = 't' then command := cmTest
+  else if a = 'info' then command := cmInfo
+  else if a = 'report' then command := cmReport
+  else if a = 'bench' then command := cmBench
+  else if a = 'selftest' then command := cmSelftest
+  else UsageError('unknown command "' + a + '": a, x, list, t, info, report, bench or selftest');
+  onlyFiles := False;
+  i := i + 1;
+  while i <= ArgCount do begin
+    a := args[i];
+    if onlyFiles or (a = '') or (a[1] <> '-') or (a = '-') then inputs.Add(a)
+    else if a = '--' then onlyFiles := True
+    else if a = '--path' then PathSpaced(i + 1)
+    else if (a = '-h') or (a = '--help') then Usage(0)
+    else if a = '-o' then outArg := NextValue
+    else if Copy(a, 1, 13) = '--output-dir=' then outDir := Copy(a, 14, MaxInt)
+    else if (a = '-f') or (a = '--force') then force := True
+    else if (a = '-n') or (a = '--dry-run') then dryRun := True
+    else if (a = '-q') or (a = '--quiet') then quiet := True
+    else if a = '--keep-corrupt' then keepCorrupt := True
+    else if a = '--max' then FastModel := False
+    else if a = '--no-verify' then noVerify := True
+    else if a = '--clean-temps' then cleanTemps := True
+    else if a = '--no-sync' then SyncToDisk := False
+    else if a = '--stats' then stats := True
+    else if a = '--json' then jsonOut := True
+    else if a = '--with-file' then withFile := True
+    else if Copy(a, 1, 7) = '--path=' then TakePath(Copy(a, 8, MaxInt))
+    else if a = '-r' then begin
+      v := NextValue;
+      if not TryStrToInt(v, n) or (n < 1) or (n > 1000) then UsageError('-r: a number from 1 to 1000, not "' + v + '"');
+      runs := n;
+      runsGiven := True;
+    end else if (a = '-th') or (Copy(a, 1, 10) = '--threads=') then begin
+      if a = '-th' then v := NextValue else v := Copy(a, 11, MaxInt);
+      if not TryStrToInt(v, n) or (n < 1) or (n > 64) then UsageError('threads: a number from 1 to 64, not "' + v + '"');
+      threads := n;
+      thGiven := True;
+    end else if Copy(a, 1, 13) = '--max-output=' then begin
+      if not ParseSize(Copy(a, 14, MaxInt), maxOutput) then
+        UsageError('--max-output: a size like 256M, 1G or 0, not "' + Copy(a, 14, MaxInt) + '"');
+      if maxOutput = 0 then maxOutput := High(QWord);
+    end
+    { glued values were the old packPNG spelling: say what to write instead }
+    else if Copy(a, 1, 3) = '-th' then UsageError('"' + a + '": write -th ' + Copy(a, 4, MaxInt))
+    else UsageError('unknown option "' + a + '"');
+    Inc(i);
+  end;
+  {$ifdef MSWINDOWS} ExpandWildcards; {$endif}
+  if (inputs.Count = 0) and not (command in [cmReport, cmSelftest]) then UsageError('no input files');
+  if (outArg <> '') and (outDir <> '') then UsageError('-o and --output-dir together');
+  if (command in [cmList, cmTest, cmInfo, cmBench, cmSelftest]) and ((outArg <> '') or (outDir <> '')) then
+    UsageError(args[CommandIndex] + ' writes nothing');
+  if not FastModel and (command <> cmCompress) then UsageError('--max is for a');
+  if noVerify and (command <> cmCompress) then UsageError('--no-verify is for a');
+  if stats and not (command in [cmCompress, cmExtract, cmTest]) then UsageError('--stats is for a, x and t');
+  if jsonOut and not (command in [cmCompress, cmExtract, cmTest, cmInfo, cmList]) then
+    UsageError('--json is for a, x, t, info and list');
+  if withFile and (command <> cmReport) then UsageError('--with-file is for report');
+  if withFile and (inputs.Count = 0) then UsageError('--with-file copies the FILE of the report: give one');
+  if runsGiven and (command <> cmBench) then UsageError('-r is for bench');
+  if (command in [cmTest, cmInfo, cmReport, cmBench, cmSelftest]) and (force or dryRun or keepCorrupt) then
+    UsageError('-f, -n and --keep-corrupt are for a and x');
+  if keepCorrupt and (command <> cmExtract) then UsageError('--keep-corrupt is for x');
+  { durable writes: list, t, info and selftest write nothing; bench and
+    report write, but only their own files (bench in a directory of its own) }
+  if (cleanTemps or not SyncToDisk) and (command in [cmList, cmTest, cmInfo, cmSelftest]) then
+    UsageError(args[CommandIndex] + ' writes nothing');
+  if cleanTemps and not (command in [cmCompress, cmExtract]) then UsageError('--clean-temps is for a and x');
+  if (command = cmReport) and (outDir <> '') then UsageError('report: -o names the report');
+  if (command = cmReport) and (inputs.Count > 1) then UsageError('report takes one file');
+  if (command = cmSelftest) and (inputs.Count > 0) then UsageError('selftest takes no files: its samples are inside');
+  if (command = cmSelftest) and thGiven then UsageError('selftest picks its own threads (1 and 2)');
+end;
+
+function ReadWhole(const f: string; out data: TBytes): Boolean;
 var s: TFileStream;
 begin
-  Result := False; d := nil;
+  data := nil;
+  Result := False;
+  if DirectoryExists(f) then begin Fail(f + ': is a directory'); Exit; end;
+  {$ifdef MSWINDOWS}
+  { a pattern still here matched nothing (no Windows name has * or ?) }
+  if LastDelimiter('*?', f) > 0 then begin Fail(f + ': no file matches'); Exit; end;
+  {$endif}
+  StageEnter(stRead);
   try
     s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone);
     try
-      SetLength(d, s.Size);
-      if s.Size > 0 then s.ReadBuffer(d[0], s.Size);
-      Result := True;
-    finally s.Free; end;
-  except
-    on e: Exception do Err(j, f + ': cannot read: ' + e.Message);
-  end;
-end;
-
-{ To a temporary name next to it, then renamed: a half-written output never
-  has the output's name. }
-function WriteAll(var j: TJob; const f: string; const d: TBytes): Boolean;
-var s: TFileStream; tmp: string;
-begin
-  Result := False;
-  if FileExists(f) and not force then begin Err(j, f + ': exists (use -f to replace it)'); Exit; end;
-  if dryRun then Exit(True);
-  tmp := f + '.ppa-tmp' + IntToStr(GetProcessID) + '-' + IntToStr(PtrUInt(GetThreadID) mod 1000000);
-  try
-    s := TFileStream.Create(tmp, fmCreate);
-    try
-      if Length(d) > 0 then s.WriteBuffer(d[0], Length(d));
-    finally s.Free; end;
-    if FileExists(f) then DeleteFile(f);
-    if not RenameFile(tmp, f) then begin DeleteFile(tmp); Err(j, f + ': cannot rename the output into place'); Exit; end;
-    Result := True;
-  except
-    on e: Exception do begin
-      if FileExists(tmp) then DeleteFile(tmp);
-      Err(j, f + ': cannot write: ' + e.Message);
+      if QWord(s.Size) > MAX_INPUT then begin Fail(f + ': larger than 2 GiB'); Exit; end;
+      SetLength(data, s.Size);
+      if s.Size > 0 then s.ReadBuffer(data[0], s.Size);
+    finally
+      s.Free;
     end;
+    Result := True;
+    CurJob^.inBytes := Length(data);
+  except
+    on e: Exception do Fail(f + ': ' + e.Message);
   end;
+  StageEnter(stNone);
 end;
 
-function OutputName(const input, newExt: string; single: Boolean): string;
-var stem: string;
+function EndsWithSeparator(const s: string): Boolean;
 begin
-  stem := ChangeFileExt(ExtractFileName(input), '');
-  if newExt <> '' then stem := stem + '.' + newExt;
-  if (outPath <> '') and single and not DirectoryExists(outPath) and
-     not (outPath[Length(outPath)] in ['/', '\']) then Exit(outPath);
-  if outPath <> '' then Exit(IncludeTrailingPathDelimiter(outPath) + stem);
-  if outDir <> '' then Exit(IncludeTrailingPathDelimiter(outDir) + stem);
-  if ExtractFilePath(input) = '' then Result := stem
-  else Result := IncludeTrailingPathDelimiter(ExtractFilePath(input)) + stem;
+  Result := (s <> '') and ((s[Length(s)] = '/') or (s[Length(s)] = DirectorySeparator));
 end;
 
-procedure DoCompress(var j: TJob; single: Boolean);
-var d, p: TBytes; stored: Boolean; why, o, ext: string;
+{ Where the output of `input` goes, named `name` by default. }
+function OutputPath(const input, name: string): string;
+var dir: string;
 begin
-  if not ReadAll(j, j.name, d) then Exit;
-  ext := ExtractFileExt(j.name);
-  if (ext <> '') and (ext[1] = '.') then Delete(ext, 1, 1);
-  if not Pack(d, ext, not noVerify, p, stored, why) then begin Err(j, j.name + ': ' + why); Exit; end;
-  if stored and (Pos('bug', why) > 0) then Err(j, j.name + ': ' + why + ' (stored as it is)');
-  o := OutputName(j.name, 'ppa', single);
-  if not WriteAll(j, o, p) then Exit;
-  if stored then
-    Say(j, j.name + ' -> ' + o + ': stored, ' + IntToStr(Length(d)) + ' -> ' + IntToStr(Length(p)) + ' (' + why + ')')
-  else
-    Say(j, j.name + ' -> ' + o + ': ' + IntToStr(Length(d)) + ' -> ' + IntToStr(Length(p)) +
-      Format(' (%.2f%%)', [100 * Length(p) / Length(d)]));
+  dir := outDir;
+  if outArg <> '' then begin
+    if DirectoryExists(outArg) or EndsWithSeparator(outArg) then dir := outArg
+    else Exit(outArg);
+  end;
+  if dir = '' then Result := ExtractFilePath(input) + name
+  else Result := IncludeTrailingPathDelimiter(dir) + name;
 end;
 
+function Human(n: QWord): string;
+begin
+  Result := HumanSize(n);
+end;
+
+{ a .ppa's original without an extension of its own: by its signature }
 function KindExtension(const d: TBytes): string;
 begin
   Result := 'png';
@@ -149,57 +480,528 @@ begin
   if (Length(d) >= 2) and (d[0] = $8B) and (d[1] = Ord('J')) then Result := 'jng';
 end;
 
-procedure DoExtract(var j: TJob; single: Boolean);
-var d, orig: TBytes; desc: TDescriptor; e: TFormatError; detail, ext, o: string;
+var
+  { every output this run has taken, and every input, by PathKey; Objects
+    is the job's index }
+  outKeys, inKeys: TStringList;
+  claimLock: TRTLCriticalSection;
+
+{ The same file for the same text: absolute, without . and .., and on
+  Windows without case. Links are not resolved. }
+function PathKey(const p: string): string;
 begin
-  if not ReadAll(j, j.name, d) then Exit;
-  e := Unpack(d, maxOut, orig, desc, detail);
-  if e <> feNone then begin
-    if detail <> '' then Err(j, j.name + ': ' + FormatErrorText(e) + ' (' + detail + ')')
-    else Err(j, j.name + ': ' + FormatErrorText(e));
-    Exit;
-  end;
-  ext := desc.ext;
-  if ext = '' then ext := KindExtension(orig);
-  o := OutputName(j.name, ext, single);
-  if not WriteAll(j, o, orig) then Exit;
-  Say(j, j.name + ' -> ' + o + ': ' + IntToStr(Length(orig)) + ' bytes, verified');
+  Result := ExpandFileName(p);
+  {$ifdef MSWINDOWS} Result := UTF8Encode(WideLowerCase(UTF8Decode(Result))); {$endif}
 end;
 
-procedure DoList(var j: TJob);
-var d: TBytes; desc: TDescriptor; e: TFormatError; i: Integer; h: string;
+function NewKeyList: TStringList;
 begin
-  if not ReadAll(j, j.name, d) then Exit;
+  Result := TStringList.Create;
+  Result.CaseSensitive := True;
+  Result.UseLocale := False;
+  Result.Duplicates := dupAccept;
+  Result.Sorted := True;
+end;
+
+{ Takes path as the output of the current job. Without this, with -f two
+  inputs with the same output (a.png and a.PNG, or the same name from two
+  folders with --output-dir) both said they were written, and only the last
+  one was there; one could also replace another job's input before it was
+  read. False, and the job failed, if the path is another job's. }
+function Claim(const path: string): Boolean;
+var key: string; i, j, k: Integer;
+begin
+  key := PathKey(path); k := CurJob^.index;
+  Result := False;
+  EnterCriticalSection(claimLock);
+  try
+    if outKeys.Find(key, i) then begin
+      j := PtrInt(outKeys.Objects[i]);
+      if j <> k then begin Fail(path + ': also the output of ' + jobs[j].name + ' in this run'); Exit; end;
+      Exit(True);
+    end;
+    if inKeys.Find(key, i) then begin
+      while (i > 0) and (inKeys[i - 1] = key) do Dec(i);
+      while (i < inKeys.Count) and (inKeys[i] = key) do begin
+        if PtrInt(inKeys.Objects[i]) <> k then begin Fail(path + ': also an input of this run'); Exit; end;
+        Inc(i);
+      end;
+    end;
+    outKeys.AddObject(key, TObject(PtrInt(k)));
+    Result := True;
+  finally
+    LeaveCriticalSection(claimLock);
+  end;
+end;
+
+{ Anything under that name, a link that leads nowhere included (FileExists
+  follows links, and a dangling one said no where the write then failed) }
+function Exists(const path: string): Boolean;
+{$ifdef UNIX} var st: Stat; {$endif}
+begin
+  {$ifdef UNIX}
+  Result := fpLstat(path, st) = 0;
+  {$else}
+  Result := FileExists(path) or DirectoryExists(path);
+  {$endif}
+end;
+
+{ Save's checks before the write: the name taken in this run, what an
+  interrupted run left, an existing file without -f }
+function SaveCheck(const path: string): Boolean;
+var note: string;
+begin
+  Result := False;
+  if not Claim(path) then Exit;
+  { what an interrupted run left in this directory: a notice, not a failure }
+  note := CheckLeftovers(path, cleanTemps and not dryRun);
+  if note <> '' then CurJob^.errText := CurJob^.errText + 'ppa: ' + note + LineEnding;
+  { -n checks this too: it said yes to what the real run then refused }
+  if not force and Exists(path) then begin
+    Fail(path + ': already exists (-f to replace it)');
+    Exit;
+  end;
+  Result := True;
+end;
+
+{ Save's write, after SaveCheck }
+function SaveWrite(const path: string; const data: TBytes; const expected: THash16): Boolean;
+var r: TFsResult; o: TOutcome; om: TOnMismatch;
+begin
+  Result := False;
+  if keepCorrupt then om := omKeep else om := omDelete;
+  StageEnter(stWrite);
+  r := WriteVerified(path, data, expected, om, force, o);
+  StageEnter(stNone);
+  { in place and whole, but its name may not survive a power cut }
+  if r.error = feNotSynced then begin
+    Fail(o.path + ': written, but its directory could not be flushed to the disk: ' +
+         SysErrorMessage(r.code) + ' (' + r.Text + ')');
+    if o.kind = ocKept then Fail(path + ': does not verify; kept as ' + o.path);
+    Exit;
+  end;
+  if not r.Ok then begin
+    { the system's own words for its error, and its number }
+    if r.code >= 0 then Fail(path + ': could not write it: ' + SysErrorMessage(r.code) + ' (' + r.Text + ')')
+    else Fail(path + ': could not write it (' + r.Text + ')');
+    Exit;
+  end;
+  case o.kind of
+    ocVerified: Result := True;
+    ocDeleted: Fail(path + ': does not verify; nothing written');
+    ocKept: Fail(path + ': does not verify; kept as ' + o.path);
+  end;
+end;
+
+{ Writes data under path, which must verify against `expected`. }
+function Save(const path: string; const data: TBytes; const expected: THash16): Boolean;
+begin
+  Result := SaveCheck(path);
+  if Result and not dryRun then Result := SaveWrite(path, data, expected);
+end;
+
+{ --stats: where the file's time went (ppastage), and the threads and
+  bands (a: the bands its images were cut into; x and t: not known
+  without parsing the stream, left out) }
+procedure StatsOf;
+var t: TStageTimes; st: TStage; o: TInfoNode; line: string; total: Double;
+begin
+  if not stats then Exit;
+  t := StageTimes;
+  o := JobNode.Obj('stats');
+  line := '';
+  total := 0;
+  for st := Low(TStage) to High(TStage) do
+    if t[st] > 0 then begin
+      total := total + t[st];
+      o.Fixed(STAGE_NAMES[st] + '_ms', t[st] * 1000, 3);
+      if line <> '' then line := line + ', ';
+      line := line + STAGE_NAMES[st] + ' ' + DotNumber(t[st] * 1000, 2) + ' ms';
+    end;
+  o.Fixed('total_ms', total * 1000, 3);
+  o.Num('threads', CurJob^.threads);
+  if command = cmCompress then o.Num('bands', CurJob^.bands);
+  { with -q the file's own line is not there: the stats name it }
+  if not jsonOut and quiet then CurJob^.outText := CurJob^.outText + CurJob^.name + ':' + LineEnding;
+  if not jsonOut then begin
+    line := '  stats: ' + line + '; total ' + DotNumber(total * 1000, 2) + ' ms; ' +
+            IntToStr(CurJob^.threads) + ' thread(s)';
+    if command = cmCompress then line := line + ', ' + IntToStr(CurJob^.bands) + ' band(s)';
+    CurJob^.outText := CurJob^.outText + line + LineEnding;
+  end;
+end;
+
+{ The committer (PJA 0.9.7): a file's write, flushed to the disk before it
+  takes its name (ppafs), waits about 16 ms on a SATA SSD. So when every
+  write is flushed and --stats does not time it, the worker checks the name
+  (SaveCheck) and hands the write and the rest of the job (its line, its
+  --json object) to one thread that does them in turn, and goes on to the
+  next file: the same files, lines and order, the flush beside the next
+  file's work. At most MAX_PENDING writes wait (their bytes are held). }
+type
+  TDoneKind = (dkCompress, dkExtract);
+  TPending = record
+    k: Integer;
+    kind: TDoneKind;
+    path, f, note: string;
+    data: TBytes;
+    expected: THash16;
+    inLen: Int64;
+  end;
+  TCommitter = class(TJoinThread)
+    procedure Execute; override;
+  end;
+
+const
+  MAX_PENDING = 8;
+
+var
+  asyncCommit: Boolean = False;
+  pend: array[0..MAX_PENDING - 1] of TPending;
+  pendHead, pendCount: Integer;
+  pendStop: Boolean;
+  pendLock: TRTLCriticalSection;
+  pendWake, pendRoom: PRTLEvent;
+  committer: TCommitter = nil;
+
+procedure FinishJob(k: Integer); forward;
+
+{ what a written .ppa adds to its job; note: why it was stored, or '' }
+procedure CompressDone(const f, path: string; origLen: Int64; const ppa: TBytes; const note: string);
+var line: string;
+begin
+  CurJob^.outBytes := Length(ppa);
+  JobNode.Str('output', path);
+  JobNode.Num('original_size', origLen);
+  JobNode.Num('ppa_size', Length(ppa));
+  if origLen > 0 then JobNode.Fixed('ratio_percent', 100 * Length(ppa) / origLen);
+  JobNode.Bool('stored', note <> '');
+  if note <> '' then JobNode.Str('why_stored', note);
+  if quiet then Exit;
+  line := f + ' -> ' + path + '  ' + Human(origLen) + ' -> ' + Human(Length(ppa));
+  if origLen > 0 then line := line + '  ' + DotNumber(100 * Length(ppa) / origLen, 2) + '%';
+  if note <> '' then line := line + '  (stored as is: ' + note + ')';
+  Say(line);
+end;
+
+procedure ExtractDone(const f, path: string; const orig: TBytes; ppaLen: Int64);
+begin
+  CurJob^.outBytes := Length(orig);
+  JobNode.Str('output', path);
+  JobNode.Num('original_size', Length(orig));
+  JobNode.Num('ppa_size', ppaLen);
+  if not quiet then Say(f + ' -> ' + path + '  ' + Human(Length(orig)));
+end;
+
+{ the job's write and end to the committer; waits while MAX_PENDING wait }
+procedure Defer(kind: TDoneKind; const f, path: string; const data: TBytes; const expected: THash16;
+  inLen: Int64; const note: string);
+var i: Integer;
+begin
+  CurJob^.deferred := True;
+  repeat
+    EnterCriticalSection(pendLock);
+    if pendCount < MAX_PENDING then begin
+      i := (pendHead + pendCount) mod MAX_PENDING;
+      pend[i].k := CurJob^.index; pend[i].kind := kind;
+      pend[i].f := f; pend[i].path := path; pend[i].note := note;
+      pend[i].data := data; pend[i].expected := expected; pend[i].inLen := inLen;
+      Inc(pendCount);
+      LeaveCriticalSection(pendLock);
+      RTLEventSetEvent(pendWake);
+      Exit;
+    end;
+    LeaveCriticalSection(pendLock);
+    RTLEventWaitFor(pendRoom, 50);
+  until False;
+end;
+
+procedure TCommitter.Execute;
+var p: TPending; have: Boolean;
+begin
+  repeat
+    EnterCriticalSection(pendLock);
+    have := pendCount > 0;
+    if have then begin
+      p := pend[pendHead];
+      pend[pendHead].data := nil;
+      pendHead := (pendHead + 1) mod MAX_PENDING;
+      Dec(pendCount);
+    end;
+    LeaveCriticalSection(pendLock);
+    if not have then begin
+      if pendStop then Break;
+      RTLEventWaitFor(pendWake, 50);
+      Continue;
+    end;
+    RTLEventSetEvent(pendRoom);
+    CurJob := @jobs[p.k];
+    try
+      if SaveWrite(p.path, p.data, p.expected) then
+        case p.kind of
+          dkCompress: CompressDone(p.f, p.path, p.inLen, p.data, p.note);
+          dkExtract: ExtractDone(p.f, p.path, p.data, p.inLen);
+        end;
+    except
+      on e: Exception do begin
+        if not NotABug(e) then begin
+          jobs[p.k].bug := True;
+          Fail(jobs[p.k].name + ': internal error: ' + e.ClassName + ': ' + e.Message);
+        end else Fail(jobs[p.k].name + ': ' + e.ClassName + ': ' + e.Message);
+      end;
+    end;
+    p.data := nil;
+    FinishJob(p.k);
+  until False;
+end;
+
+procedure StartCommitter;
+begin
+  InitCriticalSection(pendLock);
+  pendWake := RTLEventCreate; pendRoom := RTLEventCreate;
+  pendHead := 0; pendCount := 0; pendStop := False;
+  try
+    committer := TCommitter.Create(False);
+  except
+    on EThread do committer := nil;
+  end;
+  asyncCommit := committer <> nil;
+end;
+
+{ every write done and every job ended }
+procedure StopCommitter;
+begin
+  if committer = nil then Exit;
+  EnterCriticalSection(pendLock);
+  pendStop := True;
+  LeaveCriticalSection(pendLock);
+  RTLEventSetEvent(pendWake);
+  committer.Join;
+  committer.Free;
+  committer := nil;
+  asyncCommit := False;
+end;
+
+procedure CompressOne(const f: string);
+var d, pp: TBytes; ok, stored: Boolean; why, path, note: string; st: TCodecStats;
+begin
+  if not ReadWhole(f, d) then Exit;
+  if IsPpa(d) then begin Fail(f + ': already a .ppa'); Exit; end;
+  { the extension, as it is written, for x to give it back }
+  ok := Pack(d, Copy(ExtractFileExt(f), 2, MaxInt), not noVerify, pp, stored, why, st, CurJob^.threads);
+  CurJob^.bands := st.bands;
+  if not ok then begin Fail(f + ': ' + why); Exit; end;
+  note := '';
+  if stored then begin
+    note := why;
+    { the codec's own check failed: the file is stored as it is, whole,
+      and the run ends with the bug's status }
+    if Pos('bug', why) > 0 then begin
+      CurJob^.bug := True;
+      Fail(f + ': internal error: ' + why + ' (stored as it is)');
+    end;
+  end;
+  path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.ppa'));
+  if asyncCommit then begin
+    if SaveCheck(path) then Defer(dkCompress, f, path, pp, Blake3_128(pp), Length(d), note);
+    Exit;
+  end;
+  if Save(path, pp, Blake3_128(pp)) then CompressDone(f, path, Length(d), pp, note);
+  StatsOf;
+end;
+
+function ErrorText(e: TFormatError; const detail: string): string;
+begin
+  Result := FormatErrorText(e);
+  if detail <> '' then Result := Result + ' (' + detail + ')';
+end;
+
+procedure ExtractOne(const f: string);
+var d, orig: TBytes; path, ext, detail: string; desc: TDescriptor; e: TFormatError; cap: QWord;
+begin
+  if not ReadWhole(f, d) then Exit;
+  if maxOutput = High(QWord) then cap := 0 else cap := maxOutput;
+  e := Unpack(d, cap, orig, desc, detail, CurJob^.threads);
+  if e = feTooLarge then begin
+    Fail(f + ': the original is larger than --max-output'); Exit;
+  end;
+  if not (e in [ppaformat.feNone, feHashMismatch]) then begin Fail(f + ': ' + ErrorText(e, detail)); Exit; end;
+  { -n does everything but write: a hash that does not match fails it as
+    it fails x (Save, which -n stops before, is where x finds it) }
+  if dryRun and (e = feHashMismatch) then begin Fail(f + ': does not verify (' + ErrorText(e, detail) + ')'); Exit; end;
+  { the original's own extension; without one, by the content }
+  ext := desc.ext;
+  if ext = '' then ext := KindExtension(orig);
+  path := OutputPath(f, ChangeFileExt(ExtractFileName(f), '.' + ext));
+  { a hash that does not match goes through Save as well: it deletes it, or
+    keeps it under another name with --keep-corrupt }
+  if asyncCommit then begin
+    if SaveCheck(path) then Defer(dkExtract, f, path, orig, desc.hash, Length(d), '');
+    Exit;
+  end;
+  if Save(path, orig, desc.hash) then ExtractDone(f, path, orig, Length(d));
+  StatsOf;
+end;
+
+{ t: what x does, without writing: the size and the hash checked }
+procedure TestOne(const f: string);
+var d, orig: TBytes; desc: TDescriptor; e: TFormatError; detail: string; cap: QWord;
+begin
+  if not ReadWhole(f, d) then Exit;
+  if not IsPpa(d) then begin Fail(f + ': FAILED: not a .ppa'); Exit; end;
+  if maxOutput = High(QWord) then cap := 0 else cap := maxOutput;
+  e := Unpack(d, cap, orig, desc, detail, CurJob^.threads);
+  StageEnter(stNone);
+  if e = feTooLarge then begin Fail(f + ': FAILED: the original is larger than --max-output'); Exit; end;
+  if e <> ppaformat.feNone then begin Fail(f + ': FAILED: ' + ErrorText(e, detail)); Exit; end;
+  CurJob^.outBytes := Length(orig);
+  JobNode.Num('original_size', Length(orig));
+  JobNode.Num('ppa_size', Length(d));
+  if not quiet then Say(f + ': OK  ' + Human(Length(orig)) + ', size and BLAKE3-128 verified');
+  StatsOf;
+end;
+
+{ info: the structure, and what PPA does with it }
+procedure InfoOne(const f: string);
+var d: TBytes; n, bug: TInfoNode; sl: TStringList;
+begin
+  if not ReadWhole(f, d) then Exit;
+  n := DescribeFile(f, d, False, CurJob^.threads, maxOutput, True);
+  bug := n.Find('internal_error');
+  if bug <> nil then begin
+    CurJob^.bug := True;
+    Fail(f + ': internal error: ' + bug.value);
+  end;
+  if jsonOut then begin
+    CurJob^.node.Free;
+    CurJob^.node := n;
+    Exit;
+  end;
+  sl := TStringList.Create;
+  try
+    n.Render(sl, 2);
+    sl.Delete(0);
+    sl.Insert(0, f);
+    Say(TrimRight(sl.Text));
+  finally
+    sl.Free;
+    n.Free;
+  end;
+end;
+
+procedure ListOne(const f: string);
+var d: TBytes; desc: TDescriptor; e: TFormatError; hex, line: string;
+begin
+  if not ReadWhole(f, d) then Exit;
   e := Inspect(d, desc);
-  if e <> feNone then begin Err(j, j.name + ': ' + FormatErrorText(e)); Exit; end;
-  h := '';
-  for i := 0 to 15 do h := h + LowerCase(IntToHex(desc.hash[i], 2));
+  if e <> ppaformat.feNone then begin Fail(f + ': ' + FormatErrorText(e)); Exit; end;
+  hex := HexBytes(desc.hash);
+  JobNode.Num('original_size', desc.origSize);
+  JobNode.Num('ppa_size', Length(d));
+  JobNode.Fixed('ratio_percent', 100 * Length(d) / desc.origSize);
+  JobNode.Bool('stored', desc.stored);
+  JobNode.Str('extension', desc.ext);
+  JobNode.Str('blake3_128', hex);
   { list prints even with -q: it is what was asked for }
-  if desc.stored then
-    j.outText := j.outText + Format('%s: %d bytes stored, .%s, BLAKE3-128 %s', [j.name, desc.origSize, desc.ext, h]) + LineEnding
-  else
-    j.outText := j.outText + Format('%s: %d -> %d bytes, .%s, BLAKE3-128 %s', [j.name, desc.origSize, desc.payloadLen, desc.ext, h]) + LineEnding;
+  line := f + '  original ' + IntToStr(desc.origSize) + ' B, .ppa ' + IntToStr(Length(d)) + ' B' +
+          ' (' + DotNumber(100 * Length(d) / desc.origSize, 2) + '%)';
+  if desc.stored then line := line + '  (stored as is)';
+  if desc.ext <> '' then line := line + ', as .' + desc.ext;
+  Say(line + '  blake3-128 ' + hex);
+end;
+
+var
+  nextJob, nextPrint: LongInt;
+  { the jobs in the order the workers take them }
+  order: array of Integer;
+  printLock: TRTLCriticalSection;
+  { the bytes every file read and wrote, for the summary }
+  sumIn, sumOut: Int64;
+  { what writing the output met, '' if nothing }
+  outputError: string;
+
+{ PPA_TEST_CRASH=range or access: a bug on purpose (cli.sh checks how the
+  command ends then) }
+var crashTarget: PInteger = nil;
+
+procedure CrashTest;
+var w: string;
+begin
+  w := GetEnvironmentVariable('PPA_TEST_CRASH');
+  if w = 'range' then raise ERangeError.Create('Range check error (PPA_TEST_CRASH)');
+  if w = 'access' then crashTarget^ := 1;
 end;
 
 procedure RunJob(k: Integer);
-var single: Boolean;
 begin
-  single := Length(jobs) = 1;
+  CurJob := @jobs[k];
+  jobs[k].node := TInfoNode.Create(ikObject);
+  jobs[k].node.Str('file', jobs[k].name);
+  StageReset;
   try
-    if cmd = 'a' then DoCompress(jobs[k], single)
-    else if cmd = 'x' then DoExtract(jobs[k], single)
-    else DoList(jobs[k]);
+    { failed before starting: its output is another input's }
+    if not jobs[k].failed then begin
+      CrashTest;
+      case command of
+        cmCompress: CompressOne(jobs[k].name);
+        cmExtract: ExtractOne(jobs[k].name);
+        cmList: ListOne(jobs[k].name);
+        cmTest: TestOne(jobs[k].name);
+        cmInfo: InfoOne(jobs[k].name);
+      end;
+    end;
   except
-    on e: Exception do Err(jobs[k], jobs[k].name + ': ' + e.ClassName + ': ' + e.Message);
+    on e: Exception do begin
+      if not NotABug(e) then begin
+        jobs[k].bug := True;
+        Fail(jobs[k].name + ': internal error: ' + e.ClassName + ': ' + e.Message);
+      end else Fail(jobs[k].name + ': ' + e.ClassName + ': ' + e.Message);
+    end;
   end;
-  { print every finished file whose turn it is, in the order of the inputs }
+  { the committer ends it }
+  if jobs[k].deferred then Exit;
+  FinishJob(k);
+end;
+
+{ a job's --json object, and its lines printed when it is next in line }
+procedure FinishJob(k: Integer);
+begin
+  if jsonOut then begin
+    { info's "ok": the file was read and described (what PPA does with
+      it is under "ppa") }
+    jobs[k].node.Bool('ok', not jobs[k].failed);
+    if jobs[k].errors <> '' then jobs[k].node.Str('error', jobs[k].errors);
+    if jobs[k].bug and (jobs[k].node.Find('internal_error') = nil) then jobs[k].node.Bool('internal_error', True);
+    jobs[k].outText := jobs[k].node.Json + LineEnding;
+  end;
+  FreeAndNil(jobs[k].node);
+  { print every finished job that is next in line }
   EnterCriticalSection(printLock);
   try
     jobs[k].done := True;
-    if jobs[k].failed then Inc(failures);
     while (nextPrint < Length(jobs)) and jobs[nextPrint].done do begin
-      if jobs[nextPrint].outText <> '' then Write(jobs[nextPrint].outText);
-      if jobs[nextPrint].errText <> '' then Write(StdErr, jobs[nextPrint].errText);
+      { Output and StdErr are per thread in FPC, each with its own buffer:
+        flushed here, inside the lock, or a worker's lines would come out
+        when it ends. The output that cannot be written (a full disk) is
+        said once, at the end, and the rest of the run goes on without it }
+      if (jobs[nextPrint].outText <> '') and (outputError = '') then
+        try
+          Write(jobs[nextPrint].outText); Flush(Output);
+        except
+          on e: Exception do begin
+            TextRec(Output).BufPos := 0;
+            InOutRes := 0;
+            outputError := e.Message;
+          end;
+        end;
+      if jobs[nextPrint].errText <> '' then begin Write(StdErr, jobs[nextPrint].errText); Flush(StdErr); end;
+      if jobs[nextPrint].failed then Inc(errors);
+      if jobs[nextPrint].bug then begin
+        if bugs = 0 then bugFile := jobs[nextPrint].name;
+        Inc(bugs);
+      end;
+      Inc(sumIn, jobs[nextPrint].inBytes);
+      Inc(sumOut, jobs[nextPrint].outBytes);
       jobs[nextPrint].outText := ''; jobs[nextPrint].errText := '';
       Inc(nextPrint);
     end;
@@ -208,108 +1010,312 @@ begin
   end;
 end;
 
-procedure Work;
-var k: LongInt;
+{ The -th threads as tokens (PJA 0.9.6): a worker holds one while it runs
+  a file, and a file may take more of those free when it starts, for its
+  image streams and bands: as many as its share of the bytes not yet
+  started is of -th, at least one. The largest files go first
+  (ScheduleJobs) and the last ones take what the others left: a large file
+  is no longer left alone on one thread at the end. Threads change no
+  output. With one worker, the file takes every thread. }
+var
+  tokLock: TRTLCriticalSection;
+  tokFree: Integer;          { tokens no worker holds }
+  tokWake: PRTLEvent;        { set when tokens come back }
+  restBytes: Int64;          { the sizes of the files not yet started }
+
+{ one token for this worker, waiting for one if none is free }
+procedure TokenTake;
 begin
   repeat
-    k := InterLockedIncrement(nextJob) - 1;
-    if k >= Length(jobs) then Break;
-    RunJob(k);
+    EnterCriticalSection(tokLock);
+    if tokFree > 0 then begin
+      Dec(tokFree);
+      LeaveCriticalSection(tokLock);
+      Exit;
+    end;
+    LeaveCriticalSection(tokLock);
+    RTLEventWaitFor(tokWake, 50);
   until False;
 end;
 
+procedure TokenGive(n: Integer);
+begin
+  EnterCriticalSection(tokLock);
+  Inc(tokFree, n);
+  LeaveCriticalSection(tokLock);
+  RTLEventSetEvent(tokWake);
+end;
+
+{ takes the next input until none is left }
+procedure Work;
+var k: LongInt; want, extra: Integer; sz, w64: Int64;
+begin
+  repeat
+    TokenTake;
+    EnterCriticalSection(tokLock);
+    k := nextJob;
+    if k < Length(jobs) then begin
+      Inc(nextJob);
+      sz := jobs[order[k]].size;
+      { its share of what is left, in threads, rounded up }
+      if (restBytes > 0) and (sz > 0) then begin
+        w64 := (Int64(threads) * sz + restBytes - 1) div restBytes;
+        if w64 > threads then w64 := threads;
+        want := Integer(w64);
+        restBytes := restBytes - sz;
+      end else want := bandThreads;
+      if want < 1 then want := 1;
+      extra := want - 1;
+      if extra > tokFree then extra := tokFree;
+      Dec(tokFree, extra);
+      jobs[order[k]].threads := 1 + extra;
+    end;
+    LeaveCriticalSection(tokLock);
+    if k >= Length(jobs) then begin TokenGive(1); Break; end;
+    RunJob(order[k]);
+    TokenGive(jobs[order[k]].threads);
+  until False;
+end;
+
+{ With several workers the largest files go first (by the size of the
+  input), so that no big file is left for the end while the other threads
+  wait. A file that cannot be read counts as 0 and goes last. The lines
+  still come out in the order of the inputs (nextPrint), and with one
+  worker nothing changes. }
+procedure ScheduleJobs(workers: Integer);
+var i, j, t: Integer; size: array of Int64; sr: TSearchRec;
+begin
+  order := nil; size := nil;
+  SetLength(order, Length(jobs)); SetLength(size, Length(jobs));
+  restBytes := 0;
+  for i := 0 to High(jobs) do begin
+    order[i] := i; size[i] := 0;
+    if (workers > 1) and (FindFirst(jobs[i].name, faAnyFile, sr) = 0) then begin
+      size[i] := sr.Size; FindClose(sr);
+    end;
+    if size[i] < 0 then size[i] := 0;
+    jobs[i].size := size[i];
+    jobs[i].threads := bandThreads;
+    restBytes := restBytes + size[i];
+  end;
+  { stable insertion sort, largest first: the same order every run }
+  for i := 1 to High(order) do begin
+    t := order[i]; j := i - 1;
+    while (j >= 0) and (size[order[j]] < size[t]) do begin order[j + 1] := order[j]; Dec(j); end;
+    order[j + 1] := t;
+  end;
+end;
+
 type
-  TWorker = class(TThread)
+  TWorker = class(TJoinThread)
     procedure Execute; override;
   end;
 
 procedure TWorker.Execute;
 begin
   Work;
+  { PJA's codec (a JNG's JPEG) keeps its models in threadvars }
+  if Assigned(OnThreadEnd) then OnThreadEnd;
 end;
 
-function ParseSize(const s: string; out v: QWord): Boolean;
-var n: string; mul: QWord; x: Int64;
+{ the end of a run that met a bug: what to do about it }
+procedure BugNote(const f: string);
+var name: string;
 begin
-  n := s; mul := 1;
-  if (n <> '') and (UpCase(n[Length(n)]) in ['K', 'M', 'G']) then begin
-    case UpCase(n[Length(n)]) of 'K': mul := 1024; 'M': mul := 1024 * 1024; 'G': mul := 1024 * 1024 * 1024; end;
-    Delete(n, Length(n), 1);
-  end;
-  Result := TryStrToInt64(n, x) and (x >= 0);
-  if Result then v := QWord(x) * mul;
+  name := f;
+  if name = '' then name := 'FILE';
+  if Pos(' ', name) > 0 then name := '"' + name + '"';
+  Writeln(StdErr, 'ppa: This is a bug in PPA. Please run: ppa report ', name, ' and open an issue at ', ISSUES_URL);
 end;
 
-procedure UsageError(const s: string);
+{ ppa report }
+function DoReport: Integer;
+var d: TBytes; f, title, text, url, copied, msg, dir: string; job: TFileJob; rest: array of string; i: Integer;
+    r: TFsResult; o: TOutcome; tb: TBytes; cut: Boolean;
 begin
-  Writeln(StdErr, 'ppa: ', s);
-  Halt(2);
+  Result := 0;
+  f := '';
+  d := nil;
+  job := Default(TFileJob);
+  CurJob := @job;
+  if inputs.Count > 0 then begin
+    f := inputs[0];
+    if not ReadWhole(f, d) then begin Write(StdErr, job.errText); Exit(1); end;
+  end;
+  rest := nil;
+  SetLength(rest, ArgCount);
+  for i := 1 to ArgCount do rest[i - 1] := args[i];
+  text := BuildReport(f, d, rest, threads, maxOutput, title);
+  url := IssueUrl(title, text, cut);
+  if outArg = '' then Write(text)
+  else begin
+    tb := nil;
+    SetLength(tb, Length(text));
+    if Length(text) > 0 then Move(text[1], tb[0], Length(text));
+    r := WriteVerified(outArg, tb, Blake3_128(tb), omDelete, force, o);
+    { whole and in place, but its name may not survive a power cut }
+    if r.error = feNotSynced then begin
+      Writeln(StdErr, 'ppa: ', outArg, ': written, but its directory could not be flushed to the disk: ',
+              SysErrorMessage(r.code), ' (', r.Text, ')');
+      Exit(1);
+    end;
+    if not r.Ok then begin
+      if r.code >= 0 then Writeln(StdErr, 'ppa: ', outArg, ': could not write it: ', SysErrorMessage(r.code), ' (', r.Text, ')')
+      else Writeln(StdErr, 'ppa: ', outArg, ': could not write it (', r.Text, ')');
+      Exit(1);
+    end;
+    Writeln('ppa: the report is in ', outArg);
+  end;
+  if withFile and (f <> '') then begin
+    if outArg <> '' then dir := ExtractFilePath(outArg) else dir := '';
+    copied := CopyBeside(f, d, dir, msg);
+    if copied = '' then begin Writeln(StdErr, 'ppa: ', msg); Result := 1; end
+    else Writeln('ppa: the file, to attach if you wish: ', copied,
+                 ' (GitHub takes .png; zip a .mng, .jng or .ppa first)');
+  end;
+  Writeln;
+  if cut then
+    Writeln('Open an issue with this report (the link has room for part of it: paste the whole report ',
+            'in the issue, check it and add the steps):')
+  else Writeln('Open an issue with this report (the link holds it; check it and add the steps):');
+  Writeln(url);
 end;
 
-var
-  a, v: string; files: TStringList; i, n, workers: Integer; endOpts: Boolean;
-  pool: array of TWorker;
+{ the summary of --stats and --json }
+procedure Summary(wall: Double);
+var o, s: TInfoNode; orig: Int64;
 begin
-  if ParamCount < 1 then begin Usage; Halt(2); end;
-  cmd := ParamStr(1);
-  if (cmd = '--version') or (cmd = '-V') then begin
-    Writeln('ppa ', VERSION, ' (stream version ', STREAM_VERSION, ', format version ', FORMAT_VERSION, ')'); Halt(0);
+  if jsonOut then begin
+    o := TInfoNode.Create(ikObject);
+    try
+      s := o.Obj('summary');
+      s.Str('command', args[CommandIndex]);
+      s.Num('files', Length(jobs));
+      s.Num('failed', errors);
+      s.Num('bugs', bugs);
+      s.Num('bytes_in', sumIn);
+      s.Num('bytes_out', sumOut);
+      s.Fixed('seconds', wall, 6);
+      s.Num('threads', threads);
+      Writeln(o.Json);
+    finally
+      o.Free;
+    end;
+  end else if stats then begin
+    { MB/s of the originals: what a reads, what x and t give }
+    if command = cmCompress then orig := sumIn else orig := sumOut;
+    Write('ppa: ', Length(jobs), ' file(s), ', Human(sumIn), ' -> ', Human(sumOut), ', ',
+          DotNumber(wall * 1000, 2), ' ms, ', threads, ' thread(s)');
+    if wall > 0 then Write(', ', DotNumber(orig / (1024 * 1024) / wall, 2), ' MB/s');
+    Writeln;
   end;
-  if (cmd = '-h') or (cmd = '--help') then begin Usage; Halt(0); end;
-  if (cmd <> 'a') and (cmd <> 'x') and (cmd <> 'list') then begin Usage; Halt(2); end;
-  threads := CpuCount;
-  if threads > 8 then threads := 8;
-  files := TStringList.Create;
-  endOpts := False;
-  i := 2;
-  while i <= ParamCount do begin
-    a := ParamStr(i);
-    if endOpts or (a = '') or (a[1] <> '-') then files.Add(a)
-    else if a = '--' then endOpts := True
-    else if a = '-o' then begin Inc(i); if i > ParamCount then UsageError('-o needs a path'); outPath := ParamStr(i); end
-    else if Copy(a, 1, 13) = '--output-dir=' then outDir := Copy(a, 14, MaxInt)
-    else if (a = '-f') or (a = '--force') then force := True
-    else if (a = '-q') or (a = '--quiet') then quiet := True
-    else if (a = '-n') or (a = '--dry-run') then dryRun := True
-    else if a = '--no-verify' then noVerify := True
-    else if a = '--max' then FastModel := False
-    else if (a = '-th') or (Copy(a, 1, 10) = '--threads=') then begin
-      if a = '-th' then begin Inc(i); if i > ParamCount then UsageError('-th needs a number'); v := ParamStr(i); end
-      else v := Copy(a, 11, MaxInt);
-      if not TryStrToInt(v, n) or (n < 1) or (n > 64) then UsageError('threads: a number from 1 to 64, not "' + v + '"');
-      threads := n;
-    end
-    else if Copy(a, 1, 13) = '--max-output=' then begin
-      if not ParseSize(Copy(a, 14, MaxInt), maxOut) then UsageError('bad size: ' + a);
-    end else UsageError('unknown option: ' + a);
-    Inc(i);
-  end;
-  if files.Count = 0 then begin Usage; Halt(2); end;
-  if (outPath <> '') and (files.Count > 1) and not DirectoryExists(outPath) then
-    UsageError('-o with several inputs must be a directory');
+end;
 
+var i, n, workers: Integer; pool: array of TWorker; path: string; started: Double;
+begin
+  { On Unix only '/' separates: the RTL's ExtractFileName and ChangeFileExt
+    also cut at '\', a plain character there, so 'a\x.png' and 'b\x.png'
+    both went to x.ppa. }
+  {$ifndef MSWINDOWS} AllowDirectorySeparators := ['/']; {$endif}
+  { the commit, from PPA_COMMIT at build time ('' if not set): here, in the
+    program, which is compiled every time }
+  BuildCommit := {$I %PPA_COMMIT%};
+  BuildDate := {$I %DATE%};
+  errors := 0; bugs := 0; bugFile := ''; sumIn := 0; sumOut := 0; outputError := '';
+  try
+  ParseArgs;
+  { before any write: report's and bench's too }
+  InstallInterruptCleanup;
+  if pathGiven then SetCodePath(pathWanted);
+  StagesOn := stats;
+  case command of
+    cmReport: Finish(DoReport);
+    cmBench: Finish(RunBench(inputs, runs, threads));
+    { --path: that path alone }
+    cmSelftest: Finish(RunSelftest(quiet, pathGiven, pathWanted));
+  end;
+  started := Seconds;
+  if (outArg <> '') and (inputs.Count > 1) and not (DirectoryExists(outArg) or EndsWithSeparator(outArg)) then
+    UsageError('-o with several inputs has to be a directory');
   jobs := nil;
-  SetLength(jobs, files.Count);
-  for i := 0 to files.Count - 1 do begin
-    jobs[i] := Default(TJob);
-    jobs[i].name := files[i];
+  SetLength(jobs, inputs.Count);
+  InitCriticalSection(claimLock);
+  outKeys := NewKeyList; inKeys := NewKeyList;
+  for i := 0 to inputs.Count - 1 do begin
+    jobs[i] := Default(TFileJob);
+    jobs[i].name := inputs[i];
+    jobs[i].index := i;
+    inKeys.AddObject(PathKey(inputs[i]), TObject(PtrInt(i)));
   end;
+  { a's outputs follow from the names alone: taken here, in the order of the
+    inputs, so it is always the later one that fails. x's come from inside
+    the .ppa, and are taken when written. An input that is not there takes
+    nothing: it fails on its own, and must not take a later one down. }
+  if command = cmCompress then
+    for i := 0 to High(jobs) do if FileExists(jobs[i].name) then begin
+      CurJob := @jobs[i];
+      path := OutputPath(jobs[i].name, ChangeFileExt(ExtractFileName(jobs[i].name), '.ppa'));
+      Claim(path);
+    end;
   { the threads go to files first, and what is left to each file's image
-    streams (zlib's parameters and deflate streams) }
+    streams and bands }
   workers := threads;
-  if workers > files.Count then workers := files.Count;
-  if workers < 1 then workers := 1;
-  CodecThreads := threads div workers;
-  nextJob := 0; nextPrint := 0; failures := 0;
+  if workers > inputs.Count then workers := inputs.Count;
+  bandThreads := threads div workers;
+  nextJob := 0; nextPrint := 0;
+  ScheduleJobs(workers);
   InitCriticalSection(printLock);
+  InitCriticalSection(tokLock);
+  tokWake := RTLEventCreate;
+  tokFree := threads;
+  { the writes beside the work: when each is flushed, and --stats does not
+    time them }
+  if (command in [cmCompress, cmExtract]) and SyncToDisk and not dryRun and not stats and
+     (GetEnvironmentVariable('PPA_SYNC_INLINE') = '') then StartCommitter;
   pool := nil;
   SetLength(pool, workers - 1);
-  for i := 0 to High(pool) do pool[i] := TWorker.Create(False);
+  { a thread the system refuses (a host at its limit) leaves the files to
+    the ones it gave and to this one: the same outputs, only slower }
+  n := 0;
+  while n < Length(pool) do begin
+    try
+      pool[n] := TWorker.Create(False);
+    except
+      on EThread do Break;
+    end;
+    Inc(n);
+  end;
+  SetLength(pool, n);
   Work;
-  for i := 0 to High(pool) do begin pool[i].WaitFor; pool[i].Free; end;
+  for i := 0 to High(pool) do begin pool[i].Join; pool[i].Free; end;
+  StopCommitter;
   DoneCriticalSection(printLock);
-  if failures > 0 then begin
-    if files.Count > 1 then Writeln(StdErr, 'ppa: ', failures, ' of ', files.Count, ' files failed');
+  DoneCriticalSection(claimLock);
+  if (stats or jsonOut) and (outputError = '') then Summary(Seconds - started);
+  if outputError <> '' then begin
+    Writeln(StdErr, 'ppa: could not write the output: ', outputError);
+    if bugs > 0 then begin BugNote(bugFile); Halt(3); end;
     Halt(1);
+  end;
+  if errors > 0 then begin
+    if inputs.Count > 1 then Writeln(StdErr, 'ppa: ', errors, ' of ', inputs.Count, ' files failed');
+    if bugs > 0 then begin BugNote(bugFile); Halt(3); end;
+    Halt(1);
+  end;
+  Finish(0);
+  except
+    { anything not caught where a file is worked on: a bug }
+    on e: Exception do begin
+      { a write or a read the system refused (a full disk): not a bug }
+      if NotABug(e) then begin
+        if e is EInOutError then OutputFailed(e.Message) else Writeln(StdErr, 'ppa: ', e.Message);
+        Halt(1);
+      end;
+      Writeln(StdErr, 'ppa: internal error: ', e.ClassName, ': ', e.Message);
+      if inputs <> nil then begin
+        if inputs.Count > 0 then BugNote(inputs[0]) else BugNote('');
+      end else BugNote('');
+      Halt(3);
+    end;
   end;
 end.
