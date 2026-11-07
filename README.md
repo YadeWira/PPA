@@ -9,14 +9,14 @@ packJPG.
 | Component | Status |
 |---|---|
 | CI | [![CI][ciBadge]][ciLink] |
-| Latest release | none yet (build from source) |
+| Latest release | [0.1.0](https://github.com/YadeWira/PPA/releases/tag/v0.1.0): Linux (x86-64, x86, arm64), macOS (arm64), Windows (x64, x86) |
 
 ```sh
 ppa a image.png          # -> image.ppa
 ppa x image.ppa          # -> image.png, the same file byte for byte
 ```
 
-**Work in progress: version 0.1.0, no release yet.** Every layer of the
+**Version 0.1.0, the first release.** Every layer of the
 codec works and the command does too, with three models for the pixels
 chosen image by image (a static one for photographs, quick to extract; an
 adaptive one; the slowest and smallest, which `--max` takes for every
