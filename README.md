@@ -9,7 +9,7 @@ packJPG.
 | Component | Status |
 |---|---|
 | CI | [![CI][ciBadge]][ciLink] |
-| Latest release | [0.1.0](https://github.com/YadeWira/PPA/releases/tag/v0.1.0): Linux (x86-64, x86, arm64), macOS (arm64), Windows (x64, x86) |
+| Latest release | [![Release][relBadge]][relLink] |
 
 ```sh
 ppa a image.png          # -> image.ppa
@@ -140,6 +140,8 @@ PNG_CORPUS=dir1:dir2 pas/run_tests.sh             # plus the round trip over tho
 
 MIT, see [LICENSE](LICENSE).
 
-[ciBadge]: https://github.com/YadeWira/PPA/actions/workflows/ci.yml/badge.svg
+[ciBadge]: https://github.com/YadeWira/PPA/actions/workflows/ci.yml/badge.svg "Continuous Integration"
 [ciLink]: https://github.com/YadeWira/PPA/actions/workflows/ci.yml
+[relBadge]: https://img.shields.io/github/v/release/YadeWira/PPA "Latest release"
+[relLink]: https://github.com/YadeWira/PPA/releases/latest
 [wComp]: https://github.com/YadeWira/PPA/wiki/Benchmarks
