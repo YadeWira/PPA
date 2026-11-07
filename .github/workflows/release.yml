@@ -1,5 +1,5 @@
 # A release's binaries, built on each platform PPA supports (the same six as
-# CI): the ppa command, checked first by .github/test.sh (every sample of the
+# CI): the ppa command and libppa (the C library and 7-Zip plugin), checked first by .github/test.sh (every sample of the
 # repository back byte for byte, the layer tests, ppa selftest), then packed
 # and uploaded to the GitHub release of the tag, which is made if it does
 # not exist yet, with SHA256SUMS of every file it then holds. As PJA's
@@ -83,17 +83,24 @@ jobs:
         run: |
           V=${TAG#v}; P=${{ matrix.platform }}
           case $P in windows-*) EXE=.exe ;; *) EXE= ;; esac
-          CLI=ppa-$V-$P
-          mkdir -p dist "$CLI"
+          case $P in windows-*) LIB=ppa.dll ;; macos-*) LIB=ppa.dylib ;; *) LIB=ppa.so ;; esac
+          CLI=ppa-$V-$P; LIBP=ppa-$V-lib-$P
+          mkdir -p dist "$CLI" "$LIBP"
           cp build/rel/ppa$EXE README.md LICENSE doc/CLI.md "$CLI/"
+          # libppa: the C library and 7-Zip / 7-Zip-zstd plugin
+          cp build/rel/lib/$LIB pas/lib/ppa.h doc/LIBRARY.md LICENSE "$LIBP/"
           # PJA's codec is inside (a JNG's JPEG): its license and notices
-          cp vendor/pja/LICENSE "$CLI/LICENSE-PJA"
-          cp vendor/pja/NOTICE "$CLI/NOTICE-PJA"
-          case $P in
-            windows-*) 7z a -tzip -bso0 "dist/$CLI.zip" "$CLI" ;;
-            macos-*) tar --uid 0 --gid 0 -czf "dist/$CLI.tar.gz" "$CLI" ;;
-            *) tar --owner=0 --group=0 -czf "dist/$CLI.tar.gz" "$CLI" ;;
-          esac
+          for d in "$CLI" "$LIBP"; do
+            cp vendor/pja/LICENSE "$d/LICENSE-PJA"
+            cp vendor/pja/NOTICE "$d/NOTICE-PJA"
+          done
+          for d in "$CLI" "$LIBP"; do
+            case $P in
+              windows-*) 7z a -tzip -bso0 "dist/$d.zip" "$d" ;;
+              macos-*) tar --uid 0 --gid 0 -czf "dist/$d.tar.gz" "$d" ;;
+              *) tar --owner=0 --group=0 -czf "dist/$d.tar.gz" "$d" ;;
+            esac
+          done
           ls -l dist
       - uses: actions/upload-artifact@v4
         with:

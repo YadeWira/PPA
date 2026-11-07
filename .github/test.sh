@@ -57,6 +57,58 @@ sh pas/tests/cli.sh "$OUT/ppa$EXE" "$OUT/cli"
 # tools print other separators on Windows ("hash *name")
 ( cd "$OUT/cli/in" && for f in *.ppa; do [ "$f" = README.ppa ] || echo "$($SHA "$f" | cut -c1-64) $f"; done ) | tr -d '\r' | sort > "$OUT/ppa.txt"
 
+echo "== libppa"
+sh pas/lib/build.sh "$OUT/lib" > "$OUT/lib.log" 2>&1 || { cat "$OUT/lib.log"; echo "FAIL: libppa did not build"; exit 1; }
+LIBF=$(tail -1 "$OUT/lib.log")
+# its C objects call no library either (the DLL has no C runtime)
+# (the objects' own symbols aside: ppa7z.o calls ppafilter.o)
+if [ "$(uname -s)" = Linux ] && command -v nm > /dev/null; then
+  nm "$OUT"/lib/c/*.o | awk '$2 ~ /^[TDBR]$/ {print $3}' | sort -u > "$OUT/lib/defined.txt"
+  nm -u "$OUT"/lib/c/*.o | awk 'NF {print $NF}' | grep -v ':$' | sort -u | comm -23 - "$OUT/lib/defined.txt" > "$OUT/lib/undefined.txt"
+  if [ -s "$OUT/lib/undefined.txt" ]; then cat "$OUT/lib/undefined.txt"; echo "FAIL: libppa's C objects need a library"; exit 1; fi
+fi
+# the test finds the library by its rpath alone (no DYLD_LIBRARY_PATH: on
+# macOS the install name a program records is @rpath/ppa.dylib, not the
+# path the library was built at)
+RP=; case "$(uname -s)" in Linux) RP="-pthread -Wl,-rpath,$(dirname "$LIBF")" ;; Darwin) RP="-Wl,-rpath,$(dirname "$LIBF")" ;; esac
+if [ "$(uname -s)" = Darwin ]; then
+  ID=$(otool -D "$LIBF" | tail -1)
+  [ "$ID" = "@rpath/ppa.dylib" ] || { echo "FAIL: libppa's install name is $ID"; exit 1; }
+fi
+# shellcheck disable=SC2086
+${CC:-cc} -O2 -Ipas/lib pas/lib/test_lib.c -o "$OUT/lib/test_lib$EXE" "$LIBF" $RP
+# the command's test settings set here: the library must not take them
+# from the host's environment (its streams would change)
+PPA_TEST_BAND_BYTES=4096 PPA_TEST_MODEL=slow PPA_NOC=1 "$OUT/lib/test_lib$EXE" tests/png/* README.md > "$OUT/lib/test.txt" \
+  || { cat "$OUT/lib/test.txt"; echo "FAIL: libppa's test"; exit 1; }
+tail -3 "$OUT/lib/test.txt"
+# 7-Zip 23 or later (not p7zip, whose IUnknown differs): a copy with the
+# plugin in its Codecs folder (the same word size as the library), an
+# archive written and extracted. Linux: 7-Zip's package; Windows: the
+# 7-Zip installed (64-bit on the runners: the x64 build only)
+case "$LIBF" in
+  *.dll) SEVEN="/c/Program Files/7-Zip"; SLIB=7z.dll
+    [ -f "$SEVEN/$SLIB" ] || { S=$(command -v 7z 2> /dev/null) && SEVEN=$(dirname "$S"); } || SEVEN= ;;
+  *.so) SEVEN=/usr/lib/7zip; SLIB=7z.so ;;
+  *) SEVEN=; SLIB= ;;
+esac
+case "${CC:-} $FPC" in *-m32*|*i386*) SEVEN= ;; esac
+if [ -z "$SEVEN" ] || [ ! -f "$SEVEN/$SLIB" ] || [ ! -f "$SEVEN/7z$EXE" ]; then
+  echo "7-Zip: none of the library's word size here, not tried"
+else
+  Z="$OUT/7z"; rm -rf "$Z"; mkdir -p "$Z/Codecs" "$OUT/7in" "$OUT/7x"
+  cp "$SEVEN/7z$EXE" "$SEVEN/$SLIB" "$Z/"
+  cp "$LIBF" "$Z/Codecs/"
+  cp tests/png/* README.md "$OUT/7in/"
+  "$Z/7z$EXE" i | grep -q '37F11 PPA' || { echo "FAIL: 7-Zip does not list PPA (37F11)"; exit 1; }
+  (cd "$OUT/7in" && "../7z/7z$EXE" a -bso0 -bsp0 -m0=PPA -m1=LZMA2 ../a.7z .)
+  "$Z/7z$EXE" x -bso0 -bsp0 -o"$OUT/7x" "$OUT/a.7z"
+  for f in "$OUT"/7in/*; do
+    cmp -s "$f" "$OUT/7x/$(basename "$f")" || { echo "FAIL: 7-Zip: $(basename "$f") does not come back"; exit 1; }
+  done
+  echo "7-Zip with the PPA plugin: every sample back, $(wc -c < "$OUT/a.7z" | tr -d ' ') bytes"
+fi
+
 echo "== layer 1"
 "$OUT/test_png$EXE" tests/png 14 | tail -1
 echo "== layer 2a"

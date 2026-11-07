@@ -1,6 +1,8 @@
 # Every platform PPA supports (the same six as PJA) builds the C part with
 # its C compiler (CC), the command and the layer tests
-# and runs them on the repository's samples (.github/test.sh), recording a
+# and runs them on the repository's samples (.github/test.sh), builds
+# libppa and runs its C test (Linux and Windows x64: through 7-Zip too),
+# recording a
 # hash of what they found; the last job checks that it is the same
 # everywhere. Linux x86-64 also runs the full suite (pas/run_tests.sh),
 # damage tests included.
@@ -24,8 +26,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Free Pascal
-        run: sudo apt-get update && sudo apt-get install -y fpc
+      - name: Install Free Pascal, and 7-Zip for libppa's plugin
+        run: sudo apt-get update && sudo apt-get install -y fpc 7zip
       - name: Test
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
