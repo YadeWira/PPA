@@ -105,7 +105,7 @@ const
     than the fast one; the slow one where SLOW_GAIN percent smaller than
     the fast one }
   SLOW_GAIN = 10;
-  STATIC_LOSS = 25;
+  STATIC_LOSS = 15;
   STATIC_MIN_BYTES = 256 * 1024;
   SAMPLE_BYTES = 256 * 1024;
   INTERLACED_TRY_BYTES = 1024 * 1024;

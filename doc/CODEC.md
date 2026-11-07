@@ -411,7 +411,7 @@ photo: about 0.12 s (the fast model: 0.85 s).
 
 **The choice** (`ChooseModel`, compressing only): the three models code a
 sample of the image (the lines in its middle, 256 KB, or all of it); the
-static model takes it unless it is more than 25% larger than the fast
+static model takes it unless it is more than 25% (15% since 07/11/2026) larger than the fast
 one, or the image is smaller than 256 KB (its tables would weigh, and its
 time does not matter); otherwise the slow model if it is 10% smaller than
 the fast one, else the fast one. Photographs take the static model,
@@ -479,6 +479,19 @@ somewhat busier than for the tables above):
 | one photo's `ppa x` (1920x1080), -th 1 / -th 8 | 0.86 s | 0.86 s / **0.32 s** |
 | the corpus, size | 56.79% | **56.38%** |
 | the generated set, size | 61.91% | **61.53%** |
+
+**How much larger the static model may be** than the fast one on the
+sample, and still be taken (`STATIC_LOSS`, a choice of speed against size;
+Wira's, 07/11/2026: 15%). One thread, the same build:
+
+| `STATIC_LOSS` | photos | `x` | corpus | `x` | generated | `x` |
+|---|---|---|---|---|---|---|
+| 25% | 61.20% | 13.6 s | 56.38% | 63.4 s | 61.53% | 37.7 s |
+| **15%** | **60.51%** | **15.4 s** | **56.30%** | 64.7 s | **58.86%** | 39.5 s |
+| 10% | 59.67% | 18.3 s | 55.44% | 68.5 s | 58.86% | 39.7 s |
+
+The slow model's own margin (`SLOW_GAIN`, 10%): 5% gives the corpus
+55.49% for 19% more time to extract, 2% 53.93% for 61% more.
 
 ## Speed, first pass (31/10/2026)
 
