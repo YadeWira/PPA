@@ -19,6 +19,9 @@
 #if defined(__SSE2__) && !defined(PPA_NO_SIMD)
 #include <emmintrin.h>
 #define FM_SSE2 1
+/* a value the compiler must take as it is here: keeps it from merging a
+   chain of inserts back into its own (longer) shuffle sequence */
+#define FM_KEEP(v) __asm__("" : "+x"(v))
 #endif
 
 #define NP 8          /* predictors */
@@ -149,7 +152,7 @@ static inline int mixbit2(coder_t *c, const tabs_t a, mix_t *m, int apm, ctr_t *
     const int sidx = dot + 2048;
     lo = sidx >> 7; wt = sidx & 127;
     ap = m->apm[sel];
-    pf = (p + 3 * ((ap[lo] * (128 - wt) + ap[lo + 1] * wt) >> 7)) >> 2;
+    pf = (p + 3 * (ap[lo] + (((ap[lo + 1] - ap[lo]) * wt) >> 7))) >> 2;
   } else pf = p;
   pf = clamp_rare(pf, 32, 65535 - 32);
   bit = code_bit(c, bit, pf);
@@ -164,19 +167,44 @@ static inline int mixbit2(coder_t *c, const tabs_t a, mix_t *m, int apm, ctr_t *
   return bit;
 }
 
+/* a class decision (two counters, no APM), out of the loop's body: the
+   weights row picked by the caller, six arguments, all in registers */
+static __attribute__((noinline)) int mixcls(coder_t *c, int32_t *w, ctr_t *c0, ctr_t *c1, int bit, const tabs_t *a) {
+  const int16_t *st = a->st;
+  const int s0 = st[c0->p >> 4], s1 = st[c1->p >> 4];
+  int dot = (w[0] * s0 + w[1] * s1 + w[4] * 256) >> 16;
+  dot = clamp_rare(dot, -2047, 2047);
+  const int p = a->sq[dot + 2048];
+  bit = code_bit(c, bit, clamp_rare(p, 32, 65535 - 32));
+  const int err = ((bit << 16) - p) >> 4;
+  w[0] = clamp_rare(w[0] + ((s0 * err) >> 10), -W_LIMIT, W_LIMIT); w[1] = clamp_rare(w[1] + ((s1 * err) >> 10), -W_LIMIT, W_LIMIT);
+  w[4] = clamp_rare(w[4] + ((256 * err) >> 10), -W_LIMIT, W_LIMIT);
+  cupd(c0, bit, 255, a->rc); cupd(c1, bit, 255, a->rc);
+  return bit;
+}
+
 static inline int onebit(coder_t *c, const tabs_t a, ctr_t *k, int bit) {
   bit = code_bit(c, bit, clamp_rare(k->p, 32, 65535 - 32));
   cupd(k, bit, 60, a.rc);
   return bit;
 }
 
+#ifdef FM_SSE2
+/* 16 bits from memory (x86: little-endian, unaligned allowed) */
+static inline int ld16(const uint8_t *p) { uint16_t v; __builtin_memcpy(&v, p, 2); return v; }
+/* lane k, one pextrw (the barrier keeps the compiler from doing the
+   arithmetic on it in the vector first, then taking the lanes out with
+   longer shuffles) */
+#define ext16(v, k) __extension__({ uintptr_t j_ = (unsigned)_mm_extract_epi16(v, k); __asm__("" : "+r"(j_)); j_; })
+#endif
+
 static inline int fold(int e) { return e < -128 ? e + 256 : e > 127 ? e - 256 : e; }
 
-void ppaf_row(fm_args_t *a) {
+static inline __attribute__((always_inline)) void row_nc(fm_args_t *a, const int nc, const int enc) {
   fm_tables_t *const T = a->t;
   ctr_t *const h = a->h;
   const int hs = 32 - (int)a->hbits, cs = 32 - (int)a->cbits;
-  const int w = (int)a->w, nc = (int)a->nc, y = (int)a->y, enc = (int)a->encoding;
+  const int w = (int)a->w, y = (int)a->y;
   const intptr_t rs = (intptr_t)(w + 2 * FM_PAD) * nc;
   uint8_t *cur = a->px + (y % 3) * rs + FM_PAD * nc;
   uint8_t *up = a->px + ((y + 2) % 3) * rs + FM_PAD * nc;
@@ -204,26 +232,37 @@ void ppaf_row(fm_args_t *a) {
   if (y == 0) { up = cur; up2 = cur; } else if (y == 1) up2 = up;
   for (int k = 0; k < FM_PAD * nc; k++) up[w * nc + k] = up[(w - 1) * nc + k % nc];
 
-  for (int x = 0; x < w; x++) {
+  for (intptr_t x = 0; x < w; x++) {
     int resPrev = 0, resPrev2 = 0, xPrev = 0;
+    /* the channel before's neighbours, which a colour channel's differences need */
+    int pW = 0, pN = 0, pNW = 0, pNE = 0, pWW = 0, pNN = 0;
+    /* each channel its own copy (nc is a constant here): ch, chx and the
+       colour test fold away */
+#if defined(__clang__)
+#pragma clang loop unroll(full)
+#elif defined(__GNUC__)
+#pragma GCC unroll 4
+#endif
     for (int ch = 0; ch < nc; ch++) {
-      const int i = x * nc + ch, chx = ch & 3;
-      const int W = cur[i - nc], N = up[i], NW = up[i - nc], NE = up[i + nc];
+      const intptr_t i = x * nc + ch; const int chx = ch & 3;
+      const int W = cur[i - nc], N = up[i], NW = up[i - nc], NE = up[i + nc], WW = cur[i - 2 * nc], NN = up2[i];
       int pr[NP];
       if (ch == 0 || ch == 3 || nc < 3) {
         pr[0] = W; pr[1] = N; pr[2] = NE; pr[3] = W + N - NW;
         pr[4] = med3(W, N, W + N - NW);
         pr[5] = (W + NE + 1) >> 1;
-        pr[6] = 2 * W - cur[i - 2 * nc]; pr[7] = 2 * N - up2[i];
+        pr[6] = 2 * W - WW; pr[7] = 2 * N - NN;
       } else {
-        /* a colour channel: its difference to the channel before, predicted */
-        const int dW = W - cur[i - nc - 1], dN = N - up[i - 1], dNW = NW - up[i - nc - 1], dNE = NE - up[i + nc - 1];
-        const int dWW = cur[i - 2 * nc] - cur[i - 2 * nc - 1], dNN = up2[i] - up2[i - 1];
+        /* a colour channel: its difference to the channel before, predicted
+           (cur[i - nc - 1] is the channel before's W, and so on) */
+        const int dW = W - pW, dN = N - pN, dNW = NW - pNW, dNE = NE - pNE;
+        const int dWW = WW - pWW, dNN = NN - pNN;
         pr[0] = xPrev + dW; pr[1] = xPrev + dN; pr[2] = xPrev + dNE; pr[3] = xPrev + dW + dN - dNW;
         pr[4] = xPrev + med3(dW, dN, dW + dN - dNW);
         pr[5] = xPrev + ((dW + dNE + 1) >> 1);
         pr[6] = xPrev + 2 * dW - dWW; pr[7] = xPrev + 2 * dN - dNN;
       }
+      pW = W; pNW = NW; pNE = NE; pWW = WW;
       /* the blend: each predictor (clamped) weighed by its errors around */
       const uint8_t *eW = ec + (intptr_t)(i - nc) * 8, *eN = eu + (intptr_t)i * 8, *eNW = eu + (intptr_t)(i - nc) * 8;
       const uint8_t *eNE = eu + (intptr_t)(i + nc) * 8, *eWW = ec + (intptr_t)(i - 2 * nc) * 8, *eNN = eu2 + (intptr_t)i * 8;
@@ -237,29 +276,66 @@ void ppaf_row(fm_args_t *a) {
                     _mm_add_epi16(_mm_add_epi16(LD8(eNW), LD8(eNE)), _mm_add_epi16(LD8(eWW), LD8(eNN))));
 #undef LD8
         e = _mm_min_epi16(e, _mm_set1_epi16(1023));
-        uint16_t ei[8];
-        _mm_storeu_si128((__m128i *)(void *)ei, e);
-        const int32_t *iv = invsq;
-        const __m128i wv = _mm_setr_epi16((short)iv[ei[0]], (short)iv[ei[1]], (short)iv[ei[2]], (short)iv[ei[3]],
-                                          (short)iv[ei[4]], (short)iv[ei[5]], (short)iv[ei[6]], (short)iv[ei[7]]);
-        const __m128i p16 = _mm_setr_epi16((short)pr[0], (short)pr[1], (short)pr[2], (short)pr[3],
-                                           (short)pr[4], (short)pr[5], (short)pr[6], (short)pr[7]);
+        /* each weight, INVSQ's entry's low 16 bits (all of it: at most
+           32767), inserted straight from the table */
+#define IV(k) ld16((const uint8_t *)(const void *)(invsq + ext16(e, k)))
+        __m128i wv = _mm_cvtsi32_si128(IV(0));
+        FM_KEEP(wv); wv = _mm_insert_epi16(wv, IV(1), 1); FM_KEEP(wv); wv = _mm_insert_epi16(wv, IV(2), 2);
+        FM_KEEP(wv); wv = _mm_insert_epi16(wv, IV(3), 3); FM_KEEP(wv); wv = _mm_insert_epi16(wv, IV(4), 4);
+        FM_KEEP(wv); wv = _mm_insert_epi16(wv, IV(5), 5); FM_KEEP(wv); wv = _mm_insert_epi16(wv, IV(6), 6);
+        FM_KEEP(wv); wv = _mm_insert_epi16(wv, IV(7), 7);
+#undef IV
+        __m128i p16 = _mm_cvtsi32_si128(pr[0]);
+        FM_KEEP(p16); p16 = _mm_insert_epi16(p16, pr[1], 1); FM_KEEP(p16); p16 = _mm_insert_epi16(p16, pr[2], 2);
+        FM_KEEP(p16); p16 = _mm_insert_epi16(p16, pr[3], 3); FM_KEEP(p16); p16 = _mm_insert_epi16(p16, pr[4], 4);
+        FM_KEEP(p16); p16 = _mm_insert_epi16(p16, pr[5], 5); FM_KEEP(p16); p16 = _mm_insert_epi16(p16, pr[6], 6);
+        FM_KEEP(p16); p16 = _mm_insert_epi16(p16, pr[7], 7);
         pv = _mm_packus_epi16(p16, p16);
         const __m128i q16 = _mm_unpacklo_epi8(pv, z0);
-        __m128i s1 = _mm_madd_epi16(wv, q16), s2 = _mm_madd_epi16(wv, _mm_set1_epi16(1));
-        s1 = _mm_add_epi32(s1, _mm_shuffle_epi32(s1, 0x4E)); s1 = _mm_add_epi32(s1, _mm_shuffle_epi32(s1, 0xB1));
-        s2 = _mm_add_epi32(s2, _mm_shuffle_epi32(s2, 0x4E)); s2 = _mm_add_epi32(s2, _mm_shuffle_epi32(s2, 0xB1));
-        sp = _mm_cvtsi128_si32(s1); sw = _mm_cvtsi128_si32(s2);
-        __m128i vx = _mm_max_epu8(pv, _mm_srli_epi64(pv, 32)), vn = _mm_min_epu8(pv, _mm_srli_epi64(pv, 32));
-        vx = _mm_max_epu8(vx, _mm_srli_epi64(vx, 16)); vn = _mm_min_epu8(vn, _mm_srli_epi64(vn, 16));
-        vx = _mm_max_epu8(vx, _mm_srli_epi64(vx, 8)); vn = _mm_min_epu8(vn, _mm_srli_epi64(vn, 8));
-        pmx = _mm_cvtsi128_si32(vx) & 255; pmn = _mm_cvtsi128_si32(vn) & 255;
+        /* both sums at once: sp in lane 0, sw in lane 1 */
+        const __m128i s1 = _mm_madd_epi16(wv, q16), s2 = _mm_madd_epi16(wv, _mm_set1_epi16(1));
+        __m128i t = _mm_add_epi32(_mm_unpacklo_epi32(s1, s2), _mm_unpackhi_epi32(s1, s2));
+        FM_KEEP(t);
+        t = _mm_add_epi32(t, _mm_shuffle_epi32(t, 0xEE));
+#ifdef __x86_64__
+        {
+          const uint64_t t2 = (uint64_t)_mm_cvtsi128_si64(t);
+          sp = (int)(uint32_t)t2; sw = (int)(t2 >> 32);
+        }
+#else
+        sp = _mm_cvtsi128_si32(t); sw = _mm_cvtsi128_si32(_mm_srli_epi64(t, 32));
+#endif
+        /* the largest and (as 255 minus the largest of 255 - p) the smallest
+           at once: pv holds the predictions twice. Shifts, not shuffles: the
+           shuffle port is the busy one */
+        __m128i v = _mm_xor_si128(pv, _mm_set_epi32(-1, -1, 0, 0));
+        v = _mm_max_epu8(v, _mm_srli_epi64(v, 32));
+        v = _mm_max_epu8(v, _mm_srli_epi64(v, 16));
+        v = _mm_max_epu8(v, _mm_srli_epi64(v, 8));
+        pmx = _mm_cvtsi128_si32(v) & 255; pmn = 255 - (_mm_extract_epi16(v, 4) & 255);
       }
 #else
       uint8_t cp[NP];
       sw = 0; sp = 0; pmx = 0; pmn = 255;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+      /* the eight error sums at once in two 64-bit words, four 16-bit lanes
+         each (the even predictors' and the odd ones'): at most 2040 */
+      uint64_t es[2];
+      {
+        const uint64_t M = 0x00FF00FF00FF00FFull;
+        uint64_t vW, vN, vNW, vNE, vWW, vNN;
+        __builtin_memcpy(&vW, eW, 8); __builtin_memcpy(&vN, eN, 8); __builtin_memcpy(&vNW, eNW, 8);
+        __builtin_memcpy(&vNE, eNE, 8); __builtin_memcpy(&vWW, eWW, 8); __builtin_memcpy(&vNN, eNN, 8);
+        es[0] = 2 * ((vW & M) + (vN & M)) + (vNW & M) + (vNE & M) + (vWW & M) + (vNN & M);
+        es[1] = 2 * (((vW >> 8) & M) + ((vN >> 8) & M)) + ((vNW >> 8) & M) + ((vNE >> 8) & M) + ((vWW >> 8) & M) + ((vNN >> 8) & M);
+      }
+#endif
       for (int k = 0; k < NP; k++) {
-        int e = 2 * (eW[k] + eN[k]) + eNW[k] + eNE[k] + eWW[k] + eNN[k];
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+        const int e = (int)((es[k & 1] >> (16 * (k >> 1))) & 0xFFFF);
+#else
+        const int e = 2 * (eW[k] + eN[k]) + eNW[k] + eNE[k] + eWW[k] + eNN[k];
+#endif
         const int wt = invsq[e > 1023 ? 1023 : e];
         const int q = clamp255(pr[k]);
         cp[k] = (uint8_t)q;
@@ -308,7 +384,7 @@ void ppaf_row(fm_args_t *a) {
             int more;
             if (j < 2) {
               const uint32_t t = (uint32_t)(sn << 1 | j) * 0x27D4EB2Fu + 3;
-              more = mixbit2(&c, tb, &T->mc[j], 0, &T->ncl[j][chx][sg], &h[((hx + t) * 0x165667B1u) >> hs], sel, k > j);
+              more = mixcls(&c, T->mc[j].w[sel], &T->ncl[j][chx][sg], &h[((hx + t) * 0x165667B1u) >> hs], k > j, &tb);
             } else more = onebit(&c, tb, &T->cls[chx][eb][j], k > j);
             if (!more) break;
             kk++;
@@ -352,10 +428,32 @@ void ppaf_row(fm_args_t *a) {
       }
       if (mlen > 65535) mlen = 65535;
       resPrev2 = resPrev; resPrev = er; xPrev = X;
+      /* N and NN read again, not kept: on a pass's first line the lines
+         above are this one, and up[i], up2[i] are X now */
+      pN = up[i]; pNN = up2[i];
     }
   }
   *a->mptr = mptr; *a->mlen = mlen;
   *a->x1 = c.x1; *a->x2 = c.x2;
   if (!enc) *a->x = c.x;
   *a->pos = c.pos;
+}
+
+/* the line's loop for each pixel size and each direction, constants in
+   each copy: the neighbours' offsets fold into the addressing, and the
+   coder's encode-or-decode tests go. nc is 1 to 4: ppafast.FastEligible
+   (8-bit gray, gray and alpha, RGB, RGBA) is checked before any image is
+   coded or decoded with this model (ppacodec) */
+void ppaf_row(fm_args_t *a) {
+  if ((int)a->encoding) switch (a->nc) {
+    case 1: row_nc(a, 1, 1); break;
+    case 2: row_nc(a, 2, 1); break;
+    case 3: row_nc(a, 3, 1); break;
+    default: row_nc(a, 4, 1); break;
+  } else switch (a->nc) {
+    case 1: row_nc(a, 1, 0); break;
+    case 2: row_nc(a, 2, 0); break;
+    case 3: row_nc(a, 3, 0); break;
+    default: row_nc(a, 4, 0); break;
+  }
 }

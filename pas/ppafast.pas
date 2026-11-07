@@ -7,7 +7,7 @@
   bit-by-bit model, within a few percent of its size on photographs.
   The lines' filters are coded as ppamodel codes them.
   The pixel loop is in C (ppafastc.c); PascalFastRow here is its reference,
-  line for line, and the suite demands the same streams from both.
+  the same arithmetic, and the suite demands the same streams from both.
   Integer arithmetic only. }
 unit ppafast;
 {$I ppa.inc}
@@ -171,7 +171,7 @@ begin
   FillChar(m.pe[0], Length(m.pe), 0);
 end;
 
-{ ---- the reference: ppafastc.c's ppaf_row, line for line ---- }
+{ ---- the reference: ppafastc.c's ppaf_row, the same arithmetic (the C is specialized by pixel size and direction, its blend in SSE2 or SWAR) ---- }
 
 type
   TCoder = record
