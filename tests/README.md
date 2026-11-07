@@ -18,3 +18,11 @@ suites flip every bit of them.
 | `apng3.png` | an APNG of 3 frames: IDAT for the first, the other two in two fdAT each |
 | `color.jng`, `alpha.jng` | JNG as ImageMagick writes it: colour only (JDAT), and with an alpha channel (IDAT) |
 | `anim.mng` | an MNG of 3 frames as ImageMagick writes it, each an embedded PNG |
+
+## `ppa1/`
+
+`.ppa` files written by PPA 0.1.0 (its release binary, `PPA_TEST_KEEP_STREAM=1`,
+stream version 1), from the samples above: `rgb8` and `gray8` with the static
+model, `rgba8` with the fast one, `palette` with the slow one, `apng3` and
+`alpha.jng` as 0.1.0 chose. Every later release must still extract them
+(`pas/tests/cli.sh`): a published version stays readable.

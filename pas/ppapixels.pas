@@ -63,6 +63,9 @@ function StreamImage(const p: TPng; s: SizeInt; out info: TImageInfo): Boolean;
 function InitLayout(const info: TImageInfo; out px: TPixels): Boolean;
 { How many filtered bytes the image takes (filter bytes included) }
 function FilteredSize(const px: TPixels): SizeInt;
+{ The same from its header, nothing allocated; False where InitLayout
+  would be }
+function LayoutSize(const info: TImageInfo; out size: SizeInt): Boolean;
 
 { The image's filtered bytes -> px. False if they do not fit the image. }
 function Unfilter(const plain: TBytes; const info: TImageInfo; out px: TPixels): Boolean;
@@ -214,7 +217,7 @@ end;
 {$pop}
 
 { The passes' layout; False if the image is too large }
-function Layout(var px: TPixels; bitsPerPixel: SizeInt): Boolean;
+function Layout(var px: TPixels; bitsPerPixel: SizeInt; alloc: Boolean = True): Boolean;
 var np, i: Integer; w, h, total, lines: SizeInt;
 begin
   Result := False;
@@ -240,8 +243,10 @@ begin
     Inc(total, px.passes[i].rowBytes * h);
     Inc(lines, h);
   end;
-  SetLength(px.filters, lines);
-  SetLength(px.data, total);
+  if alloc then begin
+    SetLength(px.filters, lines);
+    SetLength(px.data, total);
+  end;
   Result := True;
 end;
 
@@ -261,6 +266,20 @@ end;
 function FilteredSize(const px: TPixels): SizeInt;
 begin
   Result := Length(px.data) + Length(px.filters);
+end;
+
+function LayoutSize(const info: TImageInfo; out size: SizeInt): Boolean;
+var px: TPixels; ch, i: Integer; bits: SizeInt;
+begin
+  Result := False; size := 0;
+  px := Default(TPixels);
+  px.info := info;
+  ch := Channels(info.colorType, info.depth);
+  if (ch = 0) or (info.interlace > 1) or (info.width = 0) or (info.height = 0) then Exit;
+  bits := SizeInt(ch) * info.depth;
+  if not Layout(px, bits, False) then Exit;
+  for i := 0 to High(px.passes) do Inc(size, (px.passes[i].rowBytes + 1) * px.passes[i].height);
+  Result := True;
 end;
 
 function Unfilter(const plain: TBytes; const info: TImageInfo; out px: TPixels): Boolean;

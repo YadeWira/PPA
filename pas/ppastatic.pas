@@ -32,8 +32,11 @@ uses SysUtils, ppaarith, ppapixels, ppamodel;
   or an interlaced image whole, as a substream }
 function EncodeImageStatic(var px: TPixels; firstRow, rows: SizeInt): TBytes;
 { the same back from sub[first .. first + len - 1] into px (its layout set);
-  False on any damage }
-function DecodeImageStatic(var px: TPixels; firstRow, rows: SizeInt; const sub: TBytes; first, len: SizeInt): Boolean;
+  False on any damage. streamVersion: the codec stream's (1: the 64
+  contexts PPA 0.1.0 wrote, without the channel before's residual; 2: the
+  320) }
+function DecodeImageStatic(var px: TPixels; firstRow, rows: SizeInt; const sub: TBytes; first, len: SizeInt;
+  streamVersion: Integer = 2): Boolean;
 
 var
   { the line loop in C (ppastaticc.c); False: in Pascal, the reference.
@@ -67,6 +70,8 @@ type
     freq, cum: PWord;
     slot: PByte;
     x: PCardinal; buf: PByte; pos: PSizeInt; len: SizeInt;
+    { 1: the 64 contexts of stream version 1 (decoding it); 2: the 320 }
+    ctxv: SizeInt;
   end;
 
   TStaticTables = record
@@ -129,7 +134,8 @@ begin
       if ch <> 0 then en := en + 2 * Abs(resPrev);
       if en > 4095 then en := 4095;
       rq := RQ_LEVEL[resPrev + 255];
-      ctx := (EBIN[en] * 4 + (ch and 3)) * 5 + rq;
+      if a.ctxv = 1 then ctx := EBIN[en] * 4 + (ch and 3)
+      else ctx := (EBIN[en] * 4 + (ch and 3)) * 5 + rq;
       if a.mode <> 2 then begin
         X_ := a.src[i];
         e := X_ - P;
@@ -287,7 +293,7 @@ begin
   try
     FillChar(t^, SizeOf(TStaticTables), 0);
     a := Default(TStaticArgs);
-    a.ebin := @EBIN[0]; a.rq := @RQ_LEVEL[0];
+    a.ebin := @EBIN[0]; a.rq := @RQ_LEVEL[0]; a.ctxv := 2;
     { the counts }
     cnt := nil; SetLength(cnt, N_CTX * 256);
     a.mode := 0; a.cnt := @cnt[0];
@@ -359,7 +365,8 @@ begin
   end;
 end;
 
-function DecodeImageStatic(var px: TPixels; firstRow, rows: SizeInt; const sub: TBytes; first, len: SizeInt): Boolean;
+function DecodeImageStatic(var px: TPixels; firstRow, rows: SizeInt; const sub: TBytes; first, len: SizeInt;
+  streamVersion: Integer): Boolean;
 var
   t: PStaticTables;
   a: TStaticArgs;
@@ -372,8 +379,10 @@ var
   x: Cardinal;
   pi_, y, y0, y1: SizeInt;
   rans: TBytes;
+  usedCtx: Integer;
 begin
   Result := False;
+  if streamVersion = 1 then usedCtx := 64 else usedCtx := N_CTX;
   if (first < 0) or (len < 1) or (first + len > Length(sub)) then Exit;
   { the first part's length }
   if len < 10 then head := Copy(sub, first, len) else head := Copy(sub, first, 10);
@@ -397,7 +406,7 @@ begin
     FillChar(t^, SizeOf(TStaticTables), 0);
     { the frequencies, checked: each used context sums to SM_TOT }
     p := 0;
-    for c := 0 to N_CTX - 1 do begin
+    for c := 0 to usedCtx - 1 do begin
       if (p >= nf) or not GetVar(meta, p, used) or (used > 256) then Exit;
       last := -1; sum := 0;
       for k := 1 to used do begin
@@ -431,9 +440,13 @@ begin
     { the pixels }
     if Length(rans) < 4 then Exit;
     x := (Cardinal(rans[0]) shl 24) or (Cardinal(rans[1]) shl 16) or (Cardinal(rans[2]) shl 8) or rans[3];
+    { the encoder's state is SM_L to 2^31 - 1: below, a damaged stream (0
+      would never leave the renormalization loop) }
+    if (x < SM_L) or (x >= SM_L shl 8) then Exit;
     pos := 4;
     a := Default(TStaticArgs);
     a.mode := 2; a.ebin := @EBIN[0]; a.rq := @RQ_LEVEL[0];
+    if streamVersion = 1 then a.ctxv := 1 else a.ctxv := 2;
     a.freq := @t^.freq[0, 0]; a.cum := @t^.cum[0, 0]; a.slot := @t^.slot[0, 0];
     a.x := @x; a.buf := @rans[0]; a.pos := @pos; a.len := Length(rans);
     Walk(px, firstRow, rows, a);

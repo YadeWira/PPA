@@ -458,6 +458,10 @@ begin
         node := node * 2 + bit;
       end;
       f := node - 8;
+      { a damaged stream can give 5 to 7, which no PNG has: refused here
+        (the filter is a context's index below, and the release build checks
+        no ranges) }
+      if f > 4 then raise Exception.Create('damaged stream: a line filter above 4');
       if dec <> nil then px.filters[px.passes[pi_].firstLine + y] := f;
       prevFilter := f;
       row := px.passes[pi_].first + y * rb;

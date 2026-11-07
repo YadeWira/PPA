@@ -835,6 +835,10 @@ var
     if nSeg > n div PAR_SEG_MIN then nSeg := n div PAR_SEG_MIN;
     if nSeg < 2 then Exit;
     segLen := (n + nSeg - 1) div nSeg;
+    { as many as there are segLen bytes for (rounding up can leave the last
+      ones empty, past the end) }
+    nSeg := (n + segLen - 1) div segLen;
+    if nSeg < 2 then Exit;
     segRoom := segLen + PAR_OVERLAP + 16;
     tl := nSeg * segRoom;
     segs := nil; SetLength(segs, nSeg);

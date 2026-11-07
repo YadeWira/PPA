@@ -2,7 +2,8 @@
   (the calling one among them), each taking the next i as it finishes. With
   one thread, or one item, everything runs here, in order, without a thread.
   An exception in an item is caught and given back: the first one raised
-  again in the caller once all are done. The program needs cthreads first
+  again in the caller once all are done (an EOutOfMemory as one, the others
+  as Exception). The program needs cthreads first
   in its uses on Unix (the ppa command has it). }
 unit ppathreads;
 
@@ -32,6 +33,8 @@ type
     run: TItemProc;
     failure: string;
     failed: LongInt;
+    { the first failure was memory the system did not give }
+    noMemory: Boolean;
   end;
   PShared = ^TShared;
 
@@ -51,7 +54,10 @@ begin
       sh^.run(i);
     except
       on e: Exception do
-        if InterlockedIncrement(sh^.failed) = 1 then sh^.failure := e.ClassName + ': ' + e.Message;
+        if InterlockedIncrement(sh^.failed) = 1 then begin
+          sh^.failure := e.ClassName + ': ' + e.Message;
+          sh^.noMemory := e is EOutOfMemory;
+        end;
     end;
   until False;
 end;
@@ -71,7 +77,7 @@ begin
     for i := 0 to n - 1 do run(i);
     Exit;
   end;
-  sh.next := 0; sh.n := n; sh.run := run; sh.failure := ''; sh.failed := 0;
+  sh.next := 0; sh.n := n; sh.run := run; sh.failure := ''; sh.failed := 0; sh.noMemory := False;
   k := threads;
   if k > n then k := n;
   pool := nil;
@@ -92,7 +98,9 @@ begin
   SetLength(pool, k);
   Work(@sh);
   for i := 0 to High(pool) do begin pool[i].Join; pool[i].Free; end;
-  if sh.failed > 0 then raise Exception.Create(sh.failure);
+  { memory stays memory (the caller tells it from a damaged input) }
+  if sh.failed > 0 then
+    if sh.noMemory then raise EOutOfMemory.Create(sh.failure) else raise Exception.Create(sh.failure);
 end;
 
 end.

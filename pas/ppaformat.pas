@@ -52,7 +52,12 @@ type
   TFormatError = (
     feNone, feShortFile, feNotPpa, feFutureVersion, feUnknownFlag,
     feReservedNotZero, feBadOrigSize, feRatioExceeded, fePayloadOutOfRange,
-    feBadExtension, feTooLarge, feDamaged, feSizeMismatch, feHashMismatch);
+    feBadExtension, feTooLarge, feDamaged, feSizeMismatch, feHashMismatch,
+    { the codec stream inside is of a version this release does not know (a
+      newer PPA's; damage on that byte looks the same) }
+    feFutureStream,
+    { memory the system did not give while decoding }
+    feNoMemory);
 
   TDescriptor = record
     stored: Boolean;
@@ -97,7 +102,8 @@ const T: array[TFormatError] of string = ('', 'too short to be a .ppa',
   'not a .ppa file', 'made by a newer PPA (format version not known)', 'unknown flag',
   'reserved bytes not zero', 'bad original size', 'declared size too large for its payload',
   'payload of a wrong size', 'bad extension field', 'larger than the allowed output',
-  'damaged', 'damaged: the result has another size', 'damaged: the result has another hash');
+  'damaged', 'damaged: the result has another size', 'damaged: the result has another hash',
+  'made by a newer PPA (stream version not known)', 'out of memory');
 begin
   Result := T[e];
 end;
@@ -229,7 +235,7 @@ end;
 
 function Unpack(const ppa: TBytes; maxOut: QWord; out original: TBytes;
   out d: TDescriptor; out detail: string; threads: Integer): TFormatError;
-var stream: TBytes; h: THash16; i: Integer;
+var stream: TBytes; h: THash16; i: Integer; fail: TDecodeFailure;
 begin
   original := nil; detail := '';
   Result := Inspect(ppa, d);
@@ -238,9 +244,14 @@ begin
   if d.stored then original := Copy(ppa, d.payloadPos, d.payloadLen)
   else begin
     stream := Copy(ppa, d.payloadPos, d.payloadLen);
-    if not Decompress(stream, Int64(d.origSize), original, detail, threads) then begin
+    if not DecompressEx(stream, Int64(d.origSize), original, detail, fail, threads) then begin
       StageEnter(stNone);
-      original := nil; Exit(feDamaged);
+      original := nil;
+      case fail of
+        dfFuture: Exit(feFutureStream);
+        dfMemory: Exit(feNoMemory);
+      else Exit(feDamaged);
+      end;
     end;
   end;
   if QWord(Length(original)) <> d.origSize then begin StageEnter(stNone); original := nil; Exit(feSizeMismatch); end;

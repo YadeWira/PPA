@@ -32,6 +32,7 @@ typedef struct {
   const uint16_t *freq, *cum;          /* mode 2: [320][256], [320][257] */
   const uint8_t *slot;                 /* mode 2: [320][256], the symbol at slot 16 k (where the search starts) */
   uint32_t *x; const uint8_t *buf; intptr_t *pos; intptr_t len;   /* mode 2: the rANS state and input */
+  intptr_t ctxv;                       /* 1: the 64 contexts of stream version 1 (decoding it); 2: the 320 */
 } sm_args_t;
 
 static inline int iabs(int v) { return v < 0 ? -v : v; }
@@ -58,6 +59,7 @@ static inline __attribute__((always_inline)) void row_k(sm_args_t *a, const int 
   intptr_t pos = mode == 2 ? *a->pos : 0;
   const intptr_t len = a->len;
   const uint8_t *const rqt = a->rq;
+  const int ctxv = (int)a->ctxv;
 
   /* the first line sees itself as the line above; the buffers start at
      zero (ppastatic's NewPass), the left padding stays so, the right one is
@@ -83,7 +85,8 @@ static inline __attribute__((always_inline)) void row_k(sm_args_t *a, const int 
       /* the channel before's residual in five levels, by a table (a branch
          here would be missed often); the first channel's is 0, level 2 */
       const int rq = rqt[resPrev + 255];
-      const int ctx = (ebin[E > 4095 ? 4095 : E] * 4 + (ch & 3)) * 5 + rq;
+      const int ctx = ctxv == 1 ? ebin[E > 4095 ? 4095 : E] * 4 + (ch & 3)
+                                : (ebin[E > 4095 ? 4095 : E] * 4 + (ch & 3)) * 5 + rq;
       int X;
       if (mode != 2) {
         X = src[i];

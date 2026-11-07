@@ -36,8 +36,9 @@ uses SysUtils;
 
 const
   { The first byte of every stream. A new version never stops reading the
-    older ones. }
-  STREAM_VERSION = 1;
+    older ones: 1, PPA 0.1.0's; 2, the static model's 320 contexts (the
+    channel before's residual among them). }
+  STREAM_VERSION = 2;
 
 var
   { the images ppafast takes (8-bit samples, not a palette) with it, about
@@ -85,9 +86,26 @@ function Compress(const data: TBytes; out stream: TBytes; out why: string;
 function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
   threads: Integer = 1): Boolean;
 
+type
+  { why a stream did not decode: damaged (or not a stream); written by a
+    newer PPA (its version byte, or a JNG's JPEG stream of a newer PJA:
+    damage on that byte looks the same); memory the system did not give }
+  TDecodeFailure = (dfNone, dfDamaged, dfFuture, dfMemory);
+
+{ The settings the tests read from the environment (PPA_TEST_BAND_BYTES,
+  PPA_TEST_BANDS_REVERSE, PPA_TEST_MODEL, PPA_TEST_PAR_BYTES) back to their
+  defaults, and FastModel on: a library loaded into another program
+  (libppa) must not take them from that program's environment, where
+  PPA_TEST_BAND_BYTES would even make streams others cannot read. }
+procedure ResetTestSettings;
+
+{ Decompress, and why it failed }
+function DecompressEx(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
+  out failure: TDecodeFailure; threads: Integer = 1): Boolean;
+
 implementation
 
-uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppafast, ppastatic, ppathreads, ppastage,
+uses Math, ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppafast, ppastatic, ppathreads, ppastage,
   ppablake3, pjablake3, pjacodec, pjamodel, pjav7;
 
 const
@@ -122,6 +140,12 @@ var
 const
   { deflate's largest expansion is 1032:1, plus room for small streams }
   MAX_INFLATE_RATIO = 1100;
+  { all the images of one file together, filtered: the compressor keeps the
+    ones past it as bytes, and the decompressor refuses a stream that asks
+    for more (a few hundred bytes could otherwise make it allocate many
+    gigabytes, each image within its own stream's bound). The same on every
+    platform: it decides the stream. }
+  MAX_TOTAL_IMAGE_BYTES = Int64(2) shl 30;
   { each band coded at once takes its own model, about 140 MB: a 32-bit
     process (2 GB of addresses, on Windows) codes at most this many }
   MAX_BANDS_AT_ONCE_32 = 4;
@@ -365,6 +389,7 @@ var
   i, s: SizeInt; c: TChunk;
   enc: TArithEncoder; bm, rm: TByteModel; sub0: TBytes;
   jobs: array of TBandJob; subs: array of TBytes; nJobs, nJpeg: SizeInt;
+  total: Int64;
 
   procedure PlanOne(k: SizeInt);
   begin
@@ -398,6 +423,17 @@ begin
   { each stream's plan on its own: the zlib parameter search is the slow
     part, and the streams' are independent }
   ParallelFor(Length(p.streams), threads, @PlanOne);
+  { past MAX_TOTAL_IMAGE_BYTES of images, the rest as bytes }
+  total := 0;
+  for s := 0 to High(p.streams) do
+    if plans[s].mode in IMAGE_MODES then begin
+      Inc(total, FilteredSize(plans[s].px) + Int64(Length(plans[s].px.tail)));
+      if total > MAX_TOTAL_IMAGE_BYTES then begin
+        plans[s].mode := MODE_BYTES;
+        plans[s].px := Default(TPixels);
+        plans[s].z := Default(TZStream);
+      end;
+    end;
   known := nil;
   SetLength(known, Length(p.streams));
   for s := 0 to High(p.streams) do begin
@@ -489,13 +525,13 @@ begin
 end;
 
 function DecompressRaw(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
-  threads: Integer; stages: Boolean; known: PKnownStreams): Boolean; forward;
+  threads: Integer; stages: Boolean; known: PKnownStreams; out future: Boolean): Boolean; forward;
 function DecompressSafe(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
-  threads: Integer; stages: Boolean; known: PKnownStreams): Boolean; forward;
+  threads: Integer; stages: Boolean; known: PKnownStreams; out failure: TDecodeFailure): Boolean; forward;
 
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
   out stats: TCodecStats; verify: Boolean; threads: Integer): Boolean;
-var back: TBytes; why2: string; was: TStage; known: TKnownStreams;
+var back: TBytes; why2: string; was: TStage; known: TKnownStreams; fail: TDecodeFailure;
 begin
   why := '';
   was := StageEnter(stNone);
@@ -508,7 +544,7 @@ begin
     parameters were checked, bit for bit, to give (PlanImage), and the same
     code would give it here; a quarter of the compression's time. }
   StageEnter(stVerify);
-  if not DecompressSafe(stream, Length(data), back, why2, threads, False, @known) or (Length(back) <> Length(data)) or
+  if not DecompressSafe(stream, Length(data), back, why2, threads, False, @known, fail) or (Length(back) <> Length(data)) or
      ((Length(data) > 0) and not CompareMem(@back[0], @data[0], Length(data))) then begin
     why := 'the codec did not give the same file back (a PPA bug: please report it)';
     if why2 <> '' then why := why + ': ' + why2;
@@ -521,7 +557,7 @@ end;
 { ---------------------------------------------------------------- decompress }
 
 function DecompressRaw(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
-  threads: Integer; stages: Boolean; known: PKnownStreams): Boolean;
+  threads: Integer; stages: Boolean; known: PKnownStreams; out future: Boolean): Boolean;
 var
   dec: TArithDecoder; bm, rm: TByteModel;
   metaLen: Cardinal; meta: TBytes; r: TReader;
@@ -535,6 +571,7 @@ var
   jobs: array of TBandJob; nJobs, nJpeg: SizeInt; jpegSub: array of SizeInt;
   bandBad: array of Boolean;
   nImages, zThreads: Integer;
+  imgSize: SizeInt; allImages: Int64;
 
   function Bad(const s: string): Boolean;
   begin
@@ -545,7 +582,8 @@ var
   var d: TArithDecoder;
   begin
     if modes[jobs[k].s] = MODE_STATIC then begin
-      if not DecodeImageStatic(pxs[jobs[k].s], jobs[k].firstRow, jobs[k].rows, stream, subPos[k + 1], subLen[k + 1]) then
+      if not DecodeImageStatic(pxs[jobs[k].s], jobs[k].firstRow, jobs[k].rows, stream, subPos[k + 1], subLen[k + 1],
+                               stream[0]) then
         bandBad[k] := True;
       Exit;
     end;
@@ -563,6 +601,7 @@ var
       r := pjacodec.Decompress(Copy(stream, subPos[jpegSub[k]], subLen[jpegSub[k]]), j,
         streamLen[k] + 1024, 1, streamLen[k]);
       if r.Ok then p.streams[k].data := j else p.streams[k].data := nil;
+      if r.err = ceFutureVersion then future := True;
       Exit;
     end;
     if not (modes[k] in IMAGE_MODES) then Exit;
@@ -585,9 +624,15 @@ var
 
 begin
   Result := False;
-  data := nil; why := '';
+  data := nil; why := ''; future := False;
   if Length(stream) < 1 then Exit(Bad('empty stream'));
-  if stream[0] <> STREAM_VERSION then Exit(Bad(Format('stream version %d not known', [stream[0]])));
+  { a version this release does not know: a newer PPA's (a new version
+    never stops reading the older ones; 0 is none) }
+  if stream[0] > STREAM_VERSION then begin
+    future := True;
+    Exit(Bad(Format('stream version %d: made by a newer PPA', [stream[0]])));
+  end;
+  if stream[0] < 1 then Exit(Bad(Format('stream version %d not known', [stream[0]])));
   { the substreams' count and lengths: they must fit in the stream }
   r := Default(TReader);
   r.b := stream; r.pos := 1; r.ok := True;
@@ -621,7 +666,9 @@ begin
   if i > Ord(High(TPngKind)) then Exit(Bad('bad file kind'));
   p.kind := TPngKind(i);
   maxSmall := maxOut;
-  nChunks := r.GetVar(MAX_CHUNKS);
+  { a chunk is at least 12 bytes of the file: no more than the declared
+    size holds (a few bytes of stream must not allocate for millions) }
+  nChunks := r.GetVar(Min(MAX_CHUNKS, maxOut div 12 + 1));
   if not r.ok then Exit(Bad('bad structure'));
   SetLength(p.chunks, nChunks);
   total := 8;
@@ -653,7 +700,8 @@ begin
   Inc(total, len);
   if not r.ok or (total > maxOut) then Exit(Bad('bad structure'));
 
-  nStreams := r.GetVar(MAX_CHUNKS);
+  { each stream comes from one chunk or more }
+  nStreams := r.GetVar(nChunks);
   if not r.ok then Exit(Bad('bad structure'));
   SetLength(p.streams, nStreams);
   modes := nil; SetLength(modes, nStreams);
@@ -699,16 +747,23 @@ begin
   rm.Init;
   plains := nil; SetLength(plains, nStreams);
   pxs := nil; SetLength(pxs, nStreams);
-  nJobs := 0;
+  nJobs := 0; allImages := 0;
   for s := 0 to nStreams - 1 do begin
     if modes[s] = MODE_BYTES then begin
       SetLength(p.streams[s].data, streamLen[s]);
       CodeBytes(rm, p.streams[s].data, 0, streamLen[s], nil, @dec);
     end else if modes[s] in IMAGE_MODES then begin
-      if not StreamImage(p, s, info) or not InitLayout(info, pxs[s]) then Exit(Bad('bad image header'));
+      { the image's size checked before anything is allocated for it, and
+        all the images' together: deflate expands 1032 times at most, so
+        their streams, inside the declared size, bound them }
+      if not StreamImage(p, s, info) or not LayoutSize(info, imgSize) then Exit(Bad('bad image header'));
       if (modes[s] in [MODE_FAST, MODE_STATIC]) and not FastEligible(info) then Exit(Bad('bad structure'));
-      if FilteredSize(pxs[s]) + Int64(Length(pxTails[s])) > MAX_INFLATE_RATIO * streamLen[s] + 1024 then
+      if imgSize + Int64(Length(pxTails[s])) > MAX_INFLATE_RATIO * streamLen[s] + 1024 then
         Exit(Bad('image larger than its stream can hold'));
+      Inc(allImages, imgSize + Int64(Length(pxTails[s])));
+      if (allImages > MAX_TOTAL_IMAGE_BYTES) or (allImages > MAX_INFLATE_RATIO * maxOut + 1024) then
+        Exit(Bad('images larger than the file can hold'));
+      if not InitLayout(info, pxs[s]) then Exit(Bad('bad image header'));
       Inc(nJobs, BandCount(pxs[s]));
     end;
   end;
@@ -762,28 +817,59 @@ end;
 
 function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
   threads: Integer): Boolean;
+var fail: TDecodeFailure;
+begin
+  Result := DecompressEx(stream, maxOut, data, why, fail, threads);
+end;
+
+function DecompressEx(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
+  out failure: TDecodeFailure; threads: Integer): Boolean;
 var was: TStage;
 begin
   was := StageEnter(stNone);
   StageEnter(was);
-  Result := DecompressSafe(stream, maxOut, data, why, threads, True, nil);
+  Result := DecompressSafe(stream, maxOut, data, why, threads, True, nil, failure);
   StageEnter(was);
 end;
 
 function DecompressSafe(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
-  threads: Integer; stages: Boolean; known: PKnownStreams): Boolean;
+  threads: Integer; stages: Boolean; known: PKnownStreams; out failure: TDecodeFailure): Boolean;
+var future: Boolean;
 begin
+  failure := dfNone;
+  future := False;
   try
-    Result := DecompressRaw(stream, maxOut, data, why, threads, stages, known);
+    Result := DecompressRaw(stream, maxOut, data, why, threads, stages, known, future);
+    if not Result then
+      if future then failure := dfFuture else failure := dfDamaged;
   except
+    { memory the system did not give: said so (a 32-bit host on a large
+      image), not taken for damage }
+    on e: EOutOfMemory do begin
+      data := nil;
+      why := 'out of memory';
+      failure := dfMemory;
+      Result := False;
+    end;
     on e: Exception do begin
       { a damaged stream must not get here; if one does, it is refused, not
         crashed on }
       data := nil;
       why := 'damaged stream (' + e.ClassName + ')';
+      failure := dfDamaged;
       Result := False;
     end;
   end;
+end;
+
+procedure ResetTestSettings;
+begin
+  BandBytes := BAND_BYTES;
+  BandsReverse := False;
+  TestModel := -1;
+  FastModel := True;
+  ppazlib.PAR_MIN_BYTES := 1024 * 1024;
+  ppazlib.PAR_SEG_MIN := 256 * 1024;
 end;
 
 initialization

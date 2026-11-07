@@ -49,6 +49,16 @@ set +e
 set -e
 [ "$st" -eq 2 ] && [ "$st2" -eq 2 ] || fail "usage errors give $st and $st2"
 
+# what the published releases wrote still comes back (tests/ppa1: PPA 0.1.0,
+# stream version 1, each model)
+mkdir -p "$W/v1"
+"$PPA" x -q --output-dir="$W/v1" tests/ppa1/*.ppa || fail "x of 0.1.0's .ppa files"
+for f in tests/ppa1/*.ppa; do
+  b=$(basename "$f" .ppa)
+  o=$(ls "$W/v1/$b".* 2>/dev/null | head -1)
+  [ -n "$o" ] && cmp -s "$o" "tests/png/$(basename "$o")" || fail "0.1.0's $b.ppa does not come back"
+done
+
 # t: extract and verify, write nothing; a damaged one FAILED, status 1
 "$PPA" t "$W/in/rgb8.ppa" "$W/in/palette.ppa" | grep -c ': OK' | grep -q '^2$' || fail "t"
 before=$(ls "$W/in" | wc -l)
@@ -126,4 +136,4 @@ set +e
 "$PPA" x --max "$W/in/rgb8.ppa" > /dev/null 2>&1; u4=$?
 set -e
 [ "$u1" -eq 2 ] && [ "$u2" -eq 2 ] && [ "$u3" -eq 2 ] && [ "$u4" -eq 2 ] || fail "usage errors give $u1 $u2 $u3 $u4"
-echo "cli: $n files back, -f, -n, list, a damaged file, usage, t, info, --json, --stats, report, a bug, --keep-corrupt, leftovers and selftest: 0 failures"
+echo "cli: $n files back, 0.1.0's files, -f, -n, list, a damaged file, usage, t, info, --json, --stats, report, a bug, --keep-corrupt, leftovers and selftest: 0 failures"

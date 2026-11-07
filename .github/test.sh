@@ -42,6 +42,13 @@ PPA_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || true); export PPA_COMMIT
 $FPC -O3 -dPPA_FAST -dPJA_FAST -Fupas -Fipas -Fuvendor/pja/pas -Fivendor/pja/pas -Fo"$OUT/c" -FU"$OUT/cu" -o"$OUT/ppa$EXE" pas/ppacli.pas > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 "$OUT/ppa$EXE" --version
+# the damaged .ppa variants through the release build (-dPPA_FAST: range
+# checks off in the hot units): every one refused, none read or written out
+# of bounds (a decoded line filter above 4 once indexed past its table there)
+mkdir -p "$OUT/fu"
+# shellcheck disable=SC2086
+$FPC -O3 -dPPA_FAST -dPJA_FAST -Fupas -Fipas -Fuvendor/pja/pas -Fivendor/pja/pas -Fo"$OUT/c" -FU"$OUT/fu" -o"$OUT/test_format_fast$EXE" pas/tests/test_format.pas > "$OUT/fpc.log" 2>&1 \
+  || { cat "$OUT/fpc.log"; exit 1; }
 
 echo "== the command"
 sh pas/tests/cli.sh "$OUT/ppa$EXE" "$OUT/cli"
@@ -61,6 +68,10 @@ tail -1 "$OUT/zlib.txt"
 grep -q ', 0 failures' "$OUT/zlib.txt"
 echo "== layer 3"
 "$OUT/test_pixels$EXE" tests/png 16 | tail -1
+echo "== layer 7, damaged .ppa files through the release build"
+"$OUT/test_format_fast$EXE" tests/png > "$OUT/damaged.txt" 2>&1 || { cat "$OUT/damaged.txt"; echo "FAIL: the release build on damaged files"; exit 1; }
+tail -1 "$OUT/damaged.txt"
+grep -q ', 0 failures' "$OUT/damaged.txt" || { cat "$OUT/damaged.txt"; exit 1; }
 echo "== layer 6, bands (4 KB ones, decoded last first)"
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec$EXE" tests/png 14 | sed 's/; [0-9.]* s;/;/' | tee "$OUT/bands.txt"
 echo "== layer 2b, the deflate streams rebuilt in segments on 4 threads"

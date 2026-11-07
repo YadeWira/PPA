@@ -3625,17 +3625,17 @@ const
   SELFTEST_MODELS: array[0..SELFTEST_COUNT - 1] of Integer = (-1, 4, 3, 4, -1, -1, 3, -1, -1, -1, -1);
   SELFTEST_PPA_SIZES: array[0..SELFTEST_COUNT - 1] of Integer = (6992, 9697, 5432, 1967, 483, 5782, 5633, 20740, 17144, 1098, 736);
   SELFTEST_PPA_HASHES: array[0..SELFTEST_COUNT - 1] of string = (
-    'fea3bd441e2768fe344260484c8c78a0',
-    'b6731a2dcf705a06b4a1d253b63ff694',
-    'fdb601041c61ef429be94f77677bd33e',
-    'd041bd7eb08bdc0b67c971086407882a',
-    'ba6011e8ae7271d3f26555422f2d8d03',
-    'f4540c524df844df96d3c4ed47caa7d1',
-    '8be6c09efffcb9343d4df9bfdb219bb1',
-    '1cad8278081712f8ecc421c4f59b3171',
-    '1e34de94f3a08fe092c7ba2ebcc3f17e',
-    '8dd8e4947dc9a8b80d8835fdd36b687a',
-    '571ca862dc6195d40472714e60ed7204');
+    'ffe413067242169b9f5fb034f8583d21',
+    '14759fc59f6196b154302362351b77f4',
+    'e044ca5fd0ccdfb1ef162411ff77b3fa',
+    'bfcefcfcbb653b0931715a0e4655d52f',
+    '1f8e38b76b401ea70918921a7301c479',
+    'caf19f9f9bd014e0b5c543e66069c013',
+    'c04f4592fbf86b47f874fe0383ca19b0',
+    'be3aff69853a882a8c8cf2a49159cf71',
+    '51d6fcad0863faf0531cdd6e2892c2b5',
+    'af6e560a7cf17a2ae3502b1b9a0007a7',
+    'fdc99aeb8ca623975bc0df02e01edfd2');
 
 procedure SelftestSample(k: Integer; out data: TBytes);
 begin
