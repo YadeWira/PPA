@@ -63,6 +63,8 @@ echo "== layer 3"
 "$OUT/test_pixels$EXE" tests/png 16 | tail -1
 echo "== layer 6, bands (4 KB ones, decoded last first)"
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec$EXE" tests/png 14 | sed 's/; [0-9.]* s;/;/' | tee "$OUT/bands.txt"
+echo "== layer 2b, the deflate streams rebuilt in segments on 4 threads"
+PPA_TEST_PAR_BYTES=512 PPA_TEST_THREADS=4 "$OUT/test_codec$EXE" tests/png 14 | tail -1
 echo "== layers 4 and 5"
 "$OUT/test_arith$EXE" | tail -1
 "$OUT/measure_model$EXE" tests/png | sed 's/, [0-9.]* s,/,/' > "$OUT/model.txt"

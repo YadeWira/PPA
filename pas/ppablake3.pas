@@ -45,7 +45,7 @@ type
     last of the input: their chaining values, 8 words each, into cv }
   TBlake3Chunks = procedure(input: PByte; n: SizeInt; counter: QWord; cv: PLongWord); cdecl;
 var
-  { a faster routine may be set here (none yet); nil: this unit's own
+  { a faster routine (ppacodec sets PJA's C, pjasysc.c); nil: this unit's own
     compression function, chunk by chunk. The same hash either way }
   Blake3Chunks: TBlake3Chunks = nil;
 

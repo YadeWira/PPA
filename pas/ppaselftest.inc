@@ -3623,12 +3623,12 @@ const
   SELFTEST_EXTS: array[0..SELFTEST_COUNT - 1] of string = ('png', 'png', 'png', 'png', 'png', 'png', 'png', 'png', 'mng', 'jng', 'jng');
   { ppacodec.TestModel for each: -1 the model ppa picks }
   SELFTEST_MODELS: array[0..SELFTEST_COUNT - 1] of Integer = (-1, 4, 3, 4, -1, -1, 3, -1, -1, -1, -1);
-  SELFTEST_PPA_SIZES: array[0..SELFTEST_COUNT - 1] of Integer = (6992, 8558, 5432, 1961, 483, 5782, 5633, 20740, 17144, 1098, 736);
+  SELFTEST_PPA_SIZES: array[0..SELFTEST_COUNT - 1] of Integer = (6992, 9697, 5432, 1967, 483, 5782, 5633, 20740, 17144, 1098, 736);
   SELFTEST_PPA_HASHES: array[0..SELFTEST_COUNT - 1] of string = (
     'fea3bd441e2768fe344260484c8c78a0',
-    '4ec5bfc8b702bd3e49d1be4cea56fc1c',
+    'b6731a2dcf705a06b4a1d253b63ff694',
     'fdb601041c61ef429be94f77677bd33e',
-    '17756c4e1e25e732e71e364b88bd70be',
+    'd041bd7eb08bdc0b67c971086407882a',
     'ba6011e8ae7271d3f26555422f2d8d03',
     'f4540c524df844df96d3c4ed47caa7d1',
     '8be6c09efffcb9343d4df9bfdb219bb1',

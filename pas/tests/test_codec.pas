@@ -4,10 +4,13 @@
   that does not come back is a FAILURE, as is an exception. Prints the
   sizes against the originals.
 
-    test_codec <directory> [minimum taken] [-v] }
+    test_codec <directory> [minimum taken] [-v]
+
+  PPA_TEST_THREADS=N: the codec on N threads (with PPA_TEST_PAR_BYTES, each
+  image's deflate stream rebuilt in segments even on the small samples). }
 program test_codec;
 {$I ../ppa.inc}
-uses SysUtils, Classes, DateUtils, ppacodec;
+uses {$ifdef UNIX} cthreads, {$endif} SysUtils, Classes, DateUtils, ppacodec;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);
@@ -17,11 +20,12 @@ var
   files: TStringList; sr: TSearchRec; dir, name, why: string;
   i, minimum: Integer; verbose: Boolean;
   d, st, back: TBytes; stats: TCodecStats;
-  taken, failures, inBytes, outBytes, notTaken, images, raws: Int64;
+  taken, failures, inBytes, outBytes, notTaken, images, raws: Int64; th: Integer;
   t0: TDateTime;
 begin
   { PPA_TEST_MAX=1: every image with the slow model (ppa --max) }
   if GetEnvironmentVariable('PPA_TEST_MAX') = '1' then FastModel := False;
+  th := StrToIntDef(GetEnvironmentVariable('PPA_TEST_THREADS'), 1);
   dir := ParamStr(1); minimum := StrToIntDef(ParamStr(2), 1); verbose := ParamStr(3) = '-v';
   files := TStringList.Create; files.Sorted := True;
   if FindFirst(dir + '/*', faAnyFile, sr) = 0 then begin
@@ -34,13 +38,13 @@ begin
     d := ReadFile(files[i]);
     name := ExtractFileName(files[i]);
     try
-      if not Compress(d, st, why, stats) then begin
+      if not Compress(d, st, why, stats, True, th) then begin
         Inc(notTaken);
         if Pos('bug', why) > 0 then begin Inc(failures); Writeln('  FAIL ', why, '  ', name); end
         else if verbose then Writeln('  not taken: ', why, '  ', name);
         Continue;
       end;
-      if not Decompress(st, Length(d), back, why) or (Length(back) <> Length(d)) or
+      if not Decompress(st, Length(d), back, why, th) or (Length(back) <> Length(d)) or
          ((Length(d) > 0) and not CompareMem(@back[0], @d[0], Length(d))) then begin
         Inc(failures); Writeln('  FAIL does not come back: ', why, '  ', name); Continue;
       end;

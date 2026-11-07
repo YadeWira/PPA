@@ -5,8 +5,9 @@
    A sample is predicted by LOCO-I's MED (gray, alpha, the first channel)
    or by the channel before plus MED of the differences to it (the colour
    channels); its residual, folded and zigzagged to 0..255, is a symbol of
-   one of 64 contexts (an energy bin from the residuals around and the
-   channel before's, by channel), coded with static frequencies by rANS.
+   one of 320 contexts (an energy bin from the residuals around and the
+   channel before's, by channel, and the channel before's residual in
+   five levels), coded with static frequencies by rANS.
    One line at a time: counted (mode 0), its (context, symbol) recorded for
    the encoder (mode 1), or decoded (mode 2).
 
@@ -25,10 +26,11 @@ typedef struct {
   intptr_t w, nc, y;                   /* the line's width in pixels, bytes a pixel, its number in the pass or band */
   uint8_t *src;                        /* the line in the image (decoding: written) */
   const uint8_t *ebin;                 /* the energy's bin, 0..4095 -> 0..15 */
-  uint32_t *cnt;                       /* mode 0: [64][256] */
-  uint8_t *rctx, *rsym; intptr_t *rn;  /* mode 1: where the (context, symbol) go, and how many so far */
-  const uint16_t *freq, *cum;          /* mode 2: [64][256], [64][257] */
-  const uint8_t *slot;                 /* mode 2: [64][4096], the symbol of each slot */
+  const uint8_t *rq;                   /* the channel before's residual's level, -255..255 -> 0..4 */
+  uint32_t *cnt;                       /* mode 0: [320][256] */
+  uint16_t *rctx; uint8_t *rsym; intptr_t *rn;  /* mode 1: where the (context, symbol) go, and how many so far */
+  const uint16_t *freq, *cum;          /* mode 2: [320][256], [320][257] */
+  const uint8_t *slot;                 /* mode 2: [320][256], the symbol at slot 16 k (where the search starts) */
   uint32_t *x; const uint8_t *buf; intptr_t *pos; intptr_t len;   /* mode 2: the rANS state and input */
 } sm_args_t;
 
@@ -37,8 +39,10 @@ static inline int imin(int a, int b) { return a < b ? a : b; }
 static inline int imax(int a, int b) { return a > b ? a : b; }
 static inline int med3(int a, int b, int c) { return imax(imin(a, b), imin(imax(a, b), c)); }
 
-void ppas_row(sm_args_t *a) {
-  const int w = (int)a->w, nc = (int)a->nc, y = (int)a->y, mode = (int)a->mode;
+/* one line; mode and nc constants where row_k is called, so that each of
+   the dozen copies the compiler makes has no branch on them a sample */
+static inline __attribute__((always_inline)) void row_k(sm_args_t *a, const int mode, const int nc) {
+  const int w = (int)a->w, y = (int)a->y;
   const intptr_t rs = (intptr_t)(w + 2 * SM_PAD) * nc;
   uint8_t *const cur = a->px + (y & 1) * rs + SM_PAD * nc;
   uint8_t *up = a->px + ((y + 1) & 1) * rs + SM_PAD * nc;
@@ -46,13 +50,14 @@ void ppas_row(sm_args_t *a) {
   uint8_t *const src = a->src;
   const uint8_t *const ebin = a->ebin;
   uint32_t *const cnt = a->cnt;
-  uint8_t *const rctx = a->rctx, *const rsym = a->rsym;
+  uint16_t *const rctx = a->rctx; uint8_t *const rsym = a->rsym;
   intptr_t rn = mode == 1 ? *a->rn : 0;
   const uint16_t *const freq = a->freq, *const cum = a->cum;
   const uint8_t *const slot = a->slot, *const buf = a->buf;
   uint32_t x = mode == 2 ? *a->x : 0;
   intptr_t pos = mode == 2 ? *a->pos : 0;
   const intptr_t len = a->len;
+  const uint8_t *const rqt = a->rq;
 
   /* the first line sees itself as the line above; the buffers start at
      zero (ppastatic's NewPass), the left padding stays so, the right one is
@@ -75,7 +80,10 @@ void ppas_row(sm_args_t *a) {
       const int fW = fc[i - nc], fN = fu[i], fNW = fu[i - nc], fNE = fu[i + nc];
       int E = iabs(fW) + iabs(fN) + ((iabs(fNW) + iabs(fNE)) >> 1) + ((iabs(W - N) + iabs(N - NE)) >> 3);
       if (ch) E += 2 * iabs(resPrev);
-      const int ctx = ebin[E > 4095 ? 4095 : E] * 4 + (ch & 3);
+      /* the channel before's residual in five levels, by a table (a branch
+         here would be missed often); the first channel's is 0, level 2 */
+      const int rq = rqt[resPrev + 255];
+      const int ctx = (ebin[E > 4095 ? 4095 : E] * 4 + (ch & 3)) * 5 + rq;
       int X;
       if (mode != 2) {
         X = src[i];
@@ -84,10 +92,15 @@ void ppas_row(sm_args_t *a) {
         if (e > 127) e -= 256;
         const int sym = e >= 0 ? 2 * e : -2 * e - 1;
         if (mode == 0) cnt[ctx * 256 + sym]++;
-        else { rctx[rn] = (uint8_t)ctx; rsym[rn] = (uint8_t)sym; rn++; }
+        else { rctx[rn] = (uint16_t)ctx; rsym[rn] = (uint8_t)sym; rn++; }
       } else {
         const uint32_t s = x & ((1u << SM_PB) - 1);
-        const int sym = slot[ctx * (1 << SM_PB) + s];
+        /* the symbol whose range holds s: from the one at s's sixteenth,
+           up while the next range starts at or before s (a table 16 times
+           smaller than one slot each: they stay in the cache) */
+        const uint16_t *const cu = cum + ctx * 257;
+        int sym = slot[ctx * 256 + (s >> 4)];
+        while (cu[sym + 1] <= s) sym++;
         x = freq[ctx * 256 + sym] * (x >> SM_PB) + s - cum[ctx * 257 + sym];
         while (x < SM_L) { x = (x << 8) | (pos >= 0 && pos < len ? buf[pos] : 0); pos++; }
         const int e = (sym & 1) ? -((sym + 1) >> 1) : sym >> 1;
@@ -102,4 +115,16 @@ void ppas_row(sm_args_t *a) {
   }
   if (mode == 1) *a->rn = rn;
   if (mode == 2) { *a->x = x; *a->pos = pos; }
+}
+
+void ppas_row(sm_args_t *a) {
+  const int nc = (int)a->nc;
+#define ROW_M(m) do { switch (nc) { case 1: row_k(a, m, 1); break; case 2: row_k(a, m, 2); break; \
+    case 3: row_k(a, m, 3); break; case 4: row_k(a, m, 4); break; default: row_k(a, m, nc); } } while (0)
+  switch ((int)a->mode) {
+    case 0: ROW_M(0); break;
+    case 1: ROW_M(1); break;
+    default: ROW_M(2); break;
+  }
+#undef ROW_M
 }

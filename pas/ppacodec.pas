@@ -16,7 +16,9 @@
   back (layer 2b) and they are checked to do so; otherwise as its bytes. A
   JNG's JPEG is kept as its bytes for now (PJA's codec will take it).
 
-  Compress verifies: it decompresses its own stream and compares. A file
+  Compress verifies: it decompresses its own stream and compares (each
+  image's deflate stream as the bytes it inflates to: zlib's parameters
+  were checked to give it from them, bit for bit, when planned). A file
   that is not of the family, or that does not come back, is not taken (the
   file layer stores it as it is). Decompress never raises: a damaged or
   hostile stream gives False. The size of every image is capped before it
@@ -86,7 +88,7 @@ function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out w
 implementation
 
 uses ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppafast, ppastatic, ppathreads, ppastage,
-  pjacodec, pjamodel, pjav7;
+  ppablake3, pjablake3, pjacodec, pjamodel, pjav7;
 
 const
   IMAGE_MODES = [MODE_IMAGE, MODE_FAST, MODE_STATIC];
@@ -345,8 +347,18 @@ end;
 
 { ---------------------------------------------------------------- compress }
 
+type
+  { what Compress's verification knows of an image stream already: its
+    inflated bytes and its deflate stream, which zlib's parameters were
+    checked, bit for bit, to give from them (PlanImage) }
+  TKnownStream = record
+    plain, data: TBytes;
+  end;
+  TKnownStreams = array of TKnownStream;
+  PKnownStreams = ^TKnownStreams;
+
 function CompressRaw(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; threads: Integer): Boolean;
+  out stats: TCodecStats; threads: Integer; out known: TKnownStreams): Boolean;
 var
   p: TPng; r: TPngResult; w: TWriter; meta: TBytes;
   plans: array of TStreamPlan;
@@ -386,7 +398,13 @@ begin
   { each stream's plan on its own: the zlib parameter search is the slow
     part, and the streams' are independent }
   ParallelFor(Length(p.streams), threads, @PlanOne);
+  known := nil;
+  SetLength(known, Length(p.streams));
   for s := 0 to High(p.streams) do begin
+    if plans[s].mode in IMAGE_MODES then begin
+      known[s].plain := plans[s].z.plain;
+      known[s].data := p.streams[s].data;
+    end;
     Inc(stats.modes[plans[s].mode]);
     if plans[s].mode in IMAGE_MODES + [MODE_JPEG] then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
     else begin Inc(stats.rawStreams); Inc(stats.rawBytes, Length(p.streams[s].data)); end;
@@ -471,22 +489,26 @@ begin
 end;
 
 function DecompressRaw(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
-  threads: Integer; stages: Boolean): Boolean; forward;
+  threads: Integer; stages: Boolean; known: PKnownStreams): Boolean; forward;
 function DecompressSafe(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
-  threads: Integer; stages: Boolean): Boolean; forward;
+  threads: Integer; stages: Boolean; known: PKnownStreams): Boolean; forward;
 
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
   out stats: TCodecStats; verify: Boolean; threads: Integer): Boolean;
-var back: TBytes; why2: string; was: TStage;
+var back: TBytes; why2: string; was: TStage; known: TKnownStreams;
 begin
   why := '';
   was := StageEnter(stNone);
   StageEnter(was);
-  Result := CompressRaw(data, stream, why, stats, threads);
+  Result := CompressRaw(data, stream, why, stats, threads, known);
   if not Result or not verify then begin StageEnter(was); Exit; end;
-  { the verification's decode and rebuild count as verify }
+  { The stream decompressed and compared with the file, whole. Each image's
+    deflate stream is not written again: what the decoder refilters is
+    compared with the inflated bytes instead, whose deflate stream zlib's
+    parameters were checked, bit for bit, to give (PlanImage), and the same
+    code would give it here; a quarter of the compression's time. }
   StageEnter(stVerify);
-  if not DecompressSafe(stream, Length(data), back, why2, threads, False) or (Length(back) <> Length(data)) or
+  if not DecompressSafe(stream, Length(data), back, why2, threads, False, @known) or (Length(back) <> Length(data)) or
      ((Length(data) > 0) and not CompareMem(@back[0], @data[0], Length(data))) then begin
     why := 'the codec did not give the same file back (a PPA bug: please report it)';
     if why2 <> '' then why := why + ': ' + why2;
@@ -499,7 +521,7 @@ end;
 { ---------------------------------------------------------------- decompress }
 
 function DecompressRaw(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
-  threads: Integer; stages: Boolean): Boolean;
+  threads: Integer; stages: Boolean; known: PKnownStreams): Boolean;
 var
   dec: TArithDecoder; bm, rm: TByteModel;
   metaLen: Cardinal; meta: TBytes; r: TReader;
@@ -512,6 +534,7 @@ var
   nSubs: Int64; subLen, subPos: array of Int64;
   jobs: array of TBandJob; nJobs, nJpeg: SizeInt; jpegSub: array of SizeInt;
   bandBad: array of Boolean;
+  nImages, zThreads: Integer;
 
   function Bad(const s: string): Boolean;
   begin
@@ -543,7 +566,17 @@ var
       Exit;
     end;
     if not (modes[k] in IMAGE_MODES) then Exit;
-    ZlibChoices(plains[k], prms[k], nil, e);
+    if known <> nil then begin
+      { Compress's verification: the refiltered bytes must be the inflated
+        ones, whose stream is known }
+      if (k <= High(known^)) and (Length(plains[k]) = Length(known^[k].plain)) and (Length(plains[k]) > 0) and
+         CompareMem(@plains[k][0], @known^[k].plain[0], Length(plains[k])) then
+        p.streams[k].data := known^[k].data
+      else p.streams[k].data := nil;
+      plains[k] := nil;
+      Exit;
+    end;
+    ZlibChoices(plains[k], prms[k], nil, e, zThreads);
     e.raw := zs[k].raw; e.adlerOk := zs[k].adlerOk; e.header := zs[k].header;
     e.endPad := zs[k].endPad; e.tail := zs[k].tail;
     p.streams[k].data := Encode(e);
@@ -708,7 +741,16 @@ begin
       pxs[s] := Default(TPixels);
     end;
   { then each image's deflate stream, zlib's choices written: independent,
-    on as many threads as given }
+    on as many threads as given; and the threads left to each, to cut its
+    deflate stream into segments (ppazlib's parallel rebuild: a photo's,
+    alone, on all of them) }
+  nImages := 0;
+  for s := 0 to nStreams - 1 do
+    if modes[s] in IMAGE_MODES then Inc(nImages);
+  zThreads := threads;
+  if nImages > 1 then begin
+    if nImages < threads then zThreads := threads div nImages else zThreads := 1;
+  end;
   ParallelFor(nStreams, threads, @Rebuild);
   for s := 0 to nStreams - 1 do
     if (modes[s] in IMAGE_MODES + [MODE_JPEG]) and (Length(p.streams[s].data) <> streamLen[s]) then
@@ -724,15 +766,15 @@ var was: TStage;
 begin
   was := StageEnter(stNone);
   StageEnter(was);
-  Result := DecompressSafe(stream, maxOut, data, why, threads, True);
+  Result := DecompressSafe(stream, maxOut, data, why, threads, True, nil);
   StageEnter(was);
 end;
 
 function DecompressSafe(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
-  threads: Integer; stages: Boolean): Boolean;
+  threads: Integer; stages: Boolean; known: PKnownStreams): Boolean;
 begin
   try
-    Result := DecompressRaw(stream, maxOut, data, why, threads, stages);
+    Result := DecompressRaw(stream, maxOut, data, why, threads, stages, known);
   except
     on e: Exception do begin
       { a damaged stream must not get here; if one does, it is refused, not
@@ -747,6 +789,10 @@ end;
 initialization
   { PJA's codec, called from the codec's threads, keeps models in threadvars }
   OnThreadEnd := @ReleaseThreadModels;
+  { BLAKE3's chunks four at a time in SSE2: PJA's C (pjasysc.c), which
+    pjav7 gives pjablake3 and which ppablake3, the same code, takes too
+    (the same hash; tests/test_blake3 checks the vectors) }
+  ppablake3.Blake3Chunks := ppablake3.TBlake3Chunks(pjablake3.Blake3Chunks);
   BandBytes := StrToInt64Def(GetEnvironmentVariable('PPA_TEST_BAND_BYTES'), BAND_BYTES);
   if BandBytes < 1 then BandBytes := BAND_BYTES;
   BandsReverse := GetEnvironmentVariable('PPA_TEST_BANDS_REVERSE') = '1';

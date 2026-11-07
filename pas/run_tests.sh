@@ -90,6 +90,8 @@ echo "== layer 6: the codec (every file compressed, verified, decompressed)"
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 # --max: every image with the slow model
 PPA_TEST_MAX=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
+# each deflate stream rebuilt in segments on 4 threads (ppazlib's ParallelSlow), the small samples too
+PPA_TEST_PAR_BYTES=512 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 PPA_TEST_MAX=1 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 for d in "${dirs[@]}"; do "$OUT/test_codec" "$d" 1 | tail -1; done
 

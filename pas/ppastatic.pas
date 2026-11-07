@@ -1,9 +1,9 @@
 { Codec layer 5, the static model: 8-bit images (gray, gray and alpha, RGB,
   RGBA) at the speed of a table lookup a sample. Each sample is predicted by
   LOCO-I's MED (or, a colour channel, by the channel before plus MED of the
-  differences to it); its residual is a symbol of one of 64 contexts (an
+  differences to it); its residual is a symbol of one of 320 contexts (an
   energy bin from the residuals around and the channel before's, by
-  channel), coded by rANS with frequencies counted over the band and sent
+  channel, and the channel before's residual in five levels), coded by rANS with frequencies counted over the band and sent
   before it. Within about a tenth of the slow model's size on photographs;
   drawings are left to the others (ppacodec's choice).
 
@@ -49,7 +49,7 @@ const
   SM_PB = 12;
   SM_TOT = 1 shl SM_PB;
   SM_L = Cardinal(1) shl 23;
-  N_CTX = 64;
+  N_CTX = 320;
   { the energy bins' thresholds }
   SM_TH: array[0..14] of Integer = (1, 2, 3, 5, 7, 10, 14, 20, 28, 40, 56, 80, 112, 160, 224);
 
@@ -61,8 +61,9 @@ type
     w, nc, y: SizeInt;
     src: PByte;
     ebin: PByte;
+    rq: PByte;
     cnt: PCardinal;
-    rctx, rsym: PByte; rn: PSizeInt;
+    rctx: PWord; rsym: PByte; rn: PSizeInt;
     freq, cum: PWord;
     slot: PByte;
     x: PCardinal; buf: PByte; pos: PSizeInt; len: SizeInt;
@@ -71,12 +72,16 @@ type
   TStaticTables = record
     freq: array[0..N_CTX - 1, 0..255] of Word;
     cum: array[0..N_CTX - 1, 0..256] of Word;
-    slot: array[0..N_CTX - 1, 0..SM_TOT - 1] of Byte;
+    { the symbol at slot 16 k: where the search for a slot's starts }
+    slot: array[0..N_CTX - 1, 0..SM_TOT div 16 - 1] of Byte;
   end;
   PStaticTables = ^TStaticTables;
 
 var
   EBIN: array[0..4095] of Byte;
+  { the channel before's residual, -255 .. 255: below -2, -2 or -1, 0, 1
+    or 2, above 2 }
+  RQ_LEVEL: array[0..510] of Byte;
 
 procedure ppas_row(var a: TStaticArgs); cdecl; external name 'ppas_row';
 
@@ -93,7 +98,7 @@ end;
 procedure PascalStaticRow(var a: TStaticArgs);
 var
   w, nc, y, xx, ch, i, k, W_, N_, NW_, NE_, P, dW, dN, dNW, fW, fN, fNW, fNE, en, ctx, X_, e, sym, er,
-    resPrev, xPrev: Integer;
+    resPrev, xPrev, rq: Integer;
   rs, rn, pos: SizeInt;
   cur, up: PByte; fc, fu: PSmallInt;
   x, s: Cardinal;
@@ -123,7 +128,8 @@ begin
       en := Abs(fW) + Abs(fN) + ((Abs(fNW) + Abs(fNE)) shr 1) + ((Abs(W_ - N_) + Abs(N_ - NE_)) shr 3);
       if ch <> 0 then en := en + 2 * Abs(resPrev);
       if en > 4095 then en := 4095;
-      ctx := EBIN[en] * 4 + (ch and 3);
+      rq := RQ_LEVEL[resPrev + 255];
+      ctx := (EBIN[en] * 4 + (ch and 3)) * 5 + rq;
       if a.mode <> 2 then begin
         X_ := a.src[i];
         e := X_ - P;
@@ -134,7 +140,8 @@ begin
         else begin a.rctx[rn] := ctx; a.rsym[rn] := sym; Inc(rn); end;
       end else begin
         s := x and (SM_TOT - 1);
-        sym := a.slot[ctx * SM_TOT + Integer(s)];
+        sym := a.slot[ctx * (SM_TOT div 16) + Integer(s shr 4)];
+        while a.cum[ctx * 257 + sym + 1] <= s do Inc(sym);
         x := Cardinal(a.freq[ctx * 256 + sym]) * (x shr SM_PB) + s - a.cum[ctx * 257 + sym];
         while x < SM_L do begin
           if (pos >= 0) and (pos < a.len) then x := (x shl 8) or a.buf[pos] else x := x shl 8;
@@ -269,7 +276,8 @@ var
   a: TStaticArgs;
   cnt: array of Cardinal;
   t: PStaticTables;
-  rctx, rsym, meta, ans, part: TBytes;
+  rsym, meta, ans, part: TBytes;
+  rctx: array of Word;
   rn, k, n, mn, on, i, nf: SizeInt;
   c, s, last, used: Integer;
   x, xmax: Cardinal; fr: Cardinal;
@@ -279,7 +287,7 @@ begin
   try
     FillChar(t^, SizeOf(TStaticTables), 0);
     a := Default(TStaticArgs);
-    a.ebin := @EBIN[0];
+    a.ebin := @EBIN[0]; a.rq := @RQ_LEVEL[0];
     { the counts }
     cnt := nil; SetLength(cnt, N_CTX * 256);
     a.mode := 0; a.cnt := @cnt[0];
@@ -326,6 +334,9 @@ begin
     for k := rn - 1 downto 0 do begin
       c := rctx[k]; s := rsym[k];
       fr := t^.freq[c, s];
+      { a symbol the counts did not see: never, unless the two walks differ;
+        without this the loop below would never end }
+      if fr = 0 then raise Exception.Create('ppastatic: a symbol without a frequency');
       xmax := ((SM_L shr SM_PB) shl 8) * fr;
       while x >= xmax do begin
         if on = Length(ans) then SetLength(ans, 2 * on + 64);
@@ -402,7 +413,8 @@ begin
       t^.cum[c, 0] := 0;
       for s := 0 to 255 do begin
         t^.cum[c, s + 1] := t^.cum[c, s] + t^.freq[c, s];
-        for j := t^.cum[c, s] to t^.cum[c, s + 1] - 1 do t^.slot[c, j] := s;
+        for j := t^.cum[c, s] to t^.cum[c, s + 1] - 1 do
+          if j and 15 = 0 then t^.slot[c, j shr 4] := s;
       end;
     end;
     if p <> nf then Exit;
@@ -421,7 +433,7 @@ begin
     x := (Cardinal(rans[0]) shl 24) or (Cardinal(rans[1]) shl 16) or (Cardinal(rans[2]) shl 8) or rans[3];
     pos := 4;
     a := Default(TStaticArgs);
-    a.mode := 2; a.ebin := @EBIN[0];
+    a.mode := 2; a.ebin := @EBIN[0]; a.rq := @RQ_LEVEL[0];
     a.freq := @t^.freq[0, 0]; a.cum := @t^.cum[0, 0]; a.slot := @t^.slot[0, 0];
     a.x := @x; a.buf := @rans[0]; a.pos := @pos; a.len := Length(rans);
     Walk(px, firstRow, rows, a);
@@ -438,5 +450,11 @@ initialization
     while (b < 15) and (e >= SM_TH[b]) do Inc(b);
     EBIN[e] := b;
   end;
+  for e := -255 to 255 do
+    if e < -2 then RQ_LEVEL[e + 255] := 0
+    else if e < 0 then RQ_LEVEL[e + 255] := 1
+    else if e = 0 then RQ_LEVEL[e + 255] := 2
+    else if e <= 2 then RQ_LEVEL[e + 255] := 3
+    else RQ_LEVEL[e + 255] := 4;
   UseStaticC := GetEnvironmentVariable('PPA_NOC') <> '1';
 end.

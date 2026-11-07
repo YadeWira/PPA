@@ -37,7 +37,7 @@ unit ppazlib;
 
 interface
 
-uses SysUtils, ppadeflate;
+uses SysUtils, ppadeflate, ppathreads;
 
 const
   Z_DEFAULT_STRATEGY = 0;
@@ -59,7 +59,7 @@ type
   at the first block that differs from ref's and returns False; True means
   every block was the same (z then holds them all). }
 function ZlibChoices(const plain: TBytes; const prm: TZlibParams; ref: PZStream;
-  out z: TZStream): Boolean;
+  out z: TZStream; threads: Integer = 1): Boolean;
 
 { The zlib parameters that give z's blocks and tokens, if there are any:
   levels from the header's FLEVEL (any with a bare deflate stream), the
@@ -73,6 +73,12 @@ function FindZlibParams(const z: TZStream; out prm: TZlibParams; out choices: TZ
 function ZlibHeader(const prm: TZlibParams): Word;
 
 var
+  { the parallel rebuild's thresholds: PAR_MIN_BYTES_DEFAULT and a quarter
+    of it, a segment's least; PPA_TEST_PAR_BYTES makes them smaller for the
+    tests (the samples are small), with the same tokens }
+  PAR_MIN_BYTES: SizeInt = 1024 * 1024;
+  PAR_SEG_MIN: SizeInt = 256 * 1024;
+
   { deflate's loop and longest_match in C (ppazlibc.c); False: in Pascal,
     the reference. PPA_NOC=1 in the environment makes it False }
   UseZlibC: Boolean = True;
@@ -86,7 +92,7 @@ type
   TZDeflate = record
     plain: PByte; n: SizeInt;
     wsize, wmask, maxDist, hashMask, hashShift: SizeInt;
-    head, prev, nx3, nx4, nx8: PSizeInt; ord, cnt: PLongWord; t3, t4, t8: PLongWord;
+    head, prev, nx4, nx8: PSizeInt; ord, cnt: PLongWord; t4, t8: PLongWord;
     insH: SizeInt;
     strstart, matchStart, prevMatch, winBase: SizeInt;
     matchLength, prevLength, matchAvailable: SizeInt;
@@ -97,12 +103,24 @@ type
     lengthCode, distCode: PByte;
     pending: SizeInt;
     skipBits: SizeInt;
+    nx16: PSizeInt; t16: PLongWord;
+    stopAt: SizeInt;
+    syncPos, syncTok: PSizeInt; nSync, maxSync: SizeInt;
+    endLit: SizeInt;
+    syncLo, syncHi: SizeInt;
   end;
 
 const
-  ZD_DONE = 0; ZD_FLUSH = 1; ZD_STOP = 2;
+  ZD_DONE = 0; ZD_FLUSH = 1; ZD_STOP = 2; ZD_SEGEND = 3;
+  { the parallel rebuild (ParallelSlow): only above this many bytes, and
+    each segment parsed this far into the next one, where the two must have
+    met (a match ending at the same position in both) }
+  PAR_MIN_BYTES_DEFAULT = 1024 * 1024;
+  PAR_OVERLAP = 32 * 1024;
+  PAR_SKIP_BITS = 19;   { as SKIP_BITS_MAX: fewer slots cost more in collisions than they save }
 
 function ppaz_deflate(var s: TZDeflate): SizeInt; cdecl; external name 'ppaz_deflate';
+procedure ppaz_preinsert(var s: TZDeflate; from, upTo: SizeInt); cdecl; external name 'ppaz_preinsert';
 
 const
   MIN_MATCH = 3;
@@ -320,7 +338,7 @@ end;
 { ---------------------------------------------------------------- deflate.c }
 
 function ZlibChoices(const plain: TBytes; const prm: TZlibParams; ref: PZStream;
-  out z: TZStream): Boolean;
+  out z: TZStream; threads: Integer): Boolean;
 var
   n: SizeInt;                       { input length }
   wsize, wmask, maxDist: SizeInt;
@@ -328,12 +346,16 @@ var
   head: array of SizeInt;
   prev: array of SizeInt;
   { DeflateC's chains skipped (ppazlibc.c): for each position, the last one
-    before it with the same 3, 4 and 8 bytes, through the tables t3, t4 and
-    t8; its order in its hash chain, by cnt, each chain's insertions }
-  nx3, nx4, nx8: array of SizeInt;
+    before it with the same 4 and 8 bytes, through the tables t4 and t8
+    (the same 3 bytes: zlib's own chain, walked); its order in its hash
+    chain, by cnt, each chain's insertions }
+  nx4, nx8: array of SizeInt;
+  { the same 16 bytes, for the long chains of levels 8 and 9 only }
+  nx16: array of SizeInt;
+  t16: array of LongWord;
   chainOrd: array of LongWord;
   cnt: array of LongWord;
-  t3, t4, t8: array of LongWord;
+  t4, t8: array of LongWord;
   skipBits: Integer;
   insH: LongWord;
   strstart, matchStart, prevMatch, blockStart, winBase: SizeInt;
@@ -685,8 +707,9 @@ var
     st.plain := @plain[0]; st.n := n;
     st.wsize := wsize; st.wmask := wmask; st.maxDist := maxDist;
     st.hashMask := hashMask; st.hashShift := hashShift;
-    st.head := @head[0]; st.prev := @prev[0]; st.nx3 := @nx3[0]; st.nx4 := @nx4[0]; st.nx8 := @nx8[0];
-    st.ord := @chainOrd[0]; st.cnt := @cnt[0]; st.t3 := @t3[0]; st.t4 := @t4[0]; st.t8 := @t8[0];
+    st.head := @head[0]; st.prev := @prev[0]; st.nx4 := @nx4[0]; st.nx8 := @nx8[0];
+    st.ord := @chainOrd[0]; st.cnt := @cnt[0]; st.t4 := @t4[0]; st.t8 := @t8[0];
+    if Length(t16) > 0 then begin st.nx16 := @nx16[0]; st.t16 := @t16[0]; end;
     st.insH := insH;
     st.strstart := strstart; st.matchStart := matchStart; st.prevMatch := prevMatch; st.winBase := winBase;
     st.matchLength := matchLength; st.prevLength := prevLength; st.matchAvailable := matchAvailable;
@@ -719,6 +742,171 @@ var
     until False;
   end;
 
+  { deflate_slow on several threads, the same tokens and blocks (levels 4 to
+    9, default or filtered strategy, nothing to compare with). The input is
+    cut into segments, and each is parsed on its own from its start: the
+    window before it inserted first (deflate_slow inserts every position,
+    so its chains and skip links are then the whole run's), with no match
+    pending, as the run is just after each match. Where a segment and the
+    next both end a match at the same position, from there on they make the
+    same tokens: the tokens are taken from one up to that position and from
+    the next after it. Then the blocks, in order, as the run ends them (a
+    block's symbols full; whether it may be stored is decided with the
+    window base the run had, which follows from the positions). False, and
+    nothing changed, where two segments did not meet: the caller runs
+    deflate_slow alone. }
+  function ParallelSlow: Boolean;
+  type
+    TSeg = record
+      a, stopAt, nTok, nSync, endLit, tokBase: SizeInt;
+      syncPos, syncTok: array of SizeInt;
+    end;
+  var
+    segs: array of TSeg;
+    nSeg, segLen, segRoom, k, i, j, pos, iterStart, t, total, piece, tl: SizeInt;
+    tlen, tval: Integer;
+    from, upTo: array of SizeInt;
+    toks: PWord;                    { every segment's tokens: lengths, then values }
+    ok: Boolean;
+
+    procedure RunSeg(k: SizeInt);
+    var st: TZDeflate; hd, pv, n4, n8, n16: array of SizeInt; o32, c32, a4, a8, a16: array of LongWord;
+        lf, df: array of LongInt; sb, len, pre, r, maxSync: SizeInt;
+    begin
+      with segs[k] do begin
+        len := stopAt - a;
+        if stopAt = 0 then len := n - a;
+        pre := a - wsize; if pre < 0 then pre := 0;
+        hd := nil; SetLength(hd, hashSize); pv := nil; SetLength(pv, wsize);
+        n4 := nil; SetLength(n4, wsize); n8 := nil; SetLength(n8, wsize);
+        o32 := nil; SetLength(o32, wsize); c32 := nil; SetLength(c32, hashSize);
+        { a segment's tables: its window's positions live, a few times their
+          number of slots is enough (and stays in the cache) }
+        sb := SKIP_BITS_MIN;
+        while (sb < PAR_SKIP_BITS) and (SizeInt(1) shl sb < 2 * (len + a - pre)) do Inc(sb);
+        a4 := nil; SetLength(a4, 1 shl sb); a8 := nil; SetLength(a8, 1 shl sb);
+        n16 := nil; a16 := nil;
+        if CONFIG[prm.level, 3] >= 1024 then begin SetLength(n16, wsize); SetLength(a16, 1 shl sb); end;
+        lf := nil; SetLength(lf, L_CODES); df := nil; SetLength(df, D_CODES);
+        { the syncs near its start and in the overlap only }
+        maxSync := 2 * PAR_OVERLAP div 3 + 16;
+        syncPos := nil; SetLength(syncPos, maxSync); syncTok := nil; SetLength(syncTok, maxSync);
+        st := Default(TZDeflate);
+        st.plain := @plain[0]; st.n := n;
+        st.wsize := wsize; st.wmask := wmask; st.maxDist := maxDist;
+        st.hashMask := hashMask; st.hashShift := hashShift;
+        st.head := @hd[0]; st.prev := @pv[0]; st.nx4 := @n4[0]; st.nx8 := @n8[0];
+        st.ord := @o32[0]; st.cnt := @c32[0]; st.t4 := @a4[0]; st.t8 := @a8[0];
+        if Length(a16) > 0 then begin st.nx16 := @n16[0]; st.t16 := @a16[0]; end;
+        st.skipBits := sb;
+        ppaz_preinsert(st, pre, a);
+        st.strstart := a; st.matchStart := 0; st.prevMatch := 0; st.winBase := 0;
+        st.matchLength := MIN_MATCH - 1; st.prevLength := MIN_MATCH - 1; st.matchAvailable := 0;
+        st.goodMatch := goodMatch; st.maxLazy := maxLazy; st.niceMatch := niceMatch; st.maxChain := maxChain;
+        st.filtered := Ord(prm.strategy = Z_FILTERED); st.fast := 0;
+        st.tokLen := toks + tokBase; st.tokVal := toks + tl + tokBase; st.nTok := 0;
+        st.lfreq := @lf[0]; st.dfreq := @df[0];
+        st.symNext := 0; st.symEnd := High(SizeInt);
+        st.lengthCode := @LengthCode[0]; st.distCode := @DistCode[0];
+        st.stopAt := stopAt;
+        { its start is where it meets the segment before it }
+        syncPos[0] := a; syncTok[0] := 0;
+        st.syncPos := @syncPos[1]; st.syncTok := @syncTok[1]; st.maxSync := maxSync - 1;
+        st.syncLo := a + PAR_OVERLAP;
+        if stopAt = 0 then st.syncHi := High(SizeInt) else st.syncHi := stopAt - PAR_OVERLAP;
+        r := ppaz_deflate(st);
+        if (r <> ZD_SEGEND) and (r <> ZD_DONE) then nTok := -1 else nTok := st.nTok;
+        nSync := st.nSync + 1;
+        endLit := st.endLit;
+      end;
+    end;
+
+    function Slided(x: SizeInt): SizeInt;
+    begin
+      Result := 0;
+      while x - Result >= wsize + maxDist do Inc(Result, wsize);
+    end;
+
+  begin
+    Result := False;
+    { two segments a thread: one that is slower to parse (a photo's detail
+      against its sky) leaves less of the others waiting }
+    nSeg := 2 * threads;
+    if nSeg > n div PAR_SEG_MIN then nSeg := n div PAR_SEG_MIN;
+    if nSeg < 2 then Exit;
+    segLen := (n + nSeg - 1) div nSeg;
+    segRoom := segLen + PAR_OVERLAP + 16;
+    tl := nSeg * segRoom;
+    segs := nil; SetLength(segs, nSeg);
+    for k := 0 to nSeg - 1 do begin
+      segs[k] := Default(TSeg);
+      segs[k].a := k * segLen;
+      segs[k].tokBase := k * segRoom;
+      if k = nSeg - 1 then segs[k].stopAt := 0
+      else begin
+        segs[k].stopAt := (k + 1) * segLen + PAR_OVERLAP;
+        if segs[k].stopAt >= n then segs[k].stopAt := 0;
+      end;
+    end;
+    GetMem(toks, 2 * tl * SizeOf(Word));
+    try
+      ParallelFor(nSeg, threads, @RunSeg);
+      for k := 0 to nSeg - 1 do if segs[k].nTok < 0 then Exit;
+      { where each segment hands over to the next: the first position past
+        the next one's start where both just ended a match }
+      from := nil; SetLength(from, nSeg); upTo := nil; SetLength(upTo, nSeg);
+      from[0] := 0;
+      for k := 1 to nSeg - 1 do begin
+        ok := False;
+        i := 0; j := 0;
+        while (i < segs[k - 1].nSync) and (j < segs[k].nSync) do begin
+          if segs[k - 1].syncPos[i] < segs[k].syncPos[j] then Inc(i)
+          else if segs[k - 1].syncPos[i] > segs[k].syncPos[j] then Inc(j)
+          else if segs[k - 1].syncTok[i] < from[k - 1] then begin Inc(i); Inc(j); end
+          else begin ok := True; Break; end;
+        end;
+        if not ok then Exit;
+        upTo[k - 1] := segs[k - 1].syncTok[i];
+        from[k] := segs[k].syncTok[j];
+      end;
+      upTo[nSeg - 1] := segs[nSeg - 1].nTok;
+      { the tokens, in order, and the blocks as deflate_slow ends them }
+      total := 0;
+      for k := 0 to nSeg - 1 do Inc(total, upTo[k] - from[k]);
+      SetLength(z.tokLen, total + 8); SetLength(z.tokVal, total + 8);
+      { TallyLit and TallyDist inlined (nothing to compare with): a token a
+        step, the blocks' frequencies counted, a block ended where its
+        symbols are full }
+      pos := 0; t := 0;
+      for k := 0 to nSeg - 1 do
+        for piece := segs[k].tokBase + from[k] to segs[k].tokBase + upTo[k] - 1 do begin
+          Inc(t);
+          tlen := toks[piece]; tval := toks[tl + piece];
+          z.tokLen[nTok] := tlen; z.tokVal[nTok] := tval; Inc(nTok);
+          if tlen = 0 then begin
+            Inc(ltree.freq[tval]);
+            Inc(pos); iterStart := pos;
+          end else begin
+            Inc(ltree.freq[LengthCode[tlen - MIN_MATCH] + LITERALS + 1]);
+            Inc(dtree.freq[DistCode[tval - 1]]);
+            iterStart := pos + 1; Inc(pos, tlen);
+          end;
+          Inc(symNext);
+          { the literal deflate_slow emits after its loop ends no block }
+          if (symNext = symEnd) and not ((t = total) and (segs[nSeg - 1].endLit <> 0)) then begin
+            strstart := pos; winBase := Slided(iterStart);
+            FlushBlock(False);
+          end;
+        end;
+    finally
+      FreeMem(toks);
+    end;
+    if pos <> n then raise Exception.Create('ppazlib: the segments do not cover the input');
+    strstart := n; winBase := Slided(n);
+    FlushBlock(True);
+    Result := True;
+  end;
+
 var wb: Integer;
 begin
   z := Default(TZStream);
@@ -731,12 +919,16 @@ begin
   head := nil; SetLength(head, hashSize);
   prev := nil; SetLength(prev, wsize);
   if UseZlibC then begin
-    nx3 := nil; SetLength(nx3, wsize); nx4 := nil; SetLength(nx4, wsize); nx8 := nil; SetLength(nx8, wsize);
+    nx4 := nil; SetLength(nx4, wsize); nx8 := nil; SetLength(nx8, wsize);
     chainOrd := nil; SetLength(chainOrd, wsize); cnt := nil; SetLength(cnt, hashSize);
     skipBits := SKIP_BITS_MIN;
     while (skipBits < SKIP_BITS_MAX) and (SizeInt(1) shl skipBits < 2 * n) do Inc(skipBits);
-    t3 := nil; SetLength(t3, 1 shl skipBits); t4 := nil; SetLength(t4, 1 shl skipBits);
+    t4 := nil; SetLength(t4, 1 shl skipBits);
     t8 := nil; SetLength(t8, 1 shl skipBits);
+    nx16 := nil; t16 := nil;
+    if CONFIG[prm.level, 3] >= 1024 then begin
+      SetLength(nx16, wsize); SetLength(t16, 1 shl skipBits);
+    end;
   end;
   symEnd := (1 shl (prm.memLevel + 6)) - 1;
   goodMatch := CONFIG[prm.level, 0]; maxLazy := CONFIG[prm.level, 1];
@@ -756,6 +948,8 @@ begin
 
   if prm.strategy = Z_HUFFMAN_ONLY then DeflateHuff
   else if prm.strategy = Z_RLE then DeflateRle
+  else if UseZlibC and (ref = nil) and (threads > 1) and (prm.level >= 4) and (n >= PAR_MIN_BYTES) and
+          (prm.strategy in [Z_DEFAULT_STRATEGY, Z_FILTERED]) and ParallelSlow then
   else if UseZlibC and (n > 0) then DeflateC(prm.level <= 3)
   else if prm.level <= 3 then DeflateFast
   else DeflateSlow;
@@ -775,9 +969,24 @@ begin
 end;
 
 function FindZlibParams(const z: TZStream; out prm: TZlibParams; out choices: TZStream): Boolean;
-var lvMin, lvMax, wbMin, lv, st, ml, wb: Integer;
+var lvMin, lvMax, wbMin, lv, st, ml, wb, k, first: Integer; order: array[0..8] of Integer;
 const ML_ORDER: array[0..8] of Integer = (8, 9, 7, 6, 5, 4, 3, 2, 1);
 begin
+  { zlib ends a block when its symbols fill the buffer memLevel sizes,
+    2^(memLevel + 6) - 1 of them: a first block of that many, with more
+    after it, names the memLevel to try first (the others still follow:
+    a writer that flushes gives blocks of other lengths) }
+  order := ML_ORDER;
+  first := 0;
+  if Length(z.blocks) > 1 then
+    for ml := 1 to 9 do
+      if z.blocks[0].nTokens = (SizeInt(1) shl (ml + 6)) - 1 then first := ml;
+  if first > 0 then begin
+    k := 0;
+    while order[k] <> first do Inc(k);
+    while k > 0 do begin order[k] := order[k - 1]; Dec(k); end;
+    order[0] := first;
+  end;
   Result := False;
   prm := Default(TZlibParams);
   choices := Default(TZStream);
@@ -795,7 +1004,7 @@ begin
         for lv := lvMin to lvMax do begin
           { huffman and rle do not depend on the level }
           if (st in [Z_HUFFMAN_ONLY, Z_RLE]) and (lv <> lvMin) then Continue;
-          prm.level := lv; prm.strategy := st; prm.memLevel := ML_ORDER[ml]; prm.wbits := wb;
+          prm.level := lv; prm.strategy := st; prm.memLevel := order[ml]; prm.wbits := wb;
           if ZlibChoices(z.plain, prm, @z, choices) then Exit(True);
         end;
 end;
@@ -831,4 +1040,7 @@ end;
 initialization
   MakeTables;
   UseZlibC := GetEnvironmentVariable('PPA_NOC') <> '1';
+  PAR_MIN_BYTES := StrToInt64Def(GetEnvironmentVariable('PPA_TEST_PAR_BYTES'), PAR_MIN_BYTES_DEFAULT);
+  if PAR_MIN_BYTES < 64 then PAR_MIN_BYTES := PAR_MIN_BYTES_DEFAULT;
+  PAR_SEG_MIN := PAR_MIN_BYTES div 4;
 end.

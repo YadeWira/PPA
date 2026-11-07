@@ -388,9 +388,10 @@ model codes at the cost of a table lookup a sample:
   before plus MED of the differences to it. Blending eight predictors, as
   the fast model does, gave only 1.3% more here: the counters' adaptation
   is what used it.
-- **The residual**, folded and zigzagged to a symbol 0..255, in one of 64
-  contexts: an energy bin (the residuals around, the channel before's, the
-  gradient) by channel. Each context's frequencies (12 bits) are counted
+- **The residual**, folded and zigzagged to a symbol 0..255, in one of 320
+  contexts (64 until 07/11/2026, below): an energy bin (the residuals
+  around, the channel before's, the gradient) by channel, by the channel
+  before's residual in five levels. Each context's frequencies (12 bits) are counted
   over the band and sent before it; the symbols are coded by **rANS** (one
   32-bit state, a byte at a time). Huffman codes were tried first: twice
   the entropy on smooth photos, where the zero residual is more likely than
@@ -425,6 +426,59 @@ alone: 55.02%; the slow one everywhere: 51.03%).
 
 What is left of `ppa x` is mostly zlib's choices rebuilt: about 0.45 s of
 the photo's 0.74 s.
+
+## Ratio and speed, second pass (07/11/2026)
+
+Measured first (`ppa a/x --stats`, callgrind, and a bench of zlib's
+choices alone): on the 20 photos, `x` was 4.8 s of pixels decoded and 8.8 s
+of deflate streams rebuilt; `a`, the zlib parameter search and the
+verification, which rebuilt every stream again. zlib 1.3.1 itself takes
+9.1 s to write those 20 streams (level 7, filtered, memLevel 9); PPA's
+choices took 7.6 s, the skip links half of it.
+
+- **The static model's contexts**: the residual of the channel before, in
+  five levels (below -2, -2 or -1, 0, 1 or 2, above 2), joins the energy
+  bin: 320 contexts. Their symbol tables a sixteenth as large (the slot of
+  every 16th, then up while the next range starts at or before it), so
+  that they stay in the cache. A prototype on the 20 photos tried more: a
+  texture bit (-0.4%), CALIC's bias correction (-0.25%), finer energy bins
+  (nothing), the fast model's eight predictors blended (-1.8% more, three
+  times the time); adaptive frequencies with the same contexts are larger
+  than the static ones.
+- **zlib's choices**: the same 3 bytes on zlib's own chain (no table of
+  their own: it cost more to keep than it saved), the walk resumed from the
+  link not known instead of from the start, and links of the same 16 bytes
+  for levels 8 and 9, whose chains are long (an animation's frames spent
+  most of their time on the 8 bytes' chain with matches of 16 to 31).
+  Every stream of the three sets back bit for bit.
+- **The search for zlib's parameters**: the memLevel the first block's
+  length names (2^(memLevel + 6) - 1 symbols) tried first.
+- **The verification**: each image's deflate stream is not written again;
+  what the decoder refilters is compared with the inflated bytes, whose
+  stream the parameters were checked to give when planned.
+- **BLAKE3**: PJA's C (four chunks at a time in SSE2) for `ppablake3` too.
+- **The deflate streams rebuilt on several threads** (levels 4 to 9,
+  default or filtered strategy), the same tokens and blocks: each segment
+  is parsed on its own from its start, the window before it inserted first
+  (deflate_slow inserts every position); after a match the parse is as it
+  starts, so where a segment and the next both end a match at the same
+  position, the tokens are taken from one up to there and from the other
+  after; the blocks then in order, as deflate_slow ends them. A segment
+  that does not meet the next (none was seen) falls back to one thread.
+  `PPA_TEST_PAR_BYTES` cuts the samples into segments for the tests.
+
+Measured one after the other, the release 0.1.0 and this (the machine
+somewhat busier than for the tables above):
+
+| the 20 photos | 0.1.0 | after |
+|---|---|---|
+| size | 62.29% | **61.20%** |
+| `ppa a`, one thread | 41.2 s | **29.4 s** |
+| `ppa x`, one thread | 14.2 s | **13.7 s** |
+| `ppa a` / `ppa x`, -th 8 | 6.7 s / 2.4 s | 5.6 s / 2.5 s |
+| one photo's `ppa x` (1920x1080), -th 1 / -th 8 | 0.86 s | 0.86 s / **0.32 s** |
+| the corpus, size | 56.79% | **56.38%** |
+| the generated set, size | 61.91% | **61.53%** |
 
 ## Speed, first pass (31/10/2026)
 
