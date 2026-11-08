@@ -18,7 +18,15 @@
   Each block carries 16 bytes before it, its size and a mark, so that
   blocks stay aligned as the process heap gives them (16 bytes on x64, 8 on
   x86) and a block the runtime took before this unit started is told apart
-  and given back to the manager that took it. }
+  and given back to the manager that took it.
+
+  And 16 bytes after it, never used: FreePascal reads a little past the
+  end of an array where that is harmless with its own heap, whose blocks
+  always have room after them (on i386, `w[i] and $1F` of an array of Word
+  loads 4 bytes for the last element's 2). The process heap can end a
+  block where its memory ends, and Windows XP's often did: an access
+  violation once in a while, which a 32-bit 7-Zip on XP showed as a data
+  error (found testing 0.1.1 on 07/11/2026). }
 unit ppaheap;
 
 {$mode objfpc}
@@ -31,6 +39,7 @@ implementation
 const
   HEAP_ZERO_MEMORY = 8;
   HEAD_BYTES = 16;
+  TAIL_BYTES = 16;
   OURS = PtrUInt({$ifdef cpu64}$9E3779B97F4A7C15{$else}$9E3779B9{$endif});
 
 type
@@ -69,8 +78,8 @@ end;
 function Take(size: PtrUInt; flags: LongWord): Pointer;
 var h: PHeader;
 begin
-  if size > High(PtrUInt) - HEAD_BYTES then Exit(Fail);
-  h := HeapAlloc(heap, flags, size + HEAD_BYTES);
+  if size > High(PtrUInt) - HEAD_BYTES - TAIL_BYTES then Exit(Fail);
+  h := HeapAlloc(heap, flags, size + HEAD_BYTES + TAIL_BYTES);
   if h = nil then Exit(Fail);
   h^.size := size;
   h^.mark := OURS;
@@ -116,8 +125,8 @@ begin
   end else if p = nil then
     p := HGetMem(size)
   else if Mine(p) then begin
-    if size > High(PtrUInt) - HEAD_BYTES then Exit(Fail);
-    h := HeapReAlloc(heap, 0, p - HEAD_BYTES, size + HEAD_BYTES);
+    if size > High(PtrUInt) - HEAD_BYTES - TAIL_BYTES then Exit(Fail);
+    h := HeapReAlloc(heap, 0, p - HEAD_BYTES, size + HEAD_BYTES + TAIL_BYTES);
     if h = nil then Exit(Fail);
     h^.size := size;
     p := Pointer(h) + HEAD_BYTES;

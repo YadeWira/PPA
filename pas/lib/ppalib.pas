@@ -48,8 +48,9 @@ type
     outSize: SizeUInt;
     ok, threads: LongInt;
     done: LongInt;
-    { decoding, not ok: 1 when the stream is of a later version (PPA_E_VERSION) }
-    newer: LongInt;
+    { decoding, not ok: 1 when the stream is of a later version
+      (PPA_E_VERSION), 2 when there was no memory for it (PPA_E_MEMORY) }
+    cause: LongInt;
   end;
   PJob = ^TJob;
   { ppafilter.c's host_t }
@@ -171,20 +172,31 @@ end;
 procedure RunJob(var j: TJob; packing: Boolean; threads: Integer);
 var b: TBytes; why: string; st: TCodecStats; fail: TDecodeFailure;
 begin
-  j.output := nil; j.outSize := 0; j.ok := 0; j.newer := 0;
+  j.output := nil; j.outSize := 0; j.ok := 0; j.cause := 0;
   try
     if packing then begin
       if not Compress(InBytes(j.input, j.size), b, why, st, True, threads) then Exit;
     end else begin
       if not DecompressEx(InBytes(j.input, j.size), Int64(j.expected), b, why, fail, threads) then begin
-        if fail = dfFuture then j.newer := 1;
+        if fail = dfFuture then j.cause := 1
+        else if fail = dfMemory then j.cause := 2;
         Exit;
       end;
     end;
-    if Hand(b, j.output, j.outSize) then j.ok := 1;
+    if Hand(b, j.output, j.outSize) then j.ok := 1
+    else if not packing then j.cause := 2;
   except
-    if j.output <> nil then FreeMem(j.output);
-    j.output := nil; j.ok := 0;
+    { no memory for the input's copy (decoding: an error of its own, not
+      damage; encoding: the file stays among the raw bytes) }
+    on EOutOfMemory do begin
+      if j.output <> nil then FreeMem(j.output);
+      j.output := nil; j.ok := 0;
+      if not packing then j.cause := 2;
+    end;
+    else begin
+      if j.output <> nil then FreeMem(j.output);
+      j.output := nil; j.ok := 0;
+    end;
   end;
 end;
 

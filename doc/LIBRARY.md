@@ -180,6 +180,11 @@ FreePascal 3.2.2's heap, in a DLL, deletes its lock when the thread that
 loaded the DLL ends, and 7-Zip's file manager loads its codecs from such a
 short-lived thread (PJA found it, crashing in 7zFM). With the memory gone
 it returns nil, never a runtime error, so a host gets `PPA_E_MEMORY`.
+Each block has 16 bytes to spare after it: FreePascal's code reads a few
+bytes past the end of an array (on 32-bit x86, a 4-byte load for a 2-byte
+element), harmless with its own heap but not where the process heap ends a
+block at the end of its memory, as Windows XP's did: a 32-bit 7-Zip on XP
+then failed now and then with "Data Error" (found testing 0.1.1).
 
 PJA's codec (a JNG's JPEG) keeps its models (about 18 MB) in threadvars,
 which FreePascal does not free when a thread of the host ends: every call

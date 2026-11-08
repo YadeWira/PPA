@@ -59,9 +59,10 @@ typedef struct {
   size_t out_size;
   int ok, threads;
   volatile int done;  /* set by the pool */
-  /* decoding, not ok: 1 when the file's codec stream is of a later
-     version (PPA_E_VERSION rather than PPA_E_DATA) */
-  int newer;
+  /* decoding, not ok: why, when it is not damage (PPA_E_DATA): 1, the
+     file's codec stream is of a later version (PPA_E_VERSION); 2, there
+     was no memory for it (PPA_E_MEMORY) */
+  int cause;
 } job_t;
 typedef struct {
   void *(*alloc)(size_t size);
@@ -236,7 +237,7 @@ static void submit(in_t *s, size_t c, size_t len) {
   uint8_t *in = H.alloc(len);
   if (!in) { s->err = PPA_E_MEMORY; return; }
   copy(in, s->buf + c, len);
-  f->in = in; f->size = len; f->expected = 0; f->out = 0; f->out_size = 0; f->ok = 0; f->done = 0; f->newer = 0;
+  f->in = in; f->size = len; f->expected = 0; f->out = 0; f->out_size = 0; f->ok = 0; f->done = 0; f->cause = 0;
   /* a file alone gets the threads for its images; more files share them */
   f->threads = s->threads / (s->np + 1);
   if (f->threads < 1) f->threads = 1;
@@ -419,7 +420,7 @@ static int retire_item(queue_t *q, out_t *o) {
   if (!it->file) put(o, it->job.in, it->job.size);
   else {
     H.pool_wait(q->pool, &it->job);
-    if (!it->job.ok) res = it->job.newer ? PPA_E_VERSION : PPA_E_DATA;
+    if (!it->job.ok) res = it->job.cause == 1 ? PPA_E_VERSION : it->job.cause == 2 ? PPA_E_MEMORY : PPA_E_DATA;
     else if (it->job.out_size != it->job.expected) res = PPA_E_DATA;
     else put(o, it->job.out, it->job.out_size);
   }
@@ -475,7 +476,7 @@ int ppafilter_decode(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void 
       uint8_t *st = H.alloc((size_t)n);
       if (!st) { res = PPA_E_MEMORY; break; }
       it->file = 0; it->job.in = st; it->job.size = (size_t)n; it->job.expected = (size_t)size;
-      it->job.out = 0; it->job.out_size = 0; it->job.ok = 0; it->job.done = 0; it->job.newer = 0;
+      it->job.out = 0; it->job.out_size = 0; it->job.ok = 0; it->job.done = 0; it->job.cause = 0;
       q.n++; q.bytes += (size_t)n;
       if (rd(&r, st, (size_t)n) != n) break;
       q.bytes += (size_t)size - (size_t)n;
