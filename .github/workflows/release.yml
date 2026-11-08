@@ -86,9 +86,9 @@ jobs:
           case $P in windows-*) LIB=ppa.dll ;; macos-*) LIB=ppa.dylib ;; *) LIB=ppa.so ;; esac
           CLI=ppa-$V-$P; LIBP=ppa-$V-lib-$P
           mkdir -p dist "$CLI" "$LIBP"
-          cp build/rel/ppa$EXE README.md LICENSE doc/CLI.md "$CLI/"
+          cp build/rel/ppa$EXE README.md LICENSE NOTICE doc/CLI.md "$CLI/"
           # libppa: the C library and 7-Zip / 7-Zip-zstd plugin
-          cp build/rel/lib/$LIB pas/lib/ppa.h doc/LIBRARY.md LICENSE "$LIBP/"
+          cp build/rel/lib/$LIB pas/lib/ppa.h doc/LIBRARY.md LICENSE NOTICE "$LIBP/"
           # PJA's codec is inside (a JNG's JPEG): its license and notices
           for d in "$CLI" "$LIBP"; do
             cp vendor/pja/LICENSE "$d/LICENSE-PJA"

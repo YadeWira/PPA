@@ -51,7 +51,7 @@ comes back byte for byte, and nothing is written unless it verified.
 
 A deflate stream that zlib did not write (zopfli, libdeflate, advpng)
 goes through as bytes for now, and so does anything else; `ppa info` says
-what PPA does with a file ([details](doc/CODEC.md)).
+what PPA does with a file ([details][wHandles]).
 
 ## Install
 
@@ -59,7 +59,7 @@ Download the command for your platform from the [latest release][relLink]:
 Linux (x86-64, x86, arm64; glibc 2.34 or later: Debian 12, Ubuntu 22.04,
 RHEL 9 and newer), macOS (Apple silicon) or Windows (x64, and x86 from XP
 on). Each build is tested by CI on its own platform, and a `.ppa` made on
-one opens on any other.
+one opens on any other ([installing][wInstall], [platforms][wPlat]).
 
 ```sh
 ppa a *.png --output-dir=packed   # compress many
@@ -77,7 +77,7 @@ default: preflate and WebP-lossless) and
 [precomp](https://github.com/schnaader/precomp-cpp) 0.4.7 (preflate and
 LZMA). Each set's whole output against its input, every file extracted and
 compared; a file a tool does not take would count at its own size (every
-tool took every file).
+tool took every file; [how, and the details][wComp]).
 
 | set | files | size | packPNG 2.0b | precomp 0.4.7 | PPA 0.1.1 |
 |---|---|---|---|---|---|
@@ -108,7 +108,7 @@ times slower to extract.
 PPA's first rule is that the original comes back byte for byte, or nothing
 is written. Measured against the other PNG recompressors on the same 20
 files (15 to 266 KB, PNG, MNG, JNG and CgBI) with PJA's method, on
-07/11/2026:
+07/11/2026 ([how][wSafe]):
 
 | | PPA 0.1.1 | packPNG 2.0l | precomp 0.4.7 |
 |---|---|---|---|
@@ -151,7 +151,8 @@ default level; 7-Zip and zpaq-std 2.0.3 without PPA for reference
 image (the corpus holds the same pictures in several files, the generated
 set five images written many ways): in one solid block LZMA2 finds the
 repeats PPA alone cannot. Aqueous is much faster and takes PNG too, but
-leaves 1.3 to 2.2 times as much.
+leaves 1.3 to 2.2 times as much. Why each number is what it is: [the
+benchmarks page][wComp].
 
 ## In 7-Zip and zpaq-std
 
@@ -166,11 +167,11 @@ x86 for 32-bit) in the `Codecs` folder next to 7-Zip, and
 (in 7-Zip's window: **Parameters** `0=PPA 1=LZMA2`). PPA goes first in the
 chain as a filter: it recompresses the PNG, MNG and JNG files of the solid
 block and passes every other byte on. Extracting needs the plugin too
-(7-Zip 23 or later on Linux and macOS; [details](doc/LIBRARY.md)). The
+(7-Zip 23 or later on Linux and macOS; [details][wLib]). The
 same library is a C API (`ppa.h`) for any program.
 
 **zpaq-std**: PPA's codecs with ZPAQL decoders, so that any zpaq extracts
-the blocks, are being written.
+the blocks, are being written ([the plan][wPlugin]).
 
 ## Reporting a bug
 
@@ -182,18 +183,20 @@ It writes a plain-text report (PPA's build, the system, the command line,
 and the file's size, hash and structure, but no pixels, no metadata
 contents and no folder names) and prints a link that opens a [new
 issue][issues] with it filled in. `--with-file` puts a copy of the file
-beside it, to attach if you choose to
-([doc/CLI.md](doc/CLI.md#checking-and-reporting)). A bug ends a run with
+beside it, to attach if you choose to ([details][wBugs],
+[doc/CLI.md](doc/CLI.md#checking-and-reporting)). A bug ends a run with
 exit status 3; `ppa selftest` checks a build on the samples inside it.
 
 ## More
 
-The codec's notes and every measurement are in
-[doc/CODEC.md](doc/CODEC.md), the file format in
+The [wiki][wiki] has the rest: [benchmarks][wComp], [the library and
+7-Zip plugin][wLib], the [zpaq-std plugin][wPlugin] to come, [building and
+testing][wBuild], [how it works][wHow], the [source layout][wLayout],
+[FreePascal pitfalls][wFpc] and the [release history][wRel]. The codec's
+full notes are in [doc/CODEC.md](doc/CODEC.md), the file format in
 [doc/FORMAT.md](doc/FORMAT.md), what does not change in
-[doc/STABILITY.md](doc/STABILITY.md), the library and 7-Zip plugin in
-[doc/LIBRARY.md](doc/LIBRARY.md), the test files in
-[tests/README.md](tests/README.md). A wiki, as PJA's, is being written.
+[doc/STABILITY.md](doc/STABILITY.md), the library in
+[doc/LIBRARY.md](doc/LIBRARY.md).
 
 ## Building
 
@@ -217,3 +220,17 @@ choices are ported from zlib; see `NOTICE` for those and other credits.
 [relBadge]: https://img.shields.io/github/v/release/YadeWira/PPA "Latest release"
 [relLink]: https://github.com/YadeWira/PPA/releases/latest
 [issues]: https://github.com/YadeWira/PPA/issues
+[wiki]: https://github.com/YadeWira/PPA/wiki
+[wComp]: https://github.com/YadeWira/PPA/wiki/Benchmarks
+[wSafe]: https://github.com/YadeWira/PPA/wiki/Safety-and-robustness
+[wHandles]: https://github.com/YadeWira/PPA/wiki/What-PPA-handles
+[wInstall]: https://github.com/YadeWira/PPA/wiki/Installing
+[wPlat]: https://github.com/YadeWira/PPA/wiki/Platforms
+[wLib]: https://github.com/YadeWira/PPA/wiki/Library-and-7-Zip
+[wPlugin]: https://github.com/YadeWira/PPA/wiki/The-zpaq-std-plugin
+[wBuild]: https://github.com/YadeWira/PPA/wiki/Building
+[wHow]: https://github.com/YadeWira/PPA/wiki/How-it-works
+[wLayout]: https://github.com/YadeWira/PPA/wiki/Source-layout
+[wFpc]: https://github.com/YadeWira/PPA/wiki/FreePascal-pitfalls
+[wRel]: https://github.com/YadeWira/PPA/wiki/Releases
+[wBugs]: https://github.com/YadeWira/PPA/wiki/Reporting-bugs
