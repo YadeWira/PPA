@@ -13,7 +13,7 @@ what is compared, not a stored copy); the include holds its size and
 BLAKE3-128 (its bytes would only double the binary's samples).
 
 The .ppa of a sample changes when a stream or the format changes (they
-are not frozen before 1.0.0): then this is run again, and CI's --check
+are not frozen before 0.9.0): then this is run again, and CI's --check
 says when it was forgotten.
 
     tools/gen_selftest.py <ppa binary>            write the include

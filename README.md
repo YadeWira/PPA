@@ -23,10 +23,10 @@ adaptive one; the slowest and smallest, which `--max` takes for every
 image). The status of each layer, and everything measured, is in
 [`doc/CODEC.md`](doc/CODEC.md).
 
-**The formats are not frozen before 1.0.0**: until then a release may
+**The formats are not frozen before 0.9.0**: until then a release may
 change what it writes, but what a published release wrote is read by every
-later one ([`doc/STABILITY.md`](doc/STABILITY.md)); from 1.0.0 on the
-formats are fixed.
+later one ([`doc/STABILITY.md`](doc/STABILITY.md)); from 0.9.0 on the
+formats are fixed (and 1.0.0 brings a 7-Zip method ID of PPA's own).
 
 The original comes back **byte for byte**, and nothing is written under an
 output's name unless it verified: compressing decompresses the result and

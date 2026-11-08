@@ -1,14 +1,15 @@
 # What does not change
 
-PPA's formats are **not frozen before 1.0.0** (the family's rule, Wira's
-decision of 01/11/2026). Until then a release may change what it writes.
+PPA's formats are **not frozen before 0.9.0** (Wira's decision of
+07/11/2026, as PJA's). Until then a release may change what it writes.
 What it may not do is stop reading what a published release wrote: every
 `.ppa`, filter stream and 7-Zip archive a published PPA wrote is read by
 every later release. A format change therefore comes with a new version
 number in the format, and the reader keeps the old one.
 
-From 1.0.0 every format below is fixed, as PJA's are from 0.9.0, and 1.0.0
-brings a 7-Zip method ID of PPA's own.
+From 0.9.0 every format below is fixed, as PJA's are from its 0.9.0.
+1.0.0 is the release that brings a 7-Zip method ID of PPA's own, once
+7-Zip gives one.
 
 What may always change: speed, the encoder's choices (which model an image
 takes, the bands, zlib's parameters it finds first), and the files PPA

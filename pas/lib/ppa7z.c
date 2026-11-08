@@ -19,8 +19,9 @@
    The method's ID, 03 7F 11, is in the slot 7-Zip's DOC/Methods.txt leaves
    for an experimental method (beside PJA's 03 7F 01 and 03 7F 02, so that
    both plugins can sit in the same Codecs folder), until 7-Zip gives PPA an
-   ID of its own. PPA's formats are not frozen before 1.0.0: an archive
-   written with a 0.x plugin may not open with a later one. */
+   ID of its own. PPA's formats are not frozen before 0.9.0: an archive
+   a later plugin wrote may not open with an earlier one (the other way
+   round it always does). */
 #include <stddef.h>
 #include <stdint.h>
 

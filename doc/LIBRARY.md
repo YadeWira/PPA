@@ -9,11 +9,11 @@ not differ):
 - a **codec plugin for 7-Zip and 7-Zip-zstd**, the method `PPA`, which is
   that filter.
 
-PPA's formats are not frozen before 1.0.0 (`FORMAT.md`): a `.ppa`, a filter
-stream or a 7-Zip archive written with a 0.x release may not open in a
-later one, which then says so (`PPA_E_VERSION`, 7-Zip's "Unsupported
-Method") where it can; what a published release wrote is read by the
-later ones.
+PPA's formats are not frozen before 0.9.0 (`FORMAT.md`,
+`STABILITY.md`): what a published release wrote is read by every later
+one, but a `.ppa`, a filter stream or a 7-Zip archive a later release
+wrote may not open in an earlier one, which then says so
+(`PPA_E_VERSION`, 7-Zip's "Unsupported Method").
 
 It is built from `pas/lib/`: `ppalib.pas` (the library, its exports and
 PPA's codec), `ppafilter.c` (the filter), `ppa7z.c` (7-Zip's interfaces),

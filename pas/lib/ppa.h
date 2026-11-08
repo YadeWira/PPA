@@ -25,9 +25,10 @@
    Every buffer the library returns is freed with ppa_free(), never with
    free().
 
-   PPA's formats are not frozen before 1.0.0 (doc/FORMAT.md): a .ppa or a
-   filter stream written by a 0.x release may not open in a later one; a
-   later release says so with PPA_E_VERSION where it can. */
+   PPA's formats are not frozen before 0.9.0 (doc/STABILITY.md): what a
+   published release wrote is read by every later one; a .ppa or a filter
+   stream a later release wrote may not open in an earlier one, which says
+   so with PPA_E_VERSION. */
 #ifndef PPA_H
 #define PPA_H
 

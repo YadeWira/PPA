@@ -148,7 +148,7 @@ jobs:
         run: |
           gh release view "$TAG" > /dev/null 2>&1 \
             || gh release create "$TAG" --verify-tag --title "PPA ${TAG#v}" \
-                 --notes "PPA ${TAG#v}. The formats are not frozen before 1.0.0: a .ppa made with a 0.x version may not open in a later one. The Linux builds need glibc 2.34 or later (Debian 12, Ubuntu 22.04, RHEL 9 and newer)."
+                 --notes "PPA ${TAG#v}. The formats are not frozen before 0.9.0: every later release reads what this one writes, but a file a later release writes may not open in this one. The Linux builds need glibc 2.34 or later (Debian 12, Ubuntu 22.04, RHEL 9 and newer)."
           gh release upload "$TAG" dist/* --clobber
           mkdir all
           gh release download "$TAG" --dir all --pattern 'ppa-*'

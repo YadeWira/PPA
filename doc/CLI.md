@@ -162,7 +162,7 @@ two, each is compressed, compared with its expected `.ppa`, and extracted
 back. `--path=PATH` checks that path alone. Exit 0 only if every check
 passed. CI runs it on every platform.
 
-The streams are not frozen before 1.0.0 (`FORMAT.md`): a change to one
+The streams are not frozen before 0.9.0 (`FORMAT.md`): a change to one
 changes some expected `.ppa`, `tools/gen_selftest.py` writes the include
 again, and `pas/run_tests.sh` fails while it is not current.
 

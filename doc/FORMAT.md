@@ -15,10 +15,10 @@ The codec verifies its own stream when compressing (it decompresses it and
 compares), so what the hash protects against is damage **after** writing.
 No encryption.
 
-**Not frozen before 1.0.0** (the family's rule): until then this layout and
+**Not frozen before 0.9.0** (as PJA's): until then this layout and
 the codec stream may change, each change with a new version number, and
 what a published release wrote is still read by every later one (a later
-release's file may not open in an earlier one, which says so). From 1.0.0
+release's file may not open in an earlier one, which says so). From 0.9.0
 on the formats are fixed. `doc/STABILITY.md` lists the versions.
 
 ## Layout
