@@ -1,0 +1,800 @@
+"""PPA's zlib deflate for ZPAQL: ppazlib.pas (zlib 1.3's choices, the Pascal
+reference path, PPA_NOC=1) and ppadeflate.pas's Encode (the bit writer and
+the stream's framing), as one function:
+
+    zdeflate(pbase, n, level, strategy, memlevel, wbits, flags, h0, h1, endpad)
+
+writes, through zout(c), the stream PPA's Encode writes for the plain bytes
+M[pbase .. pbase + n) and those parameters: the zlib header h0 h1 (unless
+flags bit 0, a bare deflate stream), the blocks, endpad in the bits up to
+the byte boundary, and the Adler-32 (flags bit 1, adlerOk). What follows it
+(zTail) is the caller's. zout() is the only way out: with zop set it
+writes M[zop ..] up to zoend (error() past it), which is how ppadec.zl
+takes the stream; with zop 0, out().
+
+Levels 1..9 (level 0, stored, is kept as bytes by the codec), strategies
+0..4, memLevel 1..9, wbits 8..15; anything else stops with error().
+
+Positions are absolute, as ppazlib's: the whole plain buffer stays in M, a
+byte past its end reads as 0, a hash head of 0 means none, and the window
+slide is followed only where it decides whether a block may be stored
+(winbase). Every value is 32 bits: the positions are below n (< 2^31), a
+block has at most 2^15 - 1 symbols, so optlen and statlen stay below
+32767 * 28 + 2^12 (< 2^20); their transient negative steps (BuildTree's
+dec, gen_bitlen's corrections) wrap and come back, the sums being exact
+modulo 2^32 and the final values non-negative. The signed places: maxcode
+starts at -1 (slt), gen_bitlen's overflow may end at -1 (sle).
+
+Memory.
+  M: the plain buffer, n bytes at pbase (the caller's), and with zop set
+     the stream written at zop .. zoend (the caller's too).
+  H: the arrays below, ZFIXED_WORDS = 8288 words (after zpaqlc's 8192-word
+     region of variables: 16480 words when compiled alone), plus the
+     scratch at zmem (set by the caller, zeroed here on each call):
+       zwords(memlevel, wbits) = 2^(memlevel+7)   hash heads
+                               + 2^max(wbits,9)   prev (the chains)
+                               + 2^(memlevel+6)   one block's symbols
+     memLevel 8, wbits 15: 32768 + 32768 + 16384 = 81920 words (320 KB);
+     the most (9, 15): 65536 + 32768 + 32768 = 131072 words (512 KB).
+"""
+
+Z_FILTERED = 1
+Z_HUFFMAN_ONLY = 2
+Z_RLE = 3
+Z_FIXED = 4
+MIN_MATCH = 3
+MAX_MATCH = 258
+MIN_LOOKAHEAD = 262
+TOO_FAR = 4096
+L_CODES = 286
+D_CODES = 30
+BL_CODES = 19
+HEAP_SIZE = 573
+END_BLOCK = 256
+ZFIXED_WORDS = 8288
+
+# good lazy nice chain, by level 1..9
+ZCONFIG = table([4, 4, 8, 4, 4, 5, 16, 8, 4, 6, 32, 32,
+                 4, 4, 16, 16, 8, 16, 32, 32, 8, 16, 128, 128,
+                 8, 32, 128, 256, 32, 128, 258, 1024, 32, 258, 258, 4096])
+ZXLBITS = table([0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0])
+ZXDBITS = table([0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13])
+ZXBLBITS = table([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 7])
+ZBLORDER = table([16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15])
+# length - 3 of each length code's first length (28: 255, length 258, so
+# that its 0 extra bits write 0)
+ZBASELEN = table([0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32, 40, 48, 56,
+                  64, 80, 96, 112, 128, 160, 192, 224, 255])
+# distance - 1 of each distance code's first distance
+ZBASEDIST = table([0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768,
+                   1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576])
+
+ZLCODE = array(256)       # length - 3 -> length code 0..28
+ZDCODE = array(512)       # distance - 1 -> distance code (zlib's d_code)
+ZSLL = array(288)         # the fixed literal/length code's lengths
+ZSDL = array(30)          # the fixed distance code's lengths (5)
+ZFLC = array(288)         # the fixed codes, bit-reversed
+ZFDC = array(30)
+# the three trees: freq, len (+ the guard scan_tree writes), dad
+ZLF = array(HEAP_SIZE)
+ZLL = array(HEAP_SIZE + 1)
+ZLD = array(HEAP_SIZE)
+ZDF = array(HEAP_SIZE)
+ZDL = array(HEAP_SIZE + 1)
+ZDD = array(HEAP_SIZE)
+ZBF = array(HEAP_SIZE)
+ZBL = array(HEAP_SIZE + 1)
+ZBD = array(HEAP_SIZE)
+ZHP = array(HEAP_SIZE + 1)    # the heap
+ZDEPTH = array(HEAP_SIZE)
+ZBLC = array(16)              # bl_count
+ZLC = array(288)              # a dynamic block's codes, bit-reversed
+ZDC = array(30)
+ZBC = array(19)
+ZCNT = array(16)
+ZNEXT = array(16)
+
+zmem = 0          # the scratch: zwords() words of H
+ztabs = 0
+zp = 0            # the plain buffer in M, and its length
+zn = 0
+zstrat = 0
+wsize = 0
+wmask = 0
+maxdist = 0
+hmask = 0
+hshift = 0
+zhead = 0
+zprev = 0
+ztok = 0
+insh = 0
+strstart = 0
+matchstart = 0
+prevmatch = 0
+blockstart = 0
+winbase = 0
+matchlen = 0
+prevlen = 0
+matchavail = 0
+goodm = 0
+maxlazy = 0
+nicem = 0
+maxchain = 0
+symend = 0
+symnext = 0
+heaplen = 0
+heapmax = 0
+zmaxcode = 0
+lmax = 0
+dmax = 0
+optlen = 0
+statlen = 0
+zbuf = 0
+zcnt = 0
+zop = 0           # where zout() writes in M, up to zoend (0: out() instead)
+zoend = 0
+
+
+def zwords(memlevel, wbits):
+    """the scratch zdeflate needs at zmem, in words of H"""
+    wb = wbits
+    if wb == 8:
+        wb = 9
+    return (3 << (memlevel + 6)) + (1 << wb)
+
+
+def zout(c):
+    """the stream's next byte: to M[zop] (ppadec.zl: the stream is cut into
+    its chunks later), or out() when zop is 0 (this file's own test)"""
+    global zop
+    if zop == 0:
+        out(c)
+    else:
+        if zop >= zoend:
+            error()
+        M[zop] = c
+        zop += 1
+
+
+def ztables():
+    code = 0
+    while code < 28:
+        for k in range(1 << ZXLBITS[code]):
+            ZLCODE[ZBASELEN[code] + k] = code
+        code += 1
+    ZLCODE[255] = 28
+    for code in range(16):
+        for k in range(1 << ZXDBITS[code]):
+            ZDCODE[ZBASEDIST[code] + k] = code
+    for code in range(16, 30):
+        for k in range(1 << (ZXDBITS[code] - 7)):
+            ZDCODE[256 + (ZBASEDIST[code] >> 7) + k] = code
+    for k in range(288):
+        if k < 144:
+            ZSLL[k] = 8
+        elif k < 256:
+            ZSLL[k] = 9
+        elif k < 280:
+            ZSLL[k] = 7
+        else:
+            ZSLL[k] = 8
+    for k in range(30):
+        ZSDL[k] = 5
+    zbuild_enc(base(ZSLL), 287, base(ZFLC))
+    zbuild_enc(base(ZSDL), 29, base(ZFDC))
+
+
+# ---------------------------------------------------------------- bits
+
+def zbits(v, n):
+    """v's n low bits (v < 2^n, n <= 16), least significant first"""
+    global zbuf, zcnt
+    zbuf = zbuf | (v << zcnt)
+    zcnt += n
+    while zcnt >= 8:
+        zout(zbuf & 255)
+        zbuf = zbuf >> 8
+        zcnt -= 8
+
+
+def zbuild_enc(lb, maxc, cb):
+    """the canonical codes of the lengths H[lb .. lb + maxc], bit-reversed,
+    into H[cb ..] (ppadeflate's BuildEnc)"""
+    for b in range(16):
+        ZCNT[b] = 0
+    for i in range(maxc + 1):
+        ZCNT[H[lb + i]] += 1
+    ZCNT[0] = 0
+    c = 0
+    for b in range(1, 16):
+        c = (c + ZCNT[b - 1]) << 1
+        ZNEXT[b] = c
+    for i in range(maxc + 1):
+        ln = H[lb + i]
+        if ln:
+            c = ZNEXT[ln] & 65535
+            ZNEXT[ln] = ZNEXT[ln] + 1
+            r = 0
+            for b in range(ln):
+                r = (r << 1) | (c & 1)
+                c = c >> 1
+            H[cb + i] = r
+
+
+# ---------------------------------------------------------------- trees
+
+def zsmaller(fq, n, m):
+    a = H[fq + n]
+    b = H[fq + m]
+    if a < b:
+        return 1
+    if a == b and ZDEPTH[n] <= ZDEPTH[m]:
+        return 1
+    return 0
+
+
+def zdownheap(fq, k):
+    v = ZHP[k]
+    j = k << 1
+    while j <= heaplen:
+        if j < heaplen and zsmaller(fq, ZHP[j + 1], ZHP[j]):
+            j += 1
+        if zsmaller(fq, v, ZHP[j]):
+            break
+        ZHP[k] = ZHP[j]
+        k = j
+        j = j << 1
+    ZHP[k] = v
+
+
+def zgen_bitlen(fq, ln, dd, hasst, st, xb, xbase, maxlength):
+    global optlen, statlen
+    for bits in range(16):
+        ZBLC[bits] = 0
+    overflow = 0
+    H[ln + ZHP[heapmax]] = 0
+    for h in range(heapmax + 1, HEAP_SIZE):
+        n = ZHP[h]
+        bits = H[ln + H[dd + n]] + 1
+        if bits > maxlength:
+            bits = maxlength
+            overflow += 1
+        H[ln + n] = bits
+        if n > zmaxcode:
+            continue
+        ZBLC[bits] += 1
+        xbits = 0
+        if n >= xbase:
+            xbits = H[xb + n - xbase]
+        f = H[fq + n]
+        optlen += f * (bits + xbits)
+        if hasst:
+            statlen += f * (H[st + n] + xbits)
+    if overflow == 0:
+        return
+    while True:
+        bits = maxlength - 1
+        while ZBLC[bits] == 0:
+            bits -= 1
+        ZBLC[bits] -= 1
+        ZBLC[bits + 1] += 2
+        ZBLC[maxlength] -= 1
+        overflow -= 2
+        if sle(overflow, 0):
+            break
+    h = HEAP_SIZE
+    bits = maxlength
+    while bits >= 1:
+        n = ZBLC[bits]
+        while n != 0:
+            h -= 1
+            m = ZHP[h]
+            if m > zmaxcode:
+                continue
+            if H[ln + m] != bits:
+                optlen += (bits - H[ln + m]) * H[fq + m]
+                H[ln + m] = bits
+            n -= 1
+        bits -= 1
+
+
+def zbuild_tree(fq, ln, dd, elems, hasst, st, xb, xbase, maxlength):
+    """build_tree: the lengths of the tree's codes; zmaxcode its last used"""
+    global heaplen, heapmax, zmaxcode, optlen, statlen
+    heaplen = 0
+    heapmax = HEAP_SIZE
+    maxcode = 4294967295
+    for n in range(elems):
+        if H[fq + n] != 0:
+            heaplen += 1
+            ZHP[heaplen] = n
+            maxcode = n
+            ZDEPTH[n] = 0
+        else:
+            H[ln + n] = 0
+    while heaplen < 2:
+        if slt(maxcode, 2):
+            maxcode += 1
+            node = maxcode
+        else:
+            node = 0
+        heaplen += 1
+        ZHP[heaplen] = node
+        H[fq + node] = 1
+        ZDEPTH[node] = 0
+        optlen -= 1
+        if hasst:
+            statlen -= H[st + node]
+    zmaxcode = maxcode
+    n = heaplen >> 1
+    while n >= 1:
+        zdownheap(fq, n)
+        n -= 1
+    node = elems
+    while True:
+        n = ZHP[1]
+        ZHP[1] = ZHP[heaplen]
+        heaplen -= 1
+        zdownheap(fq, 1)
+        m = ZHP[1]
+        heapmax -= 1
+        ZHP[heapmax] = n
+        heapmax -= 1
+        ZHP[heapmax] = m
+        H[fq + node] = H[fq + n] + H[fq + m]
+        if ZDEPTH[n] >= ZDEPTH[m]:
+            ZDEPTH[node] = ZDEPTH[n] + 1
+        else:
+            ZDEPTH[node] = ZDEPTH[m] + 1
+        H[dd + n] = node
+        H[dd + m] = node
+        ZHP[1] = node
+        node += 1
+        zdownheap(fq, 1)
+        if heaplen < 2:
+            break
+    heapmax -= 1
+    ZHP[heapmax] = ZHP[1]
+    zgen_bitlen(fq, ln, dd, hasst, st, xb, xbase, maxlength)
+
+
+def zput_bl(sym, extra, send):
+    if send:
+        zbits(ZBC[sym], ZBL[sym])
+        if sym >= 16:
+            zbits(extra, ZXBLBITS[sym])
+    else:
+        ZBF[sym] += 1
+
+
+def zscan_tree(ln, maxcode, send):
+    """scan_tree (send 0: counts into ZBF) and send_tree (send 1: writes)"""
+    prevlen_ = 4294967295
+    nextlen = H[ln]
+    count = 0
+    maxcount = 7
+    mincount = 4
+    if nextlen == 0:
+        maxcount = 138
+        mincount = 3
+    H[ln + maxcode + 1] = 65535
+    for n in range(maxcode + 1):
+        curlen = nextlen
+        nextlen = H[ln + n + 1]
+        count += 1
+        if count < maxcount and curlen == nextlen:
+            continue
+        elif count < mincount:
+            while count > 0:
+                zput_bl(curlen, 0, send)
+                count -= 1
+        elif curlen != 0:
+            if curlen != prevlen_:
+                zput_bl(curlen, 0, send)
+                count -= 1
+            zput_bl(16, count - 3, send)
+        elif count <= 10:
+            zput_bl(17, count - 3, send)
+        else:
+            zput_bl(18, count - 11, send)
+        count = 0
+        prevlen_ = curlen
+        if nextlen == 0:
+            maxcount = 138
+            mincount = 3
+        elif curlen == nextlen:
+            maxcount = 6
+            mincount = 3
+        else:
+            maxcount = 7
+            mincount = 4
+
+
+# ---------------------------------------------------------------- blocks
+
+def zinit_block():
+    global optlen, statlen, symnext
+    for i in range(L_CODES):
+        ZLF[i] = 0
+    for i in range(D_CODES):
+        ZDF[i] = 0
+    for i in range(BL_CODES):
+        ZBF[i] = 0
+    ZLF[END_BLOCK] = 1
+    optlen = 0
+    statlen = 0
+    symnext = 0
+
+
+def zdcode(d):
+    if d < 256:
+        return ZDCODE[d]
+    return ZDCODE[256 + (d >> 7)]
+
+
+def ztally_lit(c):
+    global symnext
+    H[ztok + symnext] = c
+    ZLF[c] += 1
+    symnext += 1
+    return symnext == symend
+
+
+def ztally_dist(dist, lm3):
+    global symnext
+    H[ztok + symnext] = ((lm3 + MIN_MATCH) << 16) | dist
+    ZLF[ZLCODE[lm3] + 257] += 1
+    dc = zdcode(dist - 1)
+    ZDF[dc] += 1
+    symnext += 1
+    return symnext == symend
+
+
+def zsend_tokens(lc, ll, dc, dl):
+    for i in range(symnext):
+        t = H[ztok + i]
+        ln = t >> 16
+        if ln == 0:
+            zbits(H[lc + t], H[ll + t])
+        else:
+            code = ZLCODE[ln - MIN_MATCH]
+            sym = code + 257
+            zbits(H[lc + sym], H[ll + sym])
+            zbits(ln - MIN_MATCH - ZBASELEN[code], ZXLBITS[code])
+            d = (t & 65535) - 1
+            code = zdcode(d)
+            zbits(H[dc + code], H[dl + code])
+            zbits(d - ZBASEDIST[code], ZXDBITS[code])
+    zbits(H[lc + END_BLOCK], H[ll + END_BLOCK])
+
+
+def zflush_block(last):
+    """_tr_flush_block: the block's type chosen, and the block written"""
+    global optlen, blockstart, lmax, dmax
+    storedlen = strstart - blockstart
+    zbuild_tree(base(ZLF), base(ZLL), base(ZLD), L_CODES, 1, base(ZSLL), base(ZXLBITS), 257, 15)
+    lmax = zmaxcode
+    zbuild_tree(base(ZDF), base(ZDL), base(ZDD), D_CODES, 1, base(ZSDL), base(ZXDBITS), 0, 15)
+    dmax = zmaxcode
+    # build_bl_tree
+    zscan_tree(base(ZLL), lmax, 0)
+    zscan_tree(base(ZDL), dmax, 0)
+    zbuild_tree(base(ZBF), base(ZBL), base(ZBD), BL_CODES, 0, 0, base(ZXBLBITS), 0, 7)
+    maxbl = BL_CODES - 1
+    while maxbl >= 3:
+        if ZBL[ZBLORDER[maxbl]] != 0:
+            break
+        maxbl -= 1
+    optlen += 3 * (maxbl + 1) + 14
+    optb = (optlen + 10) >> 3
+    statb = (statlen + 10) >> 3
+    if statb <= optb or zstrat == Z_FIXED:
+        optb = statb
+    zbits(last, 1)
+    if storedlen + 4 <= optb and blockstart >= winbase:
+        zbits(0, 2)
+        zbits(0, (8 - zcnt) & 7)
+        zbits(storedlen & 65535, 16)
+        zbits((storedlen & 65535) ^ 65535, 16)
+        a = zp + blockstart
+        for i in range(storedlen):
+            zout(M[a + i])
+    elif statb == optb:
+        zbits(1, 2)
+        zsend_tokens(base(ZFLC), base(ZSLL), base(ZFDC), base(ZSDL))
+    else:
+        zbits(2, 2)
+        zbits(lmax - 256, 5)
+        zbits(dmax, 5)
+        zbits(maxbl - 3, 4)
+        for i in range(maxbl + 1):
+            zbits(ZBL[ZBLORDER[i]], 3)
+        zbuild_enc(base(ZBL), BL_CODES - 1, base(ZBC))
+        zscan_tree(base(ZLL), lmax, 1)
+        zscan_tree(base(ZDL), dmax, 1)
+        zbuild_enc(base(ZLL), lmax, base(ZLC))
+        zbuild_enc(base(ZDL), dmax, base(ZDC))
+        zsend_tokens(base(ZLC), base(ZLL), base(ZDC), base(ZDL))
+    zinit_block()
+    blockstart = strstart
+
+
+# ---------------------------------------------------------------- matches
+
+def zwin(i):
+    if i < zn:
+        return M[zp + i]
+    return 0
+
+
+def zinsert(s):
+    """INSERT_STRING: the previous head"""
+    global insh
+    insh = ((insh << hshift) ^ zwin(s + 2)) & hmask
+    h = H[zhead + insh]
+    H[zprev + (s & wmask)] = h
+    H[zhead + insh] = s
+    return h
+
+
+def zslide():
+    global winbase
+    while strstart - winbase >= wsize + maxdist:
+        winbase += wsize
+
+
+def zlongest(cur):
+    global matchstart
+    chain = maxchain
+    best = prevlen
+    nice = nicem
+    look = zn - strstart
+    limit = 0
+    if strstart > maxdist:
+        limit = strstart - maxdist
+    s0 = zwin(strstart)
+    s1 = zwin(strstart + 1)
+    se1 = zwin(strstart + best - 1)
+    se = zwin(strstart + best)
+    if prevlen >= goodm:
+        chain = chain >> 2
+    if nice > look:
+        nice = look
+    top = MAX_MATCH
+    if look < top:
+        top = look
+    while True:
+        if zwin(cur + best) == se and zwin(cur + best - 1) == se1 and zwin(cur) == s0 and zwin(cur + 1) == s1:
+            ln = 3
+            a = zp + cur
+            b = zp + strstart
+            while ln < top and M[a + ln] == M[b + ln]:
+                ln += 1
+            if ln >= look and ln < MAX_MATCH:
+                ln = MAX_MATCH
+            if ln > best:
+                matchstart = cur
+                best = ln
+                if ln >= nice:
+                    break
+                se1 = zwin(strstart + best - 1)
+                se = zwin(strstart + best)
+        cur = H[zprev + (cur & wmask)]
+        chain -= 1
+        if cur <= limit or chain == 0:
+            break
+    if best <= look:
+        return best
+    return look
+
+
+def zdeflate_fast():
+    global strstart, matchlen, insh
+    while True:
+        zslide()
+        look = zn - strstart
+        if look == 0:
+            break
+        hh = 0
+        if look >= MIN_MATCH:
+            hh = zinsert(strstart)
+        if hh != 0 and strstart - hh <= maxdist:
+            matchlen = zlongest(hh)
+        if matchlen >= MIN_MATCH:
+            fl = ztally_dist(strstart - matchstart, matchlen - MIN_MATCH)
+            if matchlen <= maxlazy and look - matchlen >= MIN_MATCH:
+                matchlen -= 1
+                while True:
+                    strstart += 1
+                    zinsert(strstart)
+                    matchlen -= 1
+                    if matchlen == 0:
+                        break
+                strstart += 1
+            else:
+                strstart += matchlen
+                matchlen = 0
+                insh = zwin(strstart)
+                insh = ((insh << hshift) ^ zwin(strstart + 1)) & hmask
+        else:
+            fl = ztally_lit(M[zp + strstart])
+            strstart += 1
+        if fl:
+            zflush_block(0)
+    zflush_block(1)
+
+
+def zdeflate_slow():
+    global strstart, matchlen, prevlen, prevmatch, matchavail
+    while True:
+        zslide()
+        look = zn - strstart
+        if look == 0:
+            break
+        hh = 0
+        if look >= MIN_MATCH:
+            hh = zinsert(strstart)
+        prevlen = matchlen
+        prevmatch = matchstart
+        matchlen = MIN_MATCH - 1
+        if hh != 0 and prevlen < maxlazy and strstart - hh <= maxdist:
+            matchlen = zlongest(hh)
+            if matchlen <= 5:
+                if zstrat == Z_FILTERED or (matchlen == MIN_MATCH and strstart - matchstart > TOO_FAR):
+                    matchlen = MIN_MATCH - 1
+        if prevlen >= MIN_MATCH and matchlen <= prevlen:
+            fl = ztally_dist(strstart - 1 - prevmatch, prevlen - MIN_MATCH)
+            prevlen -= 2
+            while True:
+                strstart += 1
+                if strstart + MIN_MATCH <= zn:
+                    zinsert(strstart)
+                prevlen -= 1
+                if prevlen == 0:
+                    break
+            matchavail = 0
+            matchlen = MIN_MATCH - 1
+            strstart += 1
+            if fl:
+                zflush_block(0)
+        elif matchavail:
+            if ztally_lit(M[zp + strstart - 1]):
+                zflush_block(0)
+            strstart += 1
+        else:
+            matchavail = 1
+            strstart += 1
+    if matchavail:
+        ztally_lit(M[zp + strstart - 1])
+        matchavail = 0
+    zflush_block(1)
+
+
+def zdeflate_rle():
+    global strstart
+    while True:
+        zslide()
+        look = zn - strstart
+        if look == 0:
+            break
+        ml = 0
+        if look >= MIN_MATCH and strstart > 0:
+            pb = M[zp + strstart - 1]
+            run = 0
+            top = MAX_MATCH
+            if look < top:
+                top = look
+            a = zp + strstart
+            while run < top and M[a + run] == pb:
+                run += 1
+            if run >= MIN_MATCH:
+                ml = run
+        if ml >= MIN_MATCH:
+            fl = ztally_dist(1, ml - MIN_MATCH)
+            strstart += ml
+        else:
+            fl = ztally_lit(M[zp + strstart])
+            strstart += 1
+        if fl:
+            zflush_block(0)
+    zflush_block(1)
+
+
+def zdeflate_huff():
+    global strstart
+    while True:
+        zslide()
+        if strstart == zn:
+            break
+        fl = ztally_lit(M[zp + strstart])
+        strstart += 1
+        if fl:
+            zflush_block(0)
+    zflush_block(1)
+
+
+# ---------------------------------------------------------------- the stream
+
+def zdeflate(pbase, n, level, strategy, memlevel, wbits, flags, h0, h1, endpad):
+    global zp, zn, zstrat, wsize, wmask, maxdist, hmask, hshift, zhead, zprev, ztok
+    global insh, strstart, matchstart, prevmatch, blockstart, winbase, matchlen, prevlen, matchavail
+    global goodm, maxlazy, nicem, maxchain, symend, zbuf, zcnt, ztabs
+    if level < 1 or level > 9 or strategy > 4 or memlevel < 1 or memlevel > 9 or wbits < 8 or wbits > 15:
+        error()
+    if ztabs == 0:
+        ztables()
+        ztabs = 1
+    zp = pbase
+    zn = n
+    zstrat = strategy
+    zbuf = 0
+    zcnt = 0
+    if (flags & 1) == 0:
+        zout(h0)
+        zout(h1)
+    wb = wbits
+    if wb == 8:
+        wb = 9
+    wsize = 1 << wb
+    wmask = wsize - 1
+    maxdist = wsize - MIN_LOOKAHEAD
+    hbits = memlevel + 7
+    hmask = (1 << hbits) - 1
+    hshift = (hbits + MIN_MATCH - 1) // MIN_MATCH
+    zhead = zmem
+    zprev = zhead + (1 << hbits)
+    ztok = zprev + wsize
+    for i in range(ztok - zhead):
+        H[zhead + i] = 0
+    symend = (1 << (memlevel + 6)) - 1
+    k = (level - 1) << 2
+    goodm = ZCONFIG[k]
+    maxlazy = ZCONFIG[k + 1]
+    nicem = ZCONFIG[k + 2]
+    maxchain = ZCONFIG[k + 3]
+    strstart = 0
+    blockstart = 0
+    winbase = 0
+    insh = 0
+    matchstart = 0
+    prevmatch = 0
+    matchlen = MIN_MATCH - 1
+    prevlen = MIN_MATCH - 1
+    matchavail = 0
+    for i in range(HEAP_SIZE):
+        ZLF[i] = 0
+        ZLL[i] = 0
+        ZLD[i] = 0
+        ZDF[i] = 0
+        ZDL[i] = 0
+        ZDD[i] = 0
+        ZBF[i] = 0
+        ZBL[i] = 0
+        ZBD[i] = 0
+        ZDEPTH[i] = 0
+    zinit_block()
+    if n >= MIN_MATCH:
+        insh = ((M[zp] << hshift) ^ M[zp + 1]) & hmask
+    if strategy == Z_HUFFMAN_ONLY:
+        zdeflate_huff()
+    elif strategy == Z_RLE:
+        zdeflate_rle()
+    elif level <= 3:
+        zdeflate_fast()
+    else:
+        zdeflate_slow()
+    zbits(endpad, (8 - zcnt) & 7)
+    if flags & 2:
+        s1 = 1
+        s2 = 0
+        for i in range(n):
+            s1 += M[zp + i]
+            if s1 >= 65521:
+                s1 -= 65521
+            s2 += s1
+            if s2 >= 65521:
+                s2 -= 65521
+        zout(s2 >> 8)
+        zout(s2 & 255)
+        zout(s1 >> 8)
+        zout(s1 & 255)

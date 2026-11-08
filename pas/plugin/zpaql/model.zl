@@ -1,0 +1,1056 @@
+"""PPA's stream (version 2) for ZPAQL, part 1: everything of PPA's decoder
+before deflate, for a stream whose image streams all take the static model
+(ppastatic) and whose other streams are kept as bytes.
+
+    parsestream(first, end)   the stream at M[first .. end): the version
+                              byte, the substreams' count and lengths
+    decodesub0(dst)           substream 0 (ppacodec.DecompressRaw): the
+                              structure (meta) with a fresh byte model, then
+                              the streams kept as bytes with a second one;
+                              the bytes go to M[dst ..]; parses the meta
+                              into the chunk and stream records
+    decodeimage(s, dst)       image stream s, band by band: the static
+                              model's first part (the byte model: each
+                              context's frequencies, each line's filter),
+                              rANS back to residuals, MED back to pixels,
+                              each line's filter applied again; writes the
+                              stream's plain bytes (the filtered lines then
+                              the pixels' tail, what zlib compressed) to
+                              M[dst ..] and returns their length
+
+The coder is PPA's (ppaarith): PJA's carryless binary coder, the same split
+and counters, so the decoder below is pjadec.zl's; the byte model is
+ppamodel.CodeBytes (orders 0-3, one weight set per bit position, Pascal's
+truncating divisions), the static model ppastatic.PascalStaticRow (320
+contexts), the refilter ppapixels.FilterLine.  The tables (squash, stretch,
+the counters' rates) are computed here as ppaarith.MakeTables does, with
+32-bit integers only.
+
+The stream's chunk records (CHUNKREC words each, at chk):
+  0 type  1 len  2 flags (bit 0 crcOk, bit 1 from a stream)  3 crc
+  4 stream (NONE: none)  5 fdAT sequence  6 the data's place in M (meta)
+The stream records (STREAMREC words each, at stm):
+  0 kind (0 IDAT 1 fdAT 2 JDAT 3 JDAA)  1 header chunk  2 frame chunk
+  3 mode (0 bytes, 4 static)  4 level  5 strategy  6 memLevel  7 wbits
+  8 flags (bit 0 raw deflate, bit 1 adlerOk)  9 CMF  10 FLG  11 endPad
+  12 zTail's place in M  13 its length  14 pxTail's place  15 its length
+  16 the stream's length (its chunks')  17 kept as bytes: its place in M
+  18 its first band's substream  19 its bands  20 its plain length
+
+Memory.
+  H: the arrays below, MODEL_WORDS (1,315,511: arrays and spilled variables, zpaqlc opt=3) words, the byte model's
+     2^20 counters among them, plus the heap:
+       CHUNKREC * chunks + STREAMREC * streams + 2 * substreams
+       + 5 * (w + 4) * channels    (two lines of pixels and of residuals,
+                                    padded, and the line before a band)
+     for the widest image.
+  M: the segment, then substream 0's bytes (the meta and the streams kept
+     as bytes), then whatever the caller puts after: decodeimage writes the
+     stream's plain bytes at dst and uses the bytes after them as scratch
+     for a band's first part (at most 320 * 256 * 9 + 640 + its lines).
+Every place in H and M is checked against the sizes probeh()/probem()
+find: too little memory is error(), never a wrap.
+"""
+
+SEG = 4                  # the segment: u32 original size, then the stream
+SVER = 2
+NONE = 4294967295
+CHUNKREC = 8
+STREAMREC = 24
+MODE_BYTES = 0
+MODE_IMAGE = 1
+MODE_JPEG = 2
+MODE_FAST = 3
+MODE_STATIC = 4
+CT_IHDR = 1229472850
+CT_JHDR = 1246250066
+CT_FDAT = 1717846356
+BAND_BYTES = 2097152
+MAX_BANDS = 16
+MAX_CHUNKS = 4194304
+SM_TOT = 4096
+SM_L = 8388608
+N_CTX = 320
+BYTE_BITS = 18
+BYTE_LIMIT = 127
+W_MAX = 524288
+E_STEP = 1069547520      # e^(-1/256) * 2^30, rounded
+MODEL_WORDS = 1315511
+LENIENT = 0              # the test main: image streams of other modes skipped, not error()
+
+SQ = array(4096)         # squash at x = -2048 .. 2047: 16-bit probabilities
+STR = array(4096)        # stretch of a 12-bit probability (two's complement)
+RECIP = array(256)       # 65536 / (n + 1.5), rounded
+EBIN = array(4096)       # the static model's energy bins
+BW = array(40)           # the byte model's weights, 8 bit positions x 5
+BT = array(1048576)      # its counters: 4 orders x 2^18, gen << 24 | n << 16 | p ^ 32768
+FREQ = array(81920)      # the static model's tables, 320 contexts
+CUM = array(82240)
+SLOT = array(81920)      # the symbol at slot 16 k
+PW = array(7)            # the passes: width, height, line bytes, first plain byte, first line
+PH = array(7)
+PRB = array(7)
+PPL = array(7)
+PLN = array(7)
+A7X0 = table([0, 4, 0, 2, 0, 1, 0])
+A7Y0 = table([0, 0, 4, 0, 2, 0, 1])
+A7DX = table([8, 8, 4, 4, 2, 2, 1])
+A7DY = table([8, 8, 8, 4, 4, 2, 2])
+PROBE = array(1)
+HEAP = heap()
+
+hp = 0
+hpmax = 0                # the most of H the program used: reset()'s bound
+hsize = 0
+msize = 0
+x1 = 0
+x2 = 0
+x = 0
+ap = 0
+aend = 0
+bmgen = 0
+bmhist = 0
+rpos = 0
+rend = 0
+origsize = 0
+nsubs = 0
+subpos = 0
+sublen = 0
+sub0dst = 0
+sub0len = 0
+metalen = 0
+nchunks = 0
+chk = 0
+nstreams = 0
+stm = 0
+nbandsall = 0
+pngkind = 0              # the file's kind: 0 PNG, 1 MNG, 2 JNG
+trailpos = 0             # the bytes after the last chunk, in the meta
+traillen = 0
+# the image being decoded
+imw = 0
+imh = 0
+imdepth = 0
+imct = 0
+imlace = 0
+imnc = 0
+imbits = 0
+imbpp = 0
+npass = 0
+imfilt = 0
+ringpx = 0
+ringfe = 0
+prevrow = 0
+ringw = 0
+
+# ---------------------------------------------------------------- memory
+
+def probeh():
+    """H's size, found by writing at PROBE + 2^k until that lands on PROBE"""
+    global hsize
+    a = base(PROBE)
+    H[a] = 1515870810
+    k = 0
+    hsize = 0
+    while k < 32:
+        off = 1 << k
+        old = H[a + off]
+        H[a + off] = 2779096485
+        if H[a] == 2779096485:
+            H[a] = old
+            hsize = off
+            return
+        H[a + off] = old
+        k += 1
+
+def probem():
+    """M's size, the same way at M[0] (put back after)"""
+    global msize
+    keep = M[0]
+    M[0] = 90
+    k = 0
+    msize = 0
+    while k < 32:
+        off = 1 << k
+        old = M[off]
+        M[off] = 165
+        if M[0] == 165:
+            M[off] = old
+            msize = off
+            k = 32
+        else:
+            M[off] = old
+            k += 1
+    M[0] = keep
+
+def alloc(n):
+    """n words of H, zero (never used before)"""
+    global hp, hpmax
+    r = hp
+    hp += n
+    if hp < r or hp > hsize:
+        error()
+    if hp > hpmax:
+        hpmax = hp
+    return r
+
+def mcheck(a, n):
+    """M[a .. a + n) must be inside M"""
+    if a + n < a or a + n > msize:
+        error()
+
+# ---------------------------------------------------------------- tables
+
+def mulshr30(a, b):
+    """(a * b + 2^29) >> 30, a and b below 2^31"""
+    ah = a >> 16
+    al = a & 65535
+    bh = b >> 16
+    bl = b & 65535
+    lo = al * bl
+    hi = ah * bh
+    m1 = ah * bl
+    t = lo + ((m1 & 65535) << 16)
+    hi += m1 >> 16
+    if t < lo:
+        hi += 1
+    lo = t
+    m1 = al * bh
+    t = lo + ((m1 & 65535) << 16)
+    hi += m1 >> 16
+    if t < lo:
+        hi += 1
+    lo = t
+    t = lo + 536870912
+    if t < lo:
+        hi += 1
+    return (hi << 2) | (t >> 30)
+
+def div64(nh, nl, d):
+    """(nh * 2^32 + nl) div d, nh < d <= 2^31, the quotient below 2^32"""
+    r = nh
+    q = 0
+    for k in range(32):
+        r = (r << 1) | (nl >> 31)
+        nl = nl << 1
+        q = q << 1
+        if r >= d:
+            r -= d
+            q += 1
+    return q
+
+def tables():
+    """ppaarith.MakeTables, ppastatic's EBIN"""
+    e = 1073741824
+    for k in range(2049):
+        # e = e^(-k/256) * 2^30
+        if k < 2048:
+            p = div64(16384, 0, 1073741824 + e)
+            if p > 65535:
+                p = 65535
+            SQ[2048 + k] = p
+        if k > 0:
+            p = div64(e >> 16, (e & 65535) << 16, e + 1073741824)
+            if p < 1:
+                p = 1
+            SQ[2048 - k] = p
+        e = mulshr30(e, E_STEP)
+    xx = 0
+    for p in range(4096):
+        while xx < 4095 and SQ[xx + 1] <= p * 16 + 8:
+            xx += 1
+        STR[p] = xx - 2048
+    for n in range(256):
+        RECIP[n] = (131072 + n + 1) // (2 * n + 3)
+    b = 0
+    for e in range(4096):
+        while b < 15 and e >= EBTH[b]:
+            b += 1
+        EBIN[e] = b
+
+EBTH = table([1, 2, 3, 5, 7, 10, 14, 20, 28, 40, 56, 80, 112, 160, 224])
+
+def tshr(v, n):
+    """v div 2^n, truncating toward zero (Pascal's div)"""
+    if slt(v, 0):
+        return -((-v) >> n)
+    return v >> n
+
+def sabs(v):
+    if slt(v, 0):
+        return -v
+    return v
+
+# ---------------------------------------------------------------- the coder
+
+def rdbyte():
+    global ap
+    v = 0
+    if ap < aend:
+        v = M[ap]
+    ap += 1
+    return v
+
+def dinit(first, last):
+    global x1, x2, x, ap, aend
+    x1 = 0
+    x2 = 4294967295
+    x = 0
+    ap = first
+    aend = last
+    for k in range(4):
+        x = (x << 8) | rdbyte()
+
+def decode(p):
+    global x1, x2, x
+    if p < 1:
+        p = 1
+    if p > 65535:
+        p = 65535
+    r = x2 - x1
+    xm = x1 + (r >> 16) * p + (((r & 65535) * p) >> 16)
+    if x <= xm:
+        bit = 1
+        x2 = xm
+    else:
+        bit = 0
+        x1 = xm + 1
+    while ((x1 ^ x2) & 4278190080) == 0:
+        x1 = x1 << 8
+        x2 = (x2 << 8) | 255
+        x = (x << 8) | rdbyte()
+    return bit
+
+def direct(count):
+    v = 0
+    for k in range(count):
+        v = (v << 1) | decode(32768)
+    return v
+
+# ---------------------------------------------------------------- the byte model (ppamodel.CodeBytes)
+
+def bminit():
+    """a fresh TByteModel: the counters of older generations read as new"""
+    global bmgen, bmhist
+    bmgen += 1
+    if bmgen == 256:
+        for i in range(1048576):
+            BT[i] = 0
+        bmgen = 1
+    for i in range(40):
+        BW[i] = 16384
+    bmhist = 0
+
+def codebytes(dst, n):
+    """n bytes decoded into M[dst ..]"""
+    global bmhist
+    g = bmgen
+    bt = base(BT)
+    for q in range(n):
+        h1 = (((bmhist & 255) + 16777216) * 2654435761) >> 14
+        h2 = (((bmhist & 65535) + 33554432) * 2654435761) >> 14
+        h3 = ((bmhist + 50331648) * 2654435761) >> 14
+        partial = 1
+        j = 8
+        while j > 0:
+            j -= 1
+            ph = (partial * 2246822519) >> 14
+            a0 = bt + ph
+            a1 = bt + 262144 + (h1 ^ ph)
+            a2 = bt + 524288 + (h2 ^ ph)
+            a3 = bt + 786432 + (h3 ^ ph)
+            w0 = H[a0]
+            p0 = 32768
+            if (w0 >> 24) == g:
+                p0 = (w0 & 65535) ^ 32768
+            w1 = H[a1]
+            p1 = 32768
+            if (w1 >> 24) == g:
+                p1 = (w1 & 65535) ^ 32768
+            w2 = H[a2]
+            p2 = 32768
+            if (w2 >> 24) == g:
+                p2 = (w2 & 65535) ^ 32768
+            w3 = H[a3]
+            p3 = 32768
+            if (w3 >> 24) == g:
+                p3 = (w3 & 65535) ^ 32768
+            s0 = STR[p0 >> 4]
+            s1 = STR[p1 >> 4]
+            s2 = STR[p2 >> 4]
+            s3 = STR[p3 >> 4]
+            wb = base(BW) + j * 5
+            dot = tshr(H[wb] * s0, 13) + tshr(H[wb + 1] * s1, 13) + tshr(H[wb + 2] * s2, 13) \
+                + tshr(H[wb + 3] * s3, 13) + tshr(H[wb + 4] * 256, 13)
+            dot = tshr(dot, 3)
+            if sgt(dot, 2047):
+                dot = 2047
+            if slt(dot, -2048):
+                dot = -2048
+            p = SQ[dot + 2048]
+            bit = decode(p)
+            err = tshr((bit << 16) - p, 4) * 12
+            wupd(wb, s0, err)
+            wupd(wb + 1, s1, err)
+            wupd(wb + 2, s2, err)
+            wupd(wb + 3, s3, err)
+            wupd(wb + 4, 256, err)
+            cupd(a0, w0, p0, bit)
+            cupd(a1, w1, p1, bit)
+            cupd(a2, w2, p2, bit)
+            cupd(a3, w3, p3, bit)
+            partial = partial * 2 + bit
+        M[dst + q] = partial & 255
+        bmhist = ((bmhist << 8) | (partial & 255)) & 16777215
+
+def wupd(a, st, err):
+    v = H[a] + tshr(st * err, 16)
+    if sgt(v, W_MAX):
+        v = W_MAX
+    if slt(v, -W_MAX):
+        v = -W_MAX
+    H[a] = v
+
+def cupd(a, w, p, bit):
+    """TAdaptiveBit.Update, limit BYTE_LIMIT; w the word read (its n if of this generation)"""
+    n = 0
+    if (w >> 24) == bmgen:
+        n = (w >> 16) & 255
+    if bit:
+        p = p + (((65535 - p) * RECIP[n]) >> 16)
+    else:
+        p = p - (((p - 1) * RECIP[n]) >> 16)
+    if n < BYTE_LIMIT:
+        n += 1
+    H[a] = (bmgen << 24) | (n << 16) | (p ^ 32768)
+
+# ---------------------------------------------------------------- reading bytes in M
+
+def getb():
+    global rpos
+    if rpos >= rend:
+        error()
+    v = M[rpos]
+    rpos += 1
+    return v
+
+def getvar():
+    """a varint (LEB128) of at most 5 bytes"""
+    v = 0
+    sh = 0
+    while True:
+        if sh > 28:
+            error()
+        c = getb()
+        v = v | ((c & 127) << sh)
+        sh += 7
+        if c < 128:
+            return v
+
+def getvarmax(mx):
+    v = getvar()
+    if v > mx:
+        error()
+    return v
+
+def getbe32():
+    v = getb() << 24
+    v = v | (getb() << 16)
+    v = v | (getb() << 8)
+    return v | getb()
+
+def be32at(a):
+    return (M[a] << 24) | (M[a + 1] << 16) | (M[a + 2] << 8) | M[a + 3]
+
+# ---------------------------------------------------------------- the stream
+
+def parsestream(first, end):
+    """the version byte and the substreams' table: subpos, sublen"""
+    global rpos, rend, nsubs, subpos, sublen
+    if end <= first or M[first] != SVER:
+        error()
+    rpos = first + 1
+    rend = end
+    nsubs = getvarmax(end - first)
+    if nsubs < 1:
+        error()
+    subpos = alloc(nsubs)
+    sublen = alloc(nsubs)
+    total = 0
+    for i in range(nsubs):
+        v = getvarmax(end - first)
+        H[sublen + i] = v
+        total += v
+        if total > end - first:
+            error()
+    if rpos + total != end:
+        error()
+    p = rpos
+    for i in range(nsubs):
+        H[subpos + i] = p
+        p += H[sublen + i]
+
+# ---------------------------------------------------------------- the image's layout (ppapixels)
+
+def channels(ct, depth):
+    if ct == 0:
+        if depth == 1 or depth == 2 or depth == 4 or depth == 8 or depth == 16:
+            return 1
+    elif ct == 2:
+        if depth == 8 or depth == 16:
+            return 3
+    elif ct == 3:
+        if depth == 1 or depth == 2 or depth == 4 or depth == 8:
+            return 1
+    elif ct == 4:
+        if depth == 8 or depth == 16:
+            return 2
+    elif ct == 6:
+        if depth == 8 or depth == 16:
+            return 4
+    return 0
+
+def layout(s):
+    """stream s's image (ppapixels.StreamImage, InitLayout): the passes; its
+    filtered size in imfilt"""
+    global imw, imh, imdepth, imct, imlace, imnc, imbits, imbpp, npass, imfilt
+    st = stm + s * STREAMREC
+    kind = H[st]
+    if kind > 1:
+        error()
+    hc = H[st + 1]
+    if hc >= nchunks:
+        error()
+    c = chk + hc * CHUNKREC
+    d = H[c + 6]
+    if H[c] == CT_IHDR and H[c + 1] >= 13 and (H[c + 2] & 2) == 0:
+        imw = be32at(d)
+        imh = be32at(d + 4)
+        imdepth = M[d + 8]
+        imct = M[d + 9]
+        imlace = M[d + 12]
+    elif H[c] == CT_JHDR and H[c + 1] >= 16 and (H[c + 2] & 2) == 0:
+        imw = be32at(d)
+        imh = be32at(d + 4)
+        imdepth = M[d + 12]
+        imct = 0
+        imlace = M[d + 15]
+    else:
+        error()
+    if kind == 1:
+        fr = H[st + 2]
+        if fr >= nchunks:
+            error()
+        c = chk + fr * CHUNKREC
+        if H[c + 1] < 12 or (H[c + 2] & 2) != 0:
+            error()
+        imw = be32at(H[c + 6] + 4)
+        imh = be32at(H[c + 6] + 8)
+    imnc = channels(imct, imdepth)
+    if imnc == 0 or imlace > 1 or imw == 0 or imh == 0 or imw >= 268435456 or imh >= 1073741824:
+        error()
+    imbits = imnc * imdepth
+    imbpp = (imbits + 7) >> 3
+    npass = 1
+    if imlace == 1:
+        npass = 7
+    total = 0
+    lines = 0
+    for i in range(npass):
+        w = imw
+        h = imh
+        if npass == 7:
+            w = 0
+            h = 0
+            if imw > A7X0[i]:
+                w = (imw - A7X0[i] + A7DX[i] - 1) // A7DX[i]
+            if imh > A7Y0[i]:
+                h = (imh - A7Y0[i] + A7DY[i] - 1) // A7DY[i]
+        if w == 0 or h == 0:
+            w = 0
+            h = 0
+        # ppapixels' Int64(w) * bitsPerPixel: w < 2^28, so w * imbits
+        # (up to 64) would wrap past 2^32; 8 bits a pixel or more come in
+        # whole bytes, so w * bytes (at most 8) stays below 2^31
+        if imbits >= 8:
+            rb = w * (imbits >> 3)
+        else:
+            rb = (w * imbits + 7) >> 3
+        PW[i] = w
+        PH[i] = h
+        PRB[i] = rb
+        PPL[i] = total + lines
+        PLN[i] = lines
+        # the whole image below 2^30 bytes (ppapixels.MAX_IMAGE_BYTES)
+        if h > 0 and rb + 1 > (1073741824 - total - lines) // h:
+            error()
+        total += rb * h
+        lines += h
+    imfilt = total + lines
+
+def bandrows():
+    """ppacodec.BandRows: the lines per band"""
+    h = PH[0]
+    if npass != 1:
+        return h
+    nb = imfilt // BAND_BYTES
+    if nb > MAX_BANDS:
+        nb = MAX_BANDS
+    if nb < 1:
+        nb = 1
+    return (h + nb - 1) // nb
+
+# ---------------------------------------------------------------- substream 0
+
+def decodesub0(dst):
+    """substream 0 into M[dst ..]: the meta, then the streams kept as bytes"""
+    global metalen, sub0dst, sub0len, rpos, rend, nchunks, chk, nstreams, stm, nbandsall
+    global pngkind, trailpos, traillen
+    sub0dst = dst
+    dinit(H[subpos], H[subpos] + H[sublen])
+    metalen = direct(32)
+    if metalen > origsize + 1048576:
+        error()
+    mcheck(dst, metalen)
+    bminit()
+    codebytes(dst, metalen)
+    rpos = dst
+    rend = dst + metalen
+    pngkind = getb()
+    if pngkind > 2:
+        error()
+    mx = origsize // 12 + 1
+    if mx > MAX_CHUNKS:
+        mx = MAX_CHUNKS
+    nchunks = getvarmax(mx)
+    chk = alloc(nchunks * CHUNKREC)
+    total = 8
+    for i in range(nchunks):
+        c = chk + i * CHUNKREC
+        H[c] = getbe32()
+        ln = getvarmax(origsize)
+        H[c + 1] = ln
+        flags = getb()
+        if flags > 3:
+            error()
+        H[c + 2] = flags
+        total += 12 + ln
+        if total < ln or total > origsize:
+            error()
+        if (flags & 1) == 0:
+            H[c + 3] = getbe32()
+        H[c + 4] = NONE
+        if flags & 2:
+            H[c + 4] = getvarmax(MAX_CHUNKS)
+            if H[c] == CT_FDAT:
+                if ln < 4:
+                    error()
+                H[c + 5] = getbe32()
+        else:
+            H[c + 6] = rpos
+            if ln > rend - rpos:
+                error()
+            rpos += ln
+    ln = getvarmax(origsize)
+    if ln > rend - rpos:
+        error()
+    trailpos = rpos
+    traillen = ln
+    rpos += ln
+    total += ln
+    if total < ln or total > origsize:
+        error()
+    nstreams = getvarmax(nchunks)
+    stm = alloc(nstreams * STREAMREC)
+    for i in range(nchunks):
+        c = chk + i * CHUNKREC
+        s = H[c + 4]
+        if s != NONE:
+            if s >= nstreams:
+                error()
+            ln = H[c + 1]
+            if H[c] == CT_FDAT:
+                ln -= 4
+            H[stm + s * STREAMREC + 16] += ln
+    for s in range(nstreams):
+        st = stm + s * STREAMREC
+        k = getb()
+        if k > 3:
+            error()
+        H[st] = k
+        H[st + 1] = getvarmax(nchunks) - 1
+        H[st + 2] = getvarmax(nchunks) - 1
+        mode = getb()
+        if mode > MODE_STATIC:
+            error()
+        H[st + 3] = mode
+        if mode == MODE_JPEG:
+            # a JNG's JPEG through PJA's codec: not in this codec
+            if LENIENT == 0 or k < 2:
+                error()
+        if mode != MODE_BYTES and mode != MODE_JPEG:
+            lv = getb()
+            sg = getb()
+            ml = getb()
+            wb = getb()
+            if lv < 1 or lv > 9 or sg > 4 or ml < 1 or ml > 9 or wb < 8 or wb > 15:
+                error()
+            H[st + 4] = lv
+            H[st + 5] = sg
+            H[st + 6] = ml
+            H[st + 7] = wb
+            fl = getb()
+            if fl > 3:
+                error()
+            H[st + 8] = fl
+            H[st + 9] = getb()
+            H[st + 10] = getb()
+            H[st + 11] = getb()
+            ln = getvarmax(H[st + 16])
+            H[st + 12] = rpos
+            H[st + 13] = ln
+            if ln > rend - rpos:
+                error()
+            rpos += ln
+            ln = getvarmax(1073741824)
+            H[st + 14] = rpos
+            H[st + 15] = ln
+            if ln > rend - rpos:
+                error()
+            rpos += ln
+    if rpos != rend:
+        error()
+    # the streams kept as bytes, one model for all; each image's bands
+    p = dst + metalen
+    bminit()
+    nbandsall = 0
+    njpeg = 0
+    allimg = 0
+    for s in range(nstreams):
+        st = stm + s * STREAMREC
+        mode = H[st + 3]
+        if mode == MODE_JPEG:
+            njpeg += 1
+        elif mode == MODE_BYTES:
+            ln = H[st + 16]
+            mcheck(p, ln)
+            H[st + 17] = p
+            codebytes(p, ln)
+            p += ln
+        else:
+            layout(s)
+            if mode != MODE_IMAGE and (imdepth != 8 or imct == 3):
+                error()
+            if mode != MODE_STATIC and LENIENT == 0:
+                error()
+            sz = imfilt + H[st + 15]
+            if sz < imfilt:
+                error()
+            sl = H[st + 16]
+            if sl < 3904000 and sz > 1100 * sl + 1024:
+                error()
+            allimg += sz
+            if allimg < sz or allimg > 2147483647:
+                error()
+            H[st + 20] = sz
+            r = bandrows()
+            nb = (PH[0] + r - 1) // r
+            if nb < 1:
+                nb = 1
+            H[st + 18] = 1 + nbandsall
+            H[st + 19] = nb
+            nbandsall += nb
+    if nbandsall + njpeg != nsubs - 1:
+        error()
+    sub0len = p - dst
+
+# ---------------------------------------------------------------- the static model (ppastatic)
+
+def med3(a, b, c):
+    lo = a
+    hi = b
+    if slt(b, a):
+        lo = b
+        hi = a
+    if slt(c, hi):
+        hi = c
+    if sgt(lo, hi):
+        return lo
+    return hi
+
+def bandlines(firstrow, rows):
+    n = 0
+    for i in range(npass):
+        y0 = 0
+        y1 = PH[i]
+        if npass == 1:
+            y0 = firstrow
+            if firstrow + rows < y1:
+                y1 = firstrow + rows
+        if y1 > y0:
+            n += y1 - y0
+    return n
+
+def decodeband(sub, firstrow, rows, dst, scratch):
+    """ppastatic.DecodeImageStatic of lines firstrow .. firstrow + rows - 1
+    (an interlaced image: all of it), the plain lines into M[dst ..]"""
+    global rpos, rend
+    first = H[subpos + sub]
+    ln = H[sublen + sub]
+    if ln < 1:
+        error()
+    rpos = first
+    rend = first + ln
+    if ln > 10:
+        rend = first + 10
+    plen = getvar()
+    if plen > first + ln - rpos:
+        error()
+    pfirst = rpos
+    rfirst = rpos + plen
+    rlast = first + ln
+    dinit(pfirst, rfirst)
+    mn = direct(32)
+    nf = direct(32)
+    nl = bandlines(firstrow, rows)
+    if nf > mn or mn - nf != nl or nf > N_CTX * 256 * 9 + N_CTX * 2:
+        error()
+    mcheck(scratch, mn)
+    bminit()
+    codebytes(scratch, mn)
+    # the frequencies, checked: each used context sums to SM_TOT
+    for i in range(81920):
+        FREQ[i] = 0
+    rpos = scratch
+    rend = scratch + mn
+    nfend = scratch + nf
+    for c in range(N_CTX):
+        if rpos >= nfend:
+            error()
+        used = getvar()
+        if used > 256:
+            error()
+        nxt = 0
+        sm = 0
+        fb = base(FREQ) + c * 256
+        for k in range(used):
+            gap = getvar()
+            f = getvar()
+            if rpos > nfend or gap > 255 or f >= SM_TOT:
+                error()
+            s = nxt + gap
+            if s > 255:
+                error()
+            H[fb + s] = f + 1
+            sm += f + 1
+            nxt = s + 1
+        if used == 0:
+            H[fb] = SM_TOT
+        elif sm != SM_TOT:
+            error()
+        cb = base(CUM) + c * 257
+        sb = base(SLOT) + c * 256
+        lo = 0
+        H[cb] = 0
+        for s in range(256):
+            hi = lo + H[fb + s]
+            H[cb + s + 1] = hi
+            j = (lo + 15) & 4294967280
+            while j < hi:
+                H[sb + (j >> 4)] = s
+                j += 16
+            lo = hi
+    if rpos != nfend:
+        error()
+    # the rANS state
+    if rlast - rfirst < 4:
+        error()
+    xs = be32at(rfirst)
+    if xs < SM_L or xs >= 2147483648:
+        error()
+    rp = rfirst + 4
+    lk = nfend
+    for pi in range(npass):
+        rb = PRB[pi]
+        y0 = 0
+        y1 = PH[pi]
+        if npass == 1:
+            y0 = firstrow
+            if firstrow + rows < y1:
+                y1 = firstrow + rows
+        if rb == 0 or y1 <= y0:
+            continue
+        nc = imnc
+        w = rb // nc
+        rs = (w + 4) * nc
+        for i in range(2 * rs):
+            H[ringpx + i] = 0
+            H[ringfe + i] = 0
+        if y0 == 0:
+            for i in range(rs):
+                H[prevrow + i] = 0
+        pad = 2 * nc
+        for y in range(y0, y1):
+            yr = y - y0
+            cur = ringpx + (yr & 1) * rs + pad
+            up = ringpx + ((yr + 1) & 1) * rs + pad
+            fc = ringfe + (yr & 1) * rs + pad
+            fu = ringfe + ((yr + 1) & 1) * rs + pad
+            prior = up
+            if yr == 0:
+                up = cur
+                prior = prevrow + pad
+            for k in range(pad):
+                H[up + w * nc + k] = H[up + (w - 1) * nc + k % nc]
+            i = 0
+            for xx in range(w):
+                resprev = 0
+                xprev = 0
+                for ch in range(nc):
+                    vw = H[cur + i - nc]
+                    vn = H[up + i]
+                    vnw = H[up + i - nc]
+                    vne = H[up + i + nc]
+                    if ch == 0 or ch == 3 or nc < 3:
+                        pr = med3(vw, vn, vw + vn - vnw)
+                    else:
+                        dw = vw - H[cur + i - nc - 1]
+                        dn = vn - H[up + i - 1]
+                        dnw = vnw - H[up + i - nc - 1]
+                        pr = xprev + med3(dw, dn, dw + dn - dnw)
+                        if slt(pr, 0):
+                            pr = 0
+                        elif sgt(pr, 255):
+                            pr = 255
+                    en = sabs(H[fc + i - nc]) + sabs(H[fu + i]) + ((sabs(H[fu + i - nc]) + sabs(H[fu + i + nc])) >> 1) \
+                        + ((sabs(vw - vn) + sabs(vn - vne)) >> 3)
+                    if ch != 0:
+                        en += 2 * sabs(resprev)
+                    if en > 4095:
+                        en = 4095
+                    rq = 4
+                    if slt(resprev, -2):
+                        rq = 0
+                    elif slt(resprev, 0):
+                        rq = 1
+                    elif resprev == 0:
+                        rq = 2
+                    elif resprev <= 2:
+                        rq = 3
+                    ctx = (EBIN[en] * 4 + (ch & 3)) * 5 + rq
+                    s = xs & 4095
+                    sym = SLOT[ctx * 256 + (s >> 4)]
+                    cb = base(CUM) + ctx * 257
+                    while H[cb + sym + 1] <= s:
+                        sym += 1
+                    xs = FREQ[ctx * 256 + sym] * (xs >> 12) + s - H[cb + sym]
+                    while xs < SM_L:
+                        b = 0
+                        if rp < rlast:
+                            b = M[rp]
+                        rp += 1
+                        xs = (xs << 8) | b
+                    if sym & 1:
+                        vx = (pr - ((sym + 1) >> 1)) & 255
+                    else:
+                        vx = (pr + (sym >> 1)) & 255
+                    H[cur + i] = vx
+                    er = vx - pr
+                    H[fc + i] = er
+                    resprev = er
+                    xprev = vx
+                    i += 1
+            # the line's filter, applied again (ppapixels.FilterLine; no line
+            # above: a line of zeros does the same)
+            f = M[lk]
+            lk += 1
+            if f > 4:
+                error()
+            o = dst + PPL[pi] + y * (rb + 1)
+            M[o] = f
+            o += 1
+            filterline(f, cur, prior, o, rb, nc)
+        if y1 < PH[pi]:
+            # the band's last line: the next band's first one filters with it
+            last = ringpx + ((y1 - 1 - y0) & 1) * rs + pad
+            for i in range(rb):
+                H[prevrow + pad + i] = H[last + i]
+
+def filterline(f, cur, prior, o, rb, nc):
+    if f == 0:
+        for i in range(rb):
+            M[o + i] = H[cur + i]
+    elif f == 1:
+        for i in range(rb):
+            M[o + i] = H[cur + i] - H[cur + i - nc]
+    elif f == 2:
+        for i in range(rb):
+            M[o + i] = H[cur + i] - H[prior + i]
+    elif f == 3:
+        for i in range(rb):
+            M[o + i] = H[cur + i] - ((H[cur + i - nc] + H[prior + i]) >> 1)
+    else:
+        for i in range(rb):
+            a = H[cur + i - nc]
+            b = H[prior + i]
+            c = H[prior + i - nc]
+            pa = sabs(b - c)
+            pb = sabs(a - c)
+            pc = sabs(a + b - c - c)
+            if pa <= pb and pa <= pc:
+                M[o + i] = H[cur + i] - a
+            elif pb <= pc:
+                M[o + i] = H[cur + i] - b
+            else:
+                M[o + i] = H[cur + i] - c
+
+def decodeimage(s, dst):
+    """image stream s (static) to its plain bytes at M[dst ..]; their length"""
+    global ringpx, ringfe, prevrow, ringw, hp
+    st = stm + s * STREAMREC
+    if H[st + 3] != MODE_STATIC:
+        error()
+    layout(s)
+    sz = H[st + 20]
+    mcheck(dst, sz)
+    keep = hp
+    rs = (imw + 4) * imnc
+    ringpx = alloc(2 * rs)
+    ringfe = alloc(2 * rs)
+    prevrow = alloc(rs)
+    r = bandrows()
+    sub = H[st + 18]
+    scratch = dst + sz
+    for j in range(H[st + 19]):
+        decodeband(sub + j, j * r, r, dst, scratch)
+    # the pixels' tail
+    t = H[st + 14]
+    o = dst + imfilt
+    for i in range(H[st + 15]):
+        M[o + i] = M[t + i]
+    hp = keep
+    return sz
+
+# ---------------------------------------------------------------- the test main
+
+def main():
+    global hp, origsize
+    hp = base(HEAP)
+    probeh()
+    probem()
+    tables()
+    end = inlen()
+    if end < SEG + 1:
+        error()
+    origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
+    parsestream(SEG, end)
+    decodesub0(end)
+    for i in range(sub0len):
+        out(M[sub0dst + i])
+    dst = sub0dst + sub0len
+    for s in range(nstreams):
+        if H[stm + s * STREAMREC + 3] == MODE_STATIC:
+            n = decodeimage(s, dst)
+            for i in range(n):
+                out(M[dst + i])
+    reset(hp)

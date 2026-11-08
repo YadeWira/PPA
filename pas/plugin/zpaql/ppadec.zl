@@ -1,0 +1,169 @@
+"""PPA's stream (version 2) for ZPAQL, part 3: the decoder's main, the file
+put back together.  Compiled after model.zl (without its test main) and
+deflate.zl, by tools/zpaql/gen_ppadec.py, into the PCOMP of zpaq-std's
+codec: config comp 0 0 $3 $4 0 / hcomp halt / pcomp ppa1 ; ... end.
+
+Each segment is what zpaq-std makes of one file: the original size (u32,
+little-endian), then PPA's stream (ppacodec.Compress with every image
+stream of the static model, the other streams kept as bytes). The run:
+
+  1. H's and M's sizes found (probeh, probem: too small is error(), never a
+     wrap), the tables (squash, stretch, the energy bins, the CRC-32's);
+  2. the stream's table, substream 0 (the structure and the streams kept
+     as bytes: model.zl's decodesub0);
+  3. each image stream: its bands back to its plain bytes (decodeimage:
+     the filtered lines and the pixels' tail), deflated again with its
+     zlib parameters (deflate.zl's zdeflate: header, blocks, endPad,
+     Adler-32), then its zTail; the stream must come out exactly as long
+     as its chunks say, and it is kept in M;
+  4. the file (ppapng.Compose): the signature of its kind, each chunk's
+     length, type, data (its own, or the next bytes of its stream: an
+     fdAT's sequence number first) and CRC-32 (computed again when crcOk,
+     else the one stored), then the bytes after the last chunk;
+  5. the count written must be the size the segment said; reset() so that
+     the next segment of the block starts as the first did.
+
+Memory, for a stream whose numbers the encoder knows (the plugin's query
+asks for these, rounded up to powers of two: $3 = log2 of H in words,
+$4 = log2 of M in bytes):
+  H: PPA1_ZPAQL_STATIC_WORDS (zpaqlc's count: arrays, tables, variables)
+     + 2 * substreams + CHUNKREC (8) * chunks + STREAMREC (24) * streams
+     + the most of, over the image streams:
+         5 * (width + 4) * channels           (model.zl's lines), and
+         2^(memLevel+7) + 2^max(wbits,9) + 2^(memLevel+6)   (deflate's)
+  M: the segment (4 + the stream's length)
+     + substream 0's bytes (the meta, then the streams kept as bytes)
+     + the image streams' lengths (their deflate streams, kept for 4.)
+     + the most of, over the image streams:
+         its plain length + its largest band's first part (the byte
+         model's bytes: the static model's tables and a filter byte a line)
+"""
+
+SIG_SECOND = table([80, 77, 74])     # 'P', 'M', 'J' after 0x89, 0x8A, 0x8B
+CRCT = array(256)
+
+outn = 0
+pcrc = 0
+
+
+def crctable():
+    """ppacrc's table: the reflected polynomial 0xEDB88320"""
+    for n in range(256):
+        c = n
+        for k in range(8):
+            if c & 1:
+                c = 3988292384 ^ (c >> 1)
+            else:
+                c = c >> 1
+        CRCT[n] = c
+
+
+def put(c):
+    """a byte of the file, counted, into the chunk's CRC"""
+    global outn, pcrc
+    out(c)
+    outn += 1
+    pcrc = CRCT[(pcrc ^ c) & 255] ^ (pcrc >> 8)
+
+
+def putbe32(v):
+    put(v >> 24)
+    put((v >> 16) & 255)
+    put((v >> 8) & 255)
+    put(v & 255)
+
+
+def rebuild(s, work):
+    """image stream s: its plain bytes at M[work ..], deflated again into
+    M[H[st + 17] ..], then its zTail; exactly the stream's length"""
+    global hp, zmem, zop, zoend
+    st = stm + s * STREAMREC
+    n = decodeimage(s, work)
+    keep = hp
+    zmem = alloc(zwords(H[st + 6], H[st + 7]))
+    zop = H[st + 17]
+    zoend = zop + H[st + 16]
+    zdeflate(work, n, H[st + 4], H[st + 5], H[st + 6], H[st + 7], H[st + 8], H[st + 9], H[st + 10], H[st + 11])
+    t = H[st + 12]
+    for i in range(H[st + 13]):
+        zout(M[t + i])
+    if zop != zoend:
+        error()
+    zop = 0
+    hp = keep
+
+
+def compose():
+    """ppapng.Compose: the signature, the chunks, the bytes after them"""
+    global pcrc
+    put(137 + pngkind)
+    put(SIG_SECOND[pngkind])
+    put(78)
+    put(71)
+    put(13)
+    put(10)
+    put(26)
+    put(10)
+    for i in range(nchunks):
+        c = chk + i * CHUNKREC
+        ln = H[c + 1]
+        putbe32(ln)
+        pcrc = 4294967295
+        putbe32(H[c])
+        s = H[c + 4]
+        if s == NONE:
+            a = H[c + 6]
+            for k in range(ln):
+                put(M[a + k])
+        else:
+            st = stm + s * STREAMREC
+            if H[c] == CT_FDAT:
+                putbe32(H[c + 5])
+                ln -= 4
+            # the stream's next ln bytes (STREAMREC word 21: how far its
+            # chunks so far took it)
+            a = H[st + 17] + H[st + 21]
+            H[st + 21] += ln
+            for k in range(ln):
+                put(M[a + k])
+        v = pcrc ^ 4294967295
+        if (H[c + 2] & 1) == 0:
+            v = H[c + 3]
+        putbe32(v)
+    for k in range(traillen):
+        put(M[trailpos + k])
+
+
+def main():
+    global hp, origsize, outn
+    hp = base(HEAP)
+    probeh()
+    probem()
+    tables()
+    crctable()
+    end = inlen()
+    if end < SEG + 1 or end > msize:
+        error()
+    origsize = M[0] | (M[1] << 8) | (M[2] << 16) | (M[3] << 24)
+    parsestream(SEG, end)
+    decodesub0(end)
+    # each image stream's deflate stream gets its place, then the plain
+    # bytes' (one image at a time) after all of them
+    first = sub0dst + sub0len
+    p = first
+    for s in range(nstreams):
+        st = stm + s * STREAMREC
+        if H[st + 3] == MODE_STATIC:
+            H[st + 17] = p
+            p += H[st + 16]
+            if p < first:
+                error()
+    mcheck(first, p - first)
+    for s in range(nstreams):
+        if H[stm + s * STREAMREC + 3] == MODE_STATIC:
+            rebuild(s, p)
+    outn = 0
+    compose()
+    if outn != origsize:
+        error()
+    reset(hpmax)

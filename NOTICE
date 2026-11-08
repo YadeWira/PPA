@@ -34,3 +34,10 @@ license:
   2. Altered source versions must be plainly marked as such, and must not be
      misrepresented as being the original software.
   3. This notice may not be removed or altered from any source distribution.
+
+tools/zpaql/zpaqlc.py, zpaqlvm.py and test_zpaqlc.py are PJA's
+(https://github.com/YadeWira/PJA, MIT, the same author) at its commit
+114c395, unmodified and pinned: the zpaq-std codec's ZPAQL decoder
+(pas/plugin/zpaql/) is compiled with them, and its bytecode must not
+change once a codec is published. pas/plugin/zpaql/model.zl takes its
+arithmetic decoder from PJA's pas/plugin/zpaql/pjadec.zl.
