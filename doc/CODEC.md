@@ -198,7 +198,7 @@ with a prototype of each when the ZPAQL is written.
 ## Layer 6: the stream
 
 `ppacodec.Compress` takes a whole file. The stream is one version byte
-(`STREAM_VERSION`: 2 since 07/11/2026, the static model's 320 contexts; 1, PPA 0.1.0's, still read), the count and lengths of its substreams (varints),
+(`STREAM_VERSION`: 2 since 0.1.1, the static model's 320 contexts; 1, PPA 0.1.0's, still read), the count and lengths of its substreams (varints),
 and the substreams, each its own arithmetic stream. Substream 0 holds:
 
 - the file's structure, written as bytes (numbers as varints) and coded with

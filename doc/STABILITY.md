@@ -31,7 +31,7 @@ extension. A version past 1 is a newer PPA's.
 | version | written by | read by | what changed |
 |---|---|---|---|
 | 1 | 0.1.0 | every release | the first: the structure, zlib's parameters, the three pixel models (slow, fast, static with 64 contexts), a JNG's JPEG through PJA's stream 7 |
-| 2 | the main branch since 07/11/2026 | the main branch | the static model's 320 contexts (the channel before's residual in five levels) |
+| 2 | 0.1.1 | 0.1.1 and later | the static model's 320 contexts (the channel before's residual in five levels) |
 
 `tests/ppa1/` holds `.ppa` files 0.1.0 wrote, one for each model, an APNG
 and a JNG; `pas/tests/cli.sh` extracts them with every build, on the six

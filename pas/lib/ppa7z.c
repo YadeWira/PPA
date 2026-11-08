@@ -346,6 +346,6 @@ HRESULT ppa7z_GetModuleProp(uint32_t prop, propvariant_t *v) {
   if (!v) return E_INVALIDARG;
   v->vt = VT_EMPTY;
   if (prop == M_INTERFACE_TYPE) { v->vt = VT_UI4; v->v.u32 = 0; }   /* no virtual destructor */
-  else if (prop == M_VERSION) { v->vt = VT_UI4; v->v.u32 = (0u << 16) | 10u; }   /* 0.10 = PPA 0.1.0, checked against ppasysinfo's VERSION by run_tests.sh */
+  else if (prop == M_VERSION) { v->vt = VT_UI4; v->v.u32 = (0u << 16) | 11u; }   /* 0.11 = PPA 0.1.1, checked against ppasysinfo's VERSION by run_tests.sh */
   return S_OK;
 }

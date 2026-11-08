@@ -118,6 +118,15 @@ jobs:
         with:
           name: hash-windows-x64
           path: hash.txt
+      # the binaries, to try them in a real Windows (the VMs) before a release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-windows-x64
+          retention-days: 14
+          path: |
+            build/ci/ppa.exe
+            build/ci/lib/ppa.dll
+            build/ci/lib/test_lib.exe
 
   windows-x86:
     runs-on: windows-latest
@@ -145,6 +154,15 @@ jobs:
         with:
           name: hash-windows-x86
           path: hash.txt
+      # the binaries, to try them in a real Windows (the VMs) before a release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-windows-x86
+          retention-days: 14
+          path: |
+            build/ci/ppa.exe
+            build/ci/lib/ppa.dll
+            build/ci/lib/test_lib.exe
 
   determinism:
     needs: [linux-x64, linux-arm64, linux-x86, macos-arm64, windows-x64, windows-x86]

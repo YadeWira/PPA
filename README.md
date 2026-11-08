@@ -16,7 +16,7 @@ ppa a image.png          # -> image.ppa
 ppa x image.ppa          # -> image.png, the same file byte for byte
 ```
 
-**Version 0.1.0, the first release.** Every layer of the
+**Version 0.1.1.** Every layer of the
 codec works and the command does too, with three models for the pixels
 chosen image by image (a static one for photographs, quick to extract; an
 adaptive one; the slowest and smallest, which `--max` takes for every
@@ -53,14 +53,14 @@ comes back byte for byte, and nothing is written unless it verified.
 One file at a time, against the two byte-exact recompressors of PNG:
 [packPNG](https://github.com/YadeWira/packPNG) 2.0b (its default: preflate
 and WebP-lossless) and [precomp](https://github.com/schnaader/precomp-cpp)
-0.4.7 (preflate and LZMA), against `ppa` (the main branch, after 0.1.0).
+0.4.7 (preflate and LZMA), against `ppa` 0.1.1.
 packPNG and precomp measured on 01/11/2026, PPA again on 07/11/2026
 ([how][wComp]): each set's whole output against its input, every file
 extracted and compared with the original; a file a tool does not take, or
 that does not come back the same, would count at its own size (every tool
 took and gave back every file).
 
-| set | files | size | packPNG 2.0b | precomp 0.4.7 | PPA 0.1.0 | PPA, main |
+| set | files | size | packPNG 2.0b | precomp 0.4.7 | PPA 0.1.0 | PPA 0.1.1 |
 |---|---|---|---|---|---|---|
 | the PNG family of a sample corpus (PNG, APNG, MNG, JNG, CgBI) | 70 | 32.9 MB | 76.99% | 97.81% | 56.79% | **56.30%** |
 | photos as PNG (decoded from JPEG, 1.3 to 2.9 MP) | 20 | 40.3 MB | 73.92% | 103.62% | 62.29% | **60.51%** |
@@ -70,7 +70,7 @@ And how fast, on the 20 photos (two Xeon E5-2697A v4, 64 threads, with
 other work running). "8 at once": `ppa -th 8`; the others, 8 processes of
 one file each. PPA and packPNG verify what they write.
 
-| | packPNG 2.0b | precomp 0.4.7 | PPA 0.1.0 | PPA, main |
+| | packPNG 2.0b | precomp 0.4.7 | PPA 0.1.0 | PPA 0.1.1 |
 |---|---|---|---|---|
 | compress, 1 thread | 77.0 s | **17.3 s** | 43.7 s | 32.6 s |
 | decompress, 1 thread | **8.3 s** | 11.7 s | 14.3 s | 15.1 s |
@@ -82,8 +82,8 @@ PPA is the smallest on every set, 18 to 27% smaller than packPNG, and
 compresses faster than it, but is still slower to decompress (1.8 times
 with one thread): rebuilding zlib's own choices for the deflate stream
 costs about as much as packPNG's whole decompression (PPA's are faster
-than zlib's own, and since 07/11/2026 run on several threads for one
-file). The main branch trades a little of 0.1.0's speed to extract for
+than zlib's own, and since 0.1.1 run on several threads for one
+file). 0.1.1 trades a little of 0.1.0's speed to extract for
 size: more photographs take the fast model (`doc/CODEC.md`). A photograph takes
 PPA's static model (a table lookup a sample); a drawing, where that model
 loses much, its adaptive ones. `ppa a --max` takes the slowest and
