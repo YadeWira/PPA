@@ -120,7 +120,7 @@ type
     len: Int64;
   end;
   TParsed = record
-    version: Integer;
+    streamVersion: Integer;
     nSubs: Int64;
     subLen, subPos: array of Int64;
     meta: TBytes;
@@ -221,7 +221,7 @@ var
 begin
   P := Default(TParsed);
   q := 0;
-  P.version := GetB(st, q);
+  P.streamVersion := GetB(st, q);
   P.nSubs := GetV(st, q);
   SetLength(P.subLen, P.nSubs); SetLength(P.subPos, P.nSubs);
   for i := 0 to P.nSubs - 1 do P.subLen[i] := GetV(st, q);
@@ -381,7 +381,7 @@ begin
 
     ParseStream(st, P, sub0, byteOff);
     WriteBytes(base + '.sub0', sub0, 0, Length(sub0));
-    Check('version_is_2', P.version = 2);
+    Check('version_is_2', P.streamVersion = 2);
 
     if ppapng.Decompose(d, png).err <> peNone then raise EParse.Create('Decompose failed');
     Check('chunks_match_decompose', Length(png.chunks) = Length(P.chunks));
@@ -402,7 +402,7 @@ begin
     end;
 
     L.Add('  "taken": true, "why": "",');
-    L.Add(Format('  "stream_len": %d, "stream_version": %d, "n_subs": %d,', [Length(st), P.version, P.nSubs]));
+    L.Add(Format('  "stream_len": %d, "stream_version": %d, "n_subs": %d,', [Length(st), P.streamVersion, P.nSubs]));
     L.Add('  "kind": ' + JS(KIND_NAMES[Min(P.kind, 2)]) + ', "trailer_len": ' + IntToStr(P.trailerLen) + ',');
     { substreams: which is which }
     line := '  "substreams": [' + Format('{"index": 0, "offset": %d, "length": %d, "what": "sub0"}',
@@ -524,7 +524,7 @@ begin
               bmeta := nil; SetLength(bmeta, mn);
               bm.Init; CodeBytes(bm, bmeta, 0, mn, nil, @adec);
               WriteBytes(Format('%s.s%d.b%d.meta', [base, s, j]), bmeta, 0, mn);
-              ok := DecodeImageStatic(px, y, r, st, P.subPos[sub], P.subLen[sub], P.version);
+              ok := DecodeImageStatic(px, y, r, st, P.subPos[sub], P.subLen[sub], P.streamVersion);
               Check(Format('stream_%d_band_%d_decodes', [s, j]), ok);
               L.Add(Format('         %s{"sub": %d, "first_row": %d, "rows": %d, "sub_offset": %d, "sub_len": %d, "part_len": %d, "meta_len": %d, "freq_bytes": %d, "lines": %d, "rans_len": %d}',
                 [IfThen(j > 0, ',', ''), sub, y, Min(r, px.passes[0].height - y), P.subPos[sub], P.subLen[sub], plen, mn, nf, mn - nf,

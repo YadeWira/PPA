@@ -114,4 +114,26 @@ $FPC -O3 -dPPA_FAST -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fu"$PPA/vendor/pja/pas" -Fi"
 # the samples inside the binary (ppa selftest) are this code's .ppa
 python3 "$PPA/tools/gen_selftest.py" --check "$OUT/ppa"
 
+echo "== the zpaq-std plugin (codec ppa1): its ZPAQL decoder, the query's memory, the library"
+# the decoder compiled from pas/plugin/zpaql/ is the .inc's; zpaqlc's own tests
+python3 "$PPA/tools/zpaql/gen_ppadec.py" --check
+python3 "$PPA/tools/zpaql/test_zpaqlc.py" | tail -1
+# the query (ppazpaqlargs) on images of many sizes built there and on tests/png,
+# and the detection's refusals; then the decoder itself with exactly that H
+# and M (the file back) and one word or byte less (error()), the smallest
+# also compiled, in zpaqlvm
+$FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -Fu"$PAS/plugin" -Fi"$PAS/plugin" -Fu"$PPA/vendor/pja/pas" -Fi"$PPA/vendor/pja/pas" \
+  -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/test_zpaqlargs.pas" > "$OUT/fpc.log" 2>&1 || { cat "$OUT/fpc.log"; exit 1; }
+rm -rf "$OUT/zpaqlargs"
+"$OUT/test_zpaqlargs" "$OUT/zpaqlargs" "$PPA/tests/png" | tail -1
+python3 "$PAS/tests/check_zpaqlargs.py" "$OUT/zpaqlargs" --vm 1 --jobs 8
+# the library as zpaq-std loads it (ctypes): its codec, what it takes and
+# refuses, compress, query, decompress
+mkdir -p "$OUT/pu"
+sh "$PAS/build_c.sh" "$OUT/pc" -fPIC
+$FPC -O3 -dPPA_FAST -dPJA_FAST -Cg -Fu"$PAS" -Fi"$PAS" -Fu"$PAS/plugin" -Fi"$PAS/plugin" -Fu"$PPA/vendor/pja/pas" -Fi"$PPA/vendor/pja/pas" \
+  -Fo"$OUT/pc" -FU"$OUT/pu" -o"$OUT/ppa_plugin.so" "$PAS/plugin/ppa_zpaqstd.pas" > "$OUT/fpc.log" 2>&1 || { cat "$OUT/fpc.log"; exit 1; }
+python3 "$PAS/tests/probe_plugin.py" "$OUT/ppa_plugin.so" --need-refusals "$PPA/tests/png" | tail -1
+for d in "${dirs[@]}"; do python3 "$PAS/tests/probe_plugin.py" "$OUT/ppa_plugin.so" "$d" | tail -1; done
+
 echo "all green"

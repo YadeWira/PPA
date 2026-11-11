@@ -78,9 +78,14 @@ type
 { data -> stream; False (with why) if the file is not taken. threads: one
   file's image streams (their zlib parameters) and bands go to as many; 1:
   everything in the calling thread. The stream is the same whatever the
-  threads. }
+  threads. model: -1, each image the model ChooseModel picks (TestModel
+  for the tests); MODE_STATIC, MODE_FAST or MODE_IMAGE, every image that
+  model can take with it (the zpaq-std plugin's ppa1: the static model,
+  the one its ZPAQL decodes). A parameter, not a global: the plugin's
+  calls run on several threads at once, and the ppa command's streams do
+  not change. }
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; verify: Boolean = True; threads: Integer = 1): Boolean;
+  out stats: TCodecStats; verify: Boolean = True; threads: Integer = 1; model: Integer = -1): Boolean;
 { stream -> data; maxOut caps the file. False (with why) on any damage.
   threads: the bands decoded and the deflate streams rebuilt on as many. }
 function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
@@ -146,6 +151,11 @@ const
     gigabytes, each image within its own stream's bound). The same on every
     platform: it decides the stream. }
   MAX_TOTAL_IMAGE_BYTES = Int64(2) shl 30;
+  { the structure (meta) may be this much longer than the file, no more:
+    the decompressor (and ppa1's ZPAQL decoder) refuses a longer one. Only
+    the images' pixel tails (bytes a zlib stream holds after the image) can
+    make it so: the compressor keeps such images as bytes }
+  META_SLACK = 1024 * 1024;
   { each band coded at once takes its own model, about 140 MB: a 32-bit
     process (2 GB of addresses, on Windows) codes at most this many }
   MAX_BANDS_AT_ONCE_32 = 4;
@@ -342,10 +352,12 @@ begin
   if Int64(sSlow) * 100 < Int64(sFast) * (100 - SLOW_GAIN) then Result := MODE_IMAGE;
 end;
 
-{ Whether stream s can be kept as an image, and its plan }
-function PlanImage(const p: TPng; s: SizeInt; out plan: TStreamPlan): Boolean;
+{ Whether stream s can be kept as an image, and its plan. model: Compress's
+  (-1: TestModel's, which is -1 outside the tests) }
+function PlanImage(const p: TPng; s: SizeInt; model: Integer; out plan: TStreamPlan): Boolean;
 var info: TImageInfo; e: TZStream; back: TBytes; a: TBytes;
 begin
+  if model < 0 then model := TestModel;
   Result := False;
   plan := Default(TStreamPlan);
   plan.mode := MODE_BYTES;
@@ -362,10 +374,11 @@ begin
   e.endPad := plan.z.endPad; e.tail := plan.z.tail;
   back := Encode(e);
   if (Length(back) <> Length(a)) or not CompareMem(@back[0], @a[0], Length(a)) then Exit;
-  if FastModel and FastEligible(info) then plan.mode := ChooseModel(plan.px)
+  { a model given takes every image it can (ChooseModel's trials skipped) }
+  if (model = MODE_IMAGE) or ((model in [MODE_FAST, MODE_STATIC]) and FastEligible(info)) then
+    plan.mode := model
+  else if FastModel and FastEligible(info) then plan.mode := ChooseModel(plan.px)
   else plan.mode := MODE_IMAGE;
-  if (TestModel = MODE_IMAGE) or ((TestModel in [MODE_FAST, MODE_STATIC]) and FastEligible(info)) then
-    plan.mode := TestModel;
   Result := True;
 end;
 
@@ -382,19 +395,19 @@ type
   PKnownStreams = ^TKnownStreams;
 
 function CompressRaw(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; threads: Integer; out known: TKnownStreams): Boolean;
+  out stats: TCodecStats; threads, model: Integer; out known: TKnownStreams): Boolean;
 var
   p: TPng; r: TPngResult; w: TWriter; meta: TBytes;
   plans: array of TStreamPlan;
-  i, s: SizeInt; c: TChunk;
+  i, s: SizeInt;
   enc: TArithEncoder; bm, rm: TByteModel; sub0: TBytes;
   jobs: array of TBandJob; subs: array of TBytes; nJobs, nJpeg: SizeInt;
-  total: Int64;
+  total: Int64; big: SizeInt; grew: Boolean; coded: array of Int64;
 
   procedure PlanOne(k: SizeInt);
   begin
     if p.streams[k].kind in [skJdat, skJdaa] then PlanJpeg(p, k, 1, plans[k])
-    else PlanImage(p, k, plans[k]);
+    else PlanImage(p, k, model, plans[k]);
   end;
 
   procedure CodeBand(k: SizeInt);
@@ -408,6 +421,46 @@ var
     if plans[jobs[k].s].mode = MODE_FAST then CodeImageFast(plans[jobs[k].s].px, jobs[k].firstRow, jobs[k].rows, @e, nil)
     else CodeImageBand(plans[jobs[k].s].px, jobs[k].firstRow, jobs[k].rows, @e, nil);
     subs[k] := e.Finish;
+  end;
+
+  { the structure: the chunks (each one's own data, or its stream's
+    number), the bytes after them, each stream's mode and parameters }
+  function BuildMeta: TBytes;
+  var w: TWriter; i, s: SizeInt; c: TChunk;
+  begin
+    w := Default(TWriter);
+    w.Put(Ord(p.kind));
+    w.PutVar(Length(p.chunks));
+    for i := 0 to High(p.chunks) do begin
+      c := p.chunks[i];
+      PutBe32(w, c.typ);
+      w.PutVar(c.len);
+      w.Put(Ord(c.crcOk) or (Ord(c.stream >= 0) shl 1));
+      if not c.crcOk then PutBe32(w, c.crc);
+      if c.stream >= 0 then begin
+        w.PutVar(c.stream);
+        if c.typ = CT_fdAT then PutBe32(w, c.seq);
+      end else
+        w.PutBytes(c.data, 0, Length(c.data));
+    end;
+    w.PutVar(Length(p.trailer));
+    w.PutBytes(p.trailer, 0, Length(p.trailer));
+    w.PutVar(Length(p.streams));
+    for s := 0 to High(p.streams) do begin
+      w.Put(Ord(p.streams[s].kind));
+      w.PutVar(p.streams[s].header + 1);
+      w.PutVar(p.streams[s].frame + 1);
+      w.Put(plans[s].mode);
+      if plans[s].mode in IMAGE_MODES then
+        with plans[s] do begin
+          w.Put(prm.level); w.Put(prm.strategy); w.Put(prm.memLevel); w.Put(prm.wbits);
+          w.Put(Ord(z.raw) or (Ord(z.adlerOk) shl 1));
+          w.Put(z.header[0]); w.Put(z.header[1]); w.Put(z.endPad);
+          w.PutVar(Length(z.tail)); w.PutBytes(z.tail, 0, Length(z.tail));
+          w.PutVar(Length(px.tail)); w.PutBytes(px.tail, 0, Length(px.tail));
+        end;
+    end;
+    Result := w.Bytes;
   end;
 
 begin
@@ -434,6 +487,29 @@ begin
         plans[s].z := Default(TZStream);
       end;
     end;
+  { a model given (the plugin's): an image whose coding with it comes out
+    much larger than its own deflate stream (a quarter and 4 KiB more)
+    goes again as bytes: noise takes the static model badly, up to four
+    times its stream, past what the plugin may return. A small image a
+    little larger keeps the model (its tables cost more than its pixels).
+    The ppa command's streams (model -1) do not take this path. }
+  repeat
+  grew := False;
+  { a structure longer than the decoders take: the images with the
+    longest pixel tails as bytes, until it fits (a file the decoder could
+    not give back otherwise; no other file's stream changes) }
+  meta := BuildMeta;
+  while Int64(Length(meta)) > Int64(Length(data)) + META_SLACK do begin
+    big := -1;
+    for s := 0 to High(p.streams) do
+      if (plans[s].mode in IMAGE_MODES) and (Length(plans[s].px.tail) > 0) and
+         ((big < 0) or (Length(plans[s].px.tail) > Length(plans[big].px.tail))) then big := s;
+    if big < 0 then begin why := 'structure larger than the file may be'; Exit; end;
+    plans[big].mode := MODE_BYTES;
+    plans[big].px := Default(TPixels);
+    plans[big].z := Default(TZStream);
+    meta := BuildMeta;
+  end;
   known := nil;
   SetLength(known, Length(p.streams));
   for s := 0 to High(p.streams) do begin
@@ -445,41 +521,6 @@ begin
     if plans[s].mode in IMAGE_MODES + [MODE_JPEG] then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
     else begin Inc(stats.rawStreams); Inc(stats.rawBytes, Length(p.streams[s].data)); end;
   end;
-
-  { the structure }
-  w := Default(TWriter);
-  w.Put(Ord(p.kind));
-  w.PutVar(Length(p.chunks));
-  for i := 0 to High(p.chunks) do begin
-    c := p.chunks[i];
-    PutBe32(w, c.typ);
-    w.PutVar(c.len);
-    w.Put(Ord(c.crcOk) or (Ord(c.stream >= 0) shl 1));
-    if not c.crcOk then PutBe32(w, c.crc);
-    if c.stream >= 0 then begin
-      w.PutVar(c.stream);
-      if c.typ = CT_fdAT then PutBe32(w, c.seq);
-    end else
-      w.PutBytes(c.data, 0, Length(c.data));
-  end;
-  w.PutVar(Length(p.trailer));
-  w.PutBytes(p.trailer, 0, Length(p.trailer));
-  w.PutVar(Length(p.streams));
-  for s := 0 to High(p.streams) do begin
-    w.Put(Ord(p.streams[s].kind));
-    w.PutVar(p.streams[s].header + 1);
-    w.PutVar(p.streams[s].frame + 1);
-    w.Put(plans[s].mode);
-    if plans[s].mode in IMAGE_MODES then
-      with plans[s] do begin
-        w.Put(prm.level); w.Put(prm.strategy); w.Put(prm.memLevel); w.Put(prm.wbits);
-        w.Put(Ord(z.raw) or (Ord(z.adlerOk) shl 1));
-        w.Put(z.header[0]); w.Put(z.header[1]); w.Put(z.endPad);
-        w.PutVar(Length(z.tail)); w.PutBytes(z.tail, 0, Length(z.tail));
-        w.PutVar(Length(px.tail)); w.PutBytes(px.tail, 0, Length(px.tail));
-      end;
-  end;
-  meta := w.Bytes;
 
   { substream 0: the structure, and the streams kept as bytes }
   enc.Init;
@@ -502,6 +543,19 @@ begin
   stats.bands := nJobs;
   StageEnter(stEncode);
   ParallelFor(nJobs, BandThreads(threads), @CodeBand);
+  if model >= 0 then begin
+    coded := nil; SetLength(coded, Length(p.streams));
+    for i := 0 to nJobs - 1 do Inc(coded[jobs[i].s], Length(subs[i]));
+    for s := 0 to High(p.streams) do
+      if (plans[s].mode in IMAGE_MODES) and (coded[s] > Int64(Length(p.streams[s].data)) * 5 div 4 + 4096) then begin
+        plans[s].mode := MODE_BYTES;
+        plans[s].px := Default(TPixels);
+        plans[s].z := Default(TZStream);
+        grew := True;
+      end;
+    if grew then stats := Default(TCodecStats);
+  end;
+  until not grew;
 
   { then each JNG JPEG's PJA stream, in order }
   nJpeg := 0;
@@ -530,13 +584,13 @@ function DecompressSafe(const stream: TBytes; maxOut: Int64; out data: TBytes; o
   threads: Integer; stages: Boolean; known: PKnownStreams; out failure: TDecodeFailure): Boolean; forward;
 
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; verify: Boolean; threads: Integer): Boolean;
+  out stats: TCodecStats; verify: Boolean; threads, model: Integer): Boolean;
 var back: TBytes; why2: string; was: TStage; known: TKnownStreams; fail: TDecodeFailure;
 begin
   why := '';
   was := StageEnter(stNone);
   StageEnter(was);
-  Result := CompressRaw(data, stream, why, stats, threads, known);
+  Result := CompressRaw(data, stream, why, stats, threads, model, known);
   if not Result or not verify then begin StageEnter(was); Exit; end;
   { The stream decompressed and compared with the file, whole. Each image's
     deflate stream is not written again: what the decoder refilters is
@@ -654,7 +708,7 @@ begin
   metaLen := dec.Direct(32);
   { the structure holds the file's chunks other than the image data, and
     little more }
-  if Int64(metaLen) > maxOut + 1024 * 1024 then Exit(Bad('structure larger than the file may be'));
+  if Int64(metaLen) > maxOut + META_SLACK then Exit(Bad('structure larger than the file may be'));
   meta := nil; SetLength(meta, metaLen);
   bm.Init;
   CodeBytes(bm, meta, 0, metaLen, nil, @dec);
