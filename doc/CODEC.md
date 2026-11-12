@@ -29,8 +29,9 @@ over a large corpus, is the oracle for the whole project.
 | 7 | `ppaformat`, `ppacli` | the `.ppa` file (`FORMAT.md`) and the `ppa` command (`CLI.md`) | done |
 
 A JNG's JPEG (JDAT, and JDAA for its alpha) goes to PJA's codec: its Pascal
-units and C, vendored unmodified from PJA 0.6.1's release tarball
-(`vendor/pja`, as zpaq-std vendors it), with version 7's model. The JPEG is
+units and C, vendored unmodified from PJA's release tarball (`vendor/pja`,
+as zpaq-std, PMPA and POA vendor it): PJA 0.6.1 until 0.1.1, PJA 0.9.8
+since (12/11/2026; it reads every stream 0.6.1 wrote). The JPEG is
 kept as its bytes when PJA does not take it or does not make it smaller.
 
 Each layer has its test in `pas/tests/`, and nothing moves up to the next

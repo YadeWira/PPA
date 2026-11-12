@@ -1,14 +1,14 @@
-PJA 0.6.1 (tag v0.6.1, commit 3488d96), https://github.com/YadeWira/PJA,
-from the vendor tarball pja-0.6.1-zpaqstd.tar.gz of its release (sha256
-48b520f86c2d83a92ba94cd3391bc29032bb627f3a7445e5f4aee8ff8fa83a47, as its
-SHA256SUMS says), copied unmodified, as zpaq-std vendors it. 0.6.1 writes
-the same streams as 0.6.0; only its build changes (clang ~8% faster, with
--fno-builtin).
+PJA 0.9.8 (tag v0.9.8, commit e89a500), https://github.com/YadeWira/PJA,
+from the vendor tarball pja-0.9.8-zpaqstd.tar.gz of its release (sha256
+f777a59f904be361e337b3fcdf285d9647b9a2d70659adf5c668d186d51c5cdc, as its
+SHA256SUMS says), copied unmodified, as zpaq-std, PMPA and POA vendor it
+(two PJA codecs do not fit in one program).
 
 PPA uses it for the JPEG inside a JNG (its JDAT, and JDAA for the alpha):
-pjacodec.Compress with version 7's model, pjacodec.Decompress. MIT
-(LICENSE); NOTICE has PJA's third-party notes (IJG for arithmetic-coded
-JPEG, CharLS for JPEG-LS).
+pjacodec.Compress, pjacodec.Decompress. PJA 0.9.8 reads every stream PJA
+0.6.1 wrote, so PPA still reads every .ppa of a JNG it wrote before; one
+PPA writes now may carry a PJA stream an older PPA refuses as a newer
+one's. MIT (LICENSE); NOTICE has PJA's third-party notes.
 
 Do not patch these files here: changes go to the PJA repository, and a new
 release tag comes in whole, replacing this directory.

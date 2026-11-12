@@ -1,7 +1,10 @@
 # PPA: the zpaq-std plugin, codec `ppa1`
 
 PPA (https://github.com/YadeWira/PPA), commit `@COMMIT@`@TAG@. Only the
-sources the plugin is built from, made by `tools/zpaqstd_tarball.sh`. MIT
+sources the plugin is built from, made by `tools/zpaqstd_tarball.sh`; the
+same sources vendor PPA's codec into another program (`pas/ppacodec.pas`:
+`Compress` and `DecompressEx`, in memory, `Compress` verifying what it
+returns), as POA does for a cover picture. MIT
 (`LICENSE`); `NOTICE` has the third-party notes (PJA's codec for a JNG's
 JPEG, linked but not used by `ppa1`; zlib's choices ported; PJA's ZPAQL
 compiler, pinned).

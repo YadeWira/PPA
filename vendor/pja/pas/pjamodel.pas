@@ -95,11 +95,21 @@ function CodeBand(var cd: TCoder; var j: TJpeg; band: Integer; model: TModelKind
   FreePascal does not free when a thread ends). Each thread that codes calls
   it before it ends: the library starts threads on every call. }
 procedure ReleaseThreadModels;
+{ libpja's exports, which code on the host's threads, and those can be many
+  and short-lived: ParkThreadModels moves this thread's models out of its
+  threadvars (as ReleaseThreadModels) into a few kept for the next call on
+  any thread, which UnparkThreadModels gives to its thread; the ones past
+  those few are freed. Models from another thread make the same streams as
+  fresh ones (RawDirty travels with them). }
+procedure ParkThreadModels;
+procedure UnparkThreadModels;
 { libpja's JPEGs without tables of their own (pjafilter.c): the tables the
   filter put after the SOI of the one this thread codes now, which CodeRaw
   then leaves out of the stream (a bit says it did) and puts back when
   decoding; nil for every other file. Both sides set the same. }
 procedure SetGivenTables(const t: TBytes);
+{ This thread's, for a thread that codes for it (pjacodec's helpers) }
+function GetGivenTables: TBytes;
 
 type
   { What version 7's C code (pjav7c.c) reads: the counters and the mixers'
@@ -146,7 +156,25 @@ var
     plugin) has no C and does not code version 7 }
   V7Code: TV7Code = nil;
 
+type
+  { The raw-byte model's loop (CodeRawBytes) in C, pjav7c.c: len bytes of
+    raw coded with the counters o0, o1, o2, which it puts back as new at
+    the end (RawReset's walk; from RAW_RESET_WHOLE bytes on it leaves them,
+    and CodeRawBytes refills the tables whole). coder is cd.enc or cd.dec,
+    as for V7Code. }
+  TRawCode = procedure(encoding: Boolean; coder: Pointer; o0, o1, o2: PAdaptiveBit; raw: PByte; len: SizeInt);
+
+var
+  { set by pjav7's initialization, unless PJA_NOASM=1: then, and in the
+    zpaq-std plugin, the Pascal loop (the suite compares the two) }
+  RawCode: TRawCode = nil;
+
 procedure V7FillTables(out t: TV7Tables);
+{ The SIMD copies the models take (UseSse41, UseAvx2 below), for the
+  command's --cpu and selftest: SetSimd only with no band running, and for
+  version 7 followed by pjav7.V7Retable }
+procedure GetSimd(out sse41, avx2: Boolean);
+procedure SetSimd(sse41, avx2: Boolean);
 
 const
   { JPEG-LS: one band per JLS_BAND_SAMPLES samples, at most MAX_BANDS, at
@@ -588,11 +616,17 @@ threadvar
   { The raw model's tables, kept for the next file in this thread: the
     order-2 one has 4M counters (16 MB), and a JPEG's raw bytes touch a few
     thousand of them. After each use, only the counters it touched are put
-    back as new (RawReset); RawDirty says a use did not finish, and then all
+    back as new (RawReset; from RAW_RESET_WHOLE bytes on, all of them);
+    RawDirty says a use did not finish, and then all
     of them are. The same tables as freshly allocated ones, so the same
     streams. }
   RawO0, RawO1, RawO2: TBits;
   RawDirty: Boolean;
+
+const
+  { from this many raw bytes on, RawReset refills the tables instead of
+    walking the bytes again }
+  RAW_RESET_WHOLE = 65536;
 
 procedure RawReset(const raw: TBytes; len: SizeInt);
 var e: TAdaptiveBit; i, b, node, c1, c2: SizeInt; h: Cardinal; o0, o1, o2: TBits;
@@ -600,6 +634,17 @@ begin
   { the threadvars once: each use of one is a call to find this thread's }
   o0 := RawO0; o1 := RawO1; o2 := RawO2;
   e := Default(TAdaptiveBit); e.Init;
+  {$if SizeOf(TAdaptiveBit) = 4}
+  { many bytes: the walk's stores land at random in the 16 MB order-2 table
+    and cost more than refilling the tables whole, which leaves them in the
+    same state (every counter new) }
+  if len >= RAW_RESET_WHOLE then begin
+    FillDWord(o0[0], Length(o0), PLongWord(@e)^);
+    FillDWord(o1[0], Length(o1), PLongWord(@e)^);
+    FillDWord(o2[0], Length(o2), PLongWord(@e)^);
+    Exit;
+  end;
+  {$endif}
   c1 := 0; c2 := 0;
   for i := 0 to len - 1 do begin
     node := 1;
@@ -620,6 +665,11 @@ threadvar
 procedure SetGivenTables(const t: TBytes);
 begin
   GivenTables := t;
+end;
+
+function GetGivenTables: TBytes;
+begin
+  Result := GivenTables;
 end;
 
 function CodeRawBytes(var cd: TCoder; var raw: TBytes; maxLen: SizeInt): Boolean; forward;
@@ -654,7 +704,7 @@ end;
 
 function CodeRawBytes(var cd: TCoder; var raw: TBytes; maxLen: SizeInt): Boolean;
 var mx: TMixer; len: Int64; i, b, bit, node, c1, c2: SizeInt; h: Cardinal; p: Integer;
-    o0, o1, o2: TBits;
+    o0, o1, o2: TBits; coder: Pointer;
 begin
   {$ifdef PJA_COSTS}CostKind := ckRaw;{$endif}
   len := cd.Direct(Cardinal(Length(raw)), 32);
@@ -665,6 +715,16 @@ begin
   end;
   RawDirty := True;
   o0 := RawO0; o1 := RawO1; o2 := RawO2;
+  if (RawCode <> nil) {$ifdef PJA_COSTS}and not CollectCosts{$endif} then begin
+    if len > 0 then begin
+      if cd.encoding then coder := @cd.enc else coder := @cd.dec;
+      RawCode(cd.encoding, coder, @o0[0], @o1[0], @o2[0], @raw[0], len);
+      { the C walks the counters back only below RAW_RESET_WHOLE bytes }
+      if len >= RAW_RESET_WHOLE then RawReset(raw, len);
+    end;
+    RawDirty := False;
+    Exit(True);
+  end;
   mx.Init(4, 8);
   c1 := 0; c2 := 0;
   for i := 0 to len - 1 do begin
@@ -1413,6 +1473,73 @@ begin
   PoolChroma := Default(TCoefModel);
 end;
 
+type
+  { one thread's models, parked }
+  TParkedModels = record
+    o0, o1, o2: TBits;
+    dirty: Boolean;
+    luma, chroma: TCoefModel;
+  end;
+  PParkedModels = ^TParkedModels;
+
+const
+  { the sets kept, about 18 MB each }
+  MAX_PARKED = 4;
+
+var
+  ParkLock: TRTLCriticalSection;
+  Parked: array[0..MAX_PARKED - 1] of PParkedModels;
+  ParkedCount: Integer;
+
+procedure ParkThreadModels;
+var m: PParkedModels;
+begin
+  m := nil;
+  if Length(RawO2) + Length(PoolLuma.nz2) + Length(PoolChroma.nz2) > 0 then begin
+    New(m);
+    m^.o0 := RawO0; m^.o1 := RawO1; m^.o2 := RawO2;
+    m^.dirty := RawDirty;
+    m^.luma := PoolLuma; m^.chroma := PoolChroma;
+  end;
+  ReleaseThreadModels;
+  if m = nil then Exit;
+  EnterCriticalSection(ParkLock);
+  if ParkedCount < MAX_PARKED then begin
+    Parked[ParkedCount] := m;
+    Inc(ParkedCount);
+    m := nil;
+  end;
+  LeaveCriticalSection(ParkLock);
+  if m <> nil then Dispose(m);
+end;
+
+procedure UnparkThreadModels;
+var m: PParkedModels;
+begin
+  m := nil;
+  EnterCriticalSection(ParkLock);
+  if ParkedCount > 0 then begin
+    Dec(ParkedCount);
+    m := Parked[ParkedCount];
+  end;
+  LeaveCriticalSection(ParkLock);
+  if m = nil then Exit;
+  RawO0 := m^.o0; RawO1 := m^.o1; RawO2 := m^.o2;
+  RawDirty := m^.dirty;
+  PoolLuma := m^.luma; PoolChroma := m^.chroma;
+  Dispose(m);
+end;
+
+procedure GetSimd(out sse41, avx2: Boolean);
+begin
+  sse41 := UseSse41; avx2 := UseAvx2;
+end;
+
+procedure SetSimd(sse41, avx2: Boolean);
+begin
+  UseSse41 := sse41; UseAvx2 := avx2;
+end;
+
 procedure V7FillTables(out t: TV7Tables);
 begin
   t := Default(TV7Tables);
@@ -1795,6 +1922,16 @@ const
   SYM_TEX = 2 * 256 * 4;  { [first component or not][texture][energy] }
 
 type
+  { Mapped's view of a line: in the fast build a bare pointer, so the
+    hottest routine of JPEG-LS holds no managed local (no reference counts
+    and no implicit try/finally per sample, about 15% of its instructions);
+    the reference build keeps the dynamic array and its range checks. }
+  {$ifdef PJA_FAST}
+  TJlsLine = PInteger;
+  {$else}
+  TJlsLine = array of Integer;
+  {$endif}
+
   TJlsSymModel = class(TJlsSymbols)
     cd: ^TCoder;
     f1, f2, f3, f4, f5, f6, f7: TBits;
@@ -1870,10 +2007,13 @@ begin
 end;
 
 procedure TJlsSymModel.Sample(c, i, x: Integer);
-var t: array of Integer; k: Integer;
+var t: Pointer; k: Integer;
 begin
   if i = 0 then begin
-    t := lines[c, 2]; lines[c, 2] := lines[c, 1]; lines[c, 1] := lines[c, 0]; lines[c, 0] := t;
+    { the three lines rotated as bare references: a pure swap leaves every
+      count as it was, without a managed local here }
+    t := Pointer(lines[c, 2]); Pointer(lines[c, 2]) := Pointer(lines[c, 1]);
+    Pointer(lines[c, 1]) := Pointer(lines[c, 0]); Pointer(lines[c, 0]) := t;
   end;
   lines[c, 0][i + 2] := x;
   k := pendTex[c];
@@ -1908,21 +2048,21 @@ end;
 
 function TJlsSymModel.Mapped(m, c, i, k, ctx, px, sgn: Integer; inv: Boolean; out v: Integer): Boolean;
 var kind, kk, nb, x, e, t, sel, b, bit, act, q, tex, ex, me, eb, mb: Integer;
-    row, l0, l1, l2: array of Integer;
+    row, l0, l1, l2: TJlsLine;
     wa, wwa, nn, nw, ne, nnb, nne, dh, dv, p2, p3, delta: Integer;
     c1, c2, c3, c4, c5, c6, c7: ^TAdaptiveBit;
 begin
   v := 0;
   if ctx >= 365 then kind := 1 + ctx - 365 else kind := 0;
   kk := Min(k, SYM_K - 1);
-  row := vals[c];
+  row := TJlsLine(vals[c]);
   { left, above, above right: the line above is still there right of i }
   nb := Clip(FineLog(Int64(row[i]) + row[i + 1] + row[i + 2] div 2), SYM_NB - 1);
   if (c > 0) and sameAsFirst[c] then x := Clip(FineLog(vals[0][i + 1]), SYM_X - 2) else x := SYM_X - 1;
   q := 2 * near + 1;
   { a second prediction, CALIC's GAP with its error feedback, and the
     mapped value JPEG-LS would see if it were right }
-  l0 := lines[c, 0]; l1 := lines[c, 1]; l2 := lines[c, 2];
+  l0 := TJlsLine(lines[c, 0]); l1 := TJlsLine(lines[c, 1]); l2 := TJlsLine(lines[c, 2]);
   wa := l0[i + 1]; wwa := l0[i]; nn := l1[i + 2]; nw := l1[i + 1]; ne := l1[i + 3];
   nnb := l2[i + 2]; nne := l2[i + 3];
   dh := Abs(wa - wwa) + Abs(nn - nw) + Abs(nn - ne);
@@ -2078,4 +2218,12 @@ initialization
   {$endif}
   InitTables;
   InitUnzig;
+  InitCriticalSection(ParkLock);
+
+finalization
+  while ParkedCount > 0 do begin
+    Dec(ParkedCount);
+    Dispose(Parked[ParkedCount]);
+  end;
+  DoneCriticalSection(ParkLock);
 end.

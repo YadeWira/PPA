@@ -146,11 +146,21 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           pattern: rel-*
           merge-multiple: true
           path: dist
+      # the sources to vendor, untouched: the zpaq-std plugin (zpaq-std
+      # builds ppa1 from them) and PPA's codec for other programs (POA, PDA)
+      - name: The vendor tarball
+        run: |
+          tools/zpaqstd_tarball.sh vtar "$TAG"
+          cp vtar/ppa-*-zpaqstd.tar.gz dist/
       - name: Upload to the release
         run: |
           gh release view "$TAG" > /dev/null 2>&1 \
