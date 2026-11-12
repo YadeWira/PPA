@@ -211,6 +211,12 @@ begin
   Result := True;
 end;
 procedure CloseHandleOf(f: TFileHandle); begin CloseHandle(f); end;
+{ the file emptied, its space given back (a failed write's, before it is
+  deleted) }
+procedure EmptyFile(f: TFileHandle);
+begin
+  if SetFilePointer(f, 0, nil, FILE_BEGIN) <> DWORD($FFFFFFFF) then SetEndOfFile(f);
+end;
 { The data on the disk, not only in the system's cache. A device that does
   not take it (no buffers to flush) is not an error. }
 function SyncFile(f: TFileHandle): Boolean;
@@ -321,6 +327,9 @@ begin
   Result := True;
 end;
 procedure CloseHandleOf(f: TFileHandle); begin fpClose(f); end;
+{ the file emptied, its space given back (a failed write's, before it is
+  deleted) }
+procedure EmptyFile(f: TFileHandle); begin fpFtruncate(f, 0); end;
 { The data on the disk, not only in the system's cache. A file system that
   cannot (EINVAL: some special ones) is not an error. }
 function SyncFile(f: TFileHandle): Boolean;
@@ -645,8 +654,13 @@ begin
   if not WriteAll(f, data) or not SyncFile(f) then begin
     code := LastError;
     if code = 0 then code := -1;
+    { a half-done write is not left lying around. Emptied first: on a full
+      disk a file system may need space to delete an entry (fuse2fs on ext4
+      answered ENOSPC to the unlink, and the temporary stayed; found by
+      tests/fuzz/diskfull_ext4.sh), and once more if the first one fails }
+    EmptyFile(f);
     CloseHandleOf(f);
-    DeleteEntry(path);                   { a half-done write is not left lying around }
+    if not DeleteEntry(path) then DeleteEntry(path);
     ReleaseLive(slot); slot := -1;
     Exit(False);
   end;
