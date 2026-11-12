@@ -46,9 +46,10 @@ comes back byte for byte, and nothing is written unless it verified.
 - **APNG**: every frame's stream, the same way.
 - **MNG**: the PNG and JNG images it embeds.
 - **JNG**: its JPEG through [PJA](https://github.com/YadeWira/PJA)'s codec.
-- Odd files: Apple's **CgBI** PNG, wrong CRCs, a file cut short, bytes
-  after the end; taken and given back as they are, what can be
-  recompressed recompressed.
+- Apple's **CgBI** PNG (iOS): its raw deflate stream rebuilt as a zlib
+  one, its pixels modelled (11 of the corpus's 12).
+- Odd files: wrong CRCs, a file cut short, bytes after the end; taken and
+  given back as they are, what can be recompressed recompressed.
 
 A deflate stream that zlib did not write (zopfli, libdeflate, advpng)
 goes through as bytes for now, and so does anything else; `ppa info` says
