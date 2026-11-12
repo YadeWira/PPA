@@ -1,5 +1,5 @@
 @echo off
-rem PPA 0.1.1 on a real Windows: the command, libppa (test_lib) and the 7-Zip plugin.
+rem PPA on a real Windows: the command, libppa (test_lib) and the 7-Zip plugin.
 rem Folder layout (tools/vm/make_kit.sh makes it): ppa.exe ppa.dll test_lib.exe 7z\ s\ (every sample) lib\ (the small ones,
 rem for test_lib) README.md. Prints PASS or FAIL lines; the exit status is the count of FAILs.
 setlocal enabledelayedexpansion

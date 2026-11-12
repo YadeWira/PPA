@@ -173,8 +173,13 @@ block and passes every other byte on. Extracting needs the plugin too
 (7-Zip 23 or later on Linux and macOS; [details][wLib]). The
 same library is a C API (`ppa.h`) for any program.
 
-**zpaq-std**: PPA's codecs with ZPAQL decoders, so that any zpaq extracts
-the blocks, are being written ([the plan][wPlugin]).
+**[zpaq-std](https://github.com/YadeWira/zpaq-std)**: PPA's plugin (since
+0.2.0) has the codec `ppa1`: PNG, APNG and MNG whose images take PPA's
+static model (8-bit gray, gray and alpha, RGB, RGBA), up to 7 MiB of image
+a file. Each block carries a ZPAQL decoder (19 KB), so any zpaq extracts
+it, even without the plugin. With `-m5`, 20 photos come to 65.35% of their
+size against 96.31% without it ([details][wPlugin]); zpaq-std ships it
+from a coming release (`-sa`).
 
 ## Reporting a bug
 

@@ -62,7 +62,7 @@ enum {
 /* Error codes may be added; a caller treats one it does not know as an
    error, as it treats PPA_E_DATA. */
 
-/* "ppa 0.1.1" */
+/* "ppa 0.2.0" */
 const char *PPA_CALL ppa_version(void);
 
 /* A file of the PNG family -> a .ppa. threads: how many at once (1 to 64;

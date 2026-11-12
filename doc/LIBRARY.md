@@ -83,7 +83,7 @@ and no exception leaves the library: errors are return codes.
 
 | function | does |
 |---|---|
-| `ppa_version()` | `"ppa 0.1.1"` |
+| `ppa_version()` | `"ppa 0.2.0"` |
 | `ppa_compress(in, size, &out, &out_size, threads)` | a file of the PNG family → a `.ppa` (the command's format: size and BLAKE3 hash inside; no extension kept); `PPA_E_NOT_TAKEN` for a file PPA does not take or does not make smaller |
 | `ppa_decompress(in, size, &out, &out_size, max_size, threads)` | a `.ppa` → the original, checked against its size and hash; `PPA_E_VERSION` for one a newer PPA wrote |
 | `ppa_filter_encode(read, ctx, write, ctx, threads)` | the filter: every byte read → its stream, written |
@@ -196,7 +196,7 @@ so `ppa7z.c` builds them in plain C (`__stdcall` on 32-bit Windows). The
 library exports `GetNumberOfMethods`, `GetMethodProperty`,
 `CreateDecoder`, `CreateEncoder`, `CreateObject` and `GetModuleProp`
 (which tells 7-Zip on Linux, since version 23, that `IUnknown` has no
-virtual destructor, and gives the module's version, PPA's: 0.11 for 0.1.1).
+virtual destructor, and gives the module's version, PPA's: 0.20 for 0.2.0).
 Strings handed to 7-Zip are BSTRs of `wchar_t`: OLE's on Windows, 7-Zip's
 own layout from `malloc` elsewhere. CI builds the library on all six
 platforms, runs `test_lib`, and on Linux and Windows x64 writes an archive
