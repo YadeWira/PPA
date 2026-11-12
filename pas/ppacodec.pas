@@ -488,10 +488,13 @@ begin
       end;
     end;
   { a model given (the plugin's): an image whose coding with it comes out
-    much larger than its own deflate stream (a quarter and 4 KiB more)
-    goes again as bytes: noise takes the static model badly, up to four
-    times its stream, past what the plugin may return. A small image a
-    little larger keeps the model (its tables cost more than its pixels).
+    much larger than its own deflate stream (a quarter and 4 KiB more), or
+    of 64 KiB or more and not smaller, goes again as bytes: noise takes the
+    static model badly, up to four times its stream, past what the plugin
+    may return, and a group of zpaq-std's files must not grow for one of
+    them (zpaq-std's owner saw 9 files go from 1,345,329 to 1,534,422
+    bytes). A small image a little larger keeps the model (its tables cost
+    more than its pixels).
     The ppa command's streams (model -1) do not take this path. }
   repeat
   grew := False;
@@ -547,7 +550,8 @@ begin
     coded := nil; SetLength(coded, Length(p.streams));
     for i := 0 to nJobs - 1 do Inc(coded[jobs[i].s], Length(subs[i]));
     for s := 0 to High(p.streams) do
-      if (plans[s].mode in IMAGE_MODES) and (coded[s] > Int64(Length(p.streams[s].data)) * 5 div 4 + 4096) then begin
+      if (plans[s].mode in IMAGE_MODES) and ((coded[s] > Int64(Length(p.streams[s].data)) * 5 div 4 + 4096) or
+          ((Length(p.streams[s].data) >= 65536) and (coded[s] >= Length(p.streams[s].data)))) then begin
         plans[s].mode := MODE_BYTES;
         plans[s].px := Default(TPixels);
         plans[s].z := Default(TZStream);
