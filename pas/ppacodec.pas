@@ -610,6 +610,29 @@ end;
 
 { ---------------------------------------------------------------- decompress }
 
+{ CodeBytes decoding n bytes, in pieces: False as soon as the decoder has
+  read past the end of its data. The encoder's stream never makes it:
+  the decoder takes a byte exactly where the encoder wrote one, and
+  Finish wrote the last four, so it never goes past their end. A damaged
+  stream reads zeros there (ppaarith) and, without this, decoded all of
+  the structure's length before anything checked it: a megabyte through
+  the byte model from a stream of a few bytes, half a second, for every
+  file of a filter's stream (found by fuzzing). }
+function DecodeBytes(var m: TByteModel; var data: TBytes; n: SizeInt; var dec: TArithDecoder): Boolean;
+const PIECE = 4096;
+var q, k: SizeInt;
+begin
+  q := 0;
+  while q < n do begin
+    k := n - q;
+    if k > PIECE then k := PIECE;
+    CodeBytes(m, data, q, k, nil, @dec);
+    Inc(q, k);
+    if dec.p > Length(dec.d) then Exit(False);
+  end;
+  Result := True;
+end;
+
 function DecompressRaw(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
   threads: Integer; stages: Boolean; known: PKnownStreams; out future: Boolean): Boolean;
 var
@@ -711,7 +734,7 @@ begin
   if Int64(metaLen) > maxOut + META_SLACK then Exit(Bad('structure larger than the file may be'));
   meta := nil; SetLength(meta, metaLen);
   bm.Init;
-  CodeBytes(bm, meta, 0, metaLen, nil, @dec);
+  if not DecodeBytes(bm, meta, metaLen, dec) then Exit(Bad('bad structure'));
 
   r := Default(TReader);
   r.b := meta; r.pos := 0; r.ok := True;
@@ -805,7 +828,7 @@ begin
   for s := 0 to nStreams - 1 do begin
     if modes[s] = MODE_BYTES then begin
       SetLength(p.streams[s].data, streamLen[s]);
-      CodeBytes(rm, p.streams[s].data, 0, streamLen[s], nil, @dec);
+      if not DecodeBytes(rm, p.streams[s].data, streamLen[s], dec) then Exit(Bad('bad structure'));
     end else if modes[s] in IMAGE_MODES then begin
       { the image's size checked before anything is allocated for it, and
         all the images' together: deflate expands 1032 times at most, so
