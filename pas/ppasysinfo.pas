@@ -145,6 +145,28 @@ begin
 end;
 {$endif}
 
+{$ifdef CPUI386}
+{$asmmode intel}
+{ cpuid on 32-bit x86, for the processor's name only (ebx kept: a
+  position-independent library keeps its GOT there) }
+procedure CpuId(leaf, sub: LongWord; out a, b, c, d: LongWord);
+var ra, rb, rc, rd: LongWord;
+begin
+  asm
+    push ebx
+    mov eax, leaf
+    mov ecx, sub
+    cpuid
+    mov ra, eax
+    mov rb, ebx
+    mov rc, ecx
+    mov rd, edx
+    pop ebx
+  end ['eax', 'ecx', 'edx'];
+  a := ra; b := rb; c := rc; d := rd;
+end;
+{$endif}
+
 function HasSse41: Boolean;
 {$ifdef CPUX86_64} var a, b, c, d: LongWord; {$endif}
 begin
@@ -172,12 +194,12 @@ begin
 end;
 
 function CpuName: string;
-{$ifdef CPUX86_64} var b, c, d, top: LongWord; leaf: LongWord; i: Integer; regs: array[0..3] of LongWord;
+{$if defined(CPUX86_64) or defined(CPUI386)} var b, c, d, top: LongWord; leaf: LongWord; i: Integer; regs: array[0..3] of LongWord;
                    raw: array[0..47] of Char; {$endif}
 {$ifdef LINUX} var f: TStringList; k: Integer; {$endif}
 begin
   Result := '';
-  {$ifdef CPUX86_64}
+  {$if defined(CPUX86_64) or defined(CPUI386)}
   CpuId($80000000, 0, top, b, c, d);
   if top >= $80000004 then begin
     for leaf := $80000002 to $80000004 do begin
