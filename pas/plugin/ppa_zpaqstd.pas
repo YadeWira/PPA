@@ -260,7 +260,16 @@ const
     'the image streams PPA does not reproduce kept as bytes'#10 +
     'notes=lossless: the original rebuilt byte for byte (its deflate streams written again with their ' +
     'zlib parameters); images of 8-bit gray, gray+alpha, RGB, RGBA, Adam7 or not (no palette, ' +
-    '1/2/4/16 bits, JNG); ZPAQL config comp 0 0 $3 $4 0 (H and M from the query)'#10;
+    '1/2/4/16 bits, JNG); ZPAQL config comp 0 0 $3 $4 0 (H and M from the query)'#10 +
+    { +rcmd (zpaq-std 2.9.0): the methods for the PNG, MNG and JNG files ppa1
+      does not take, measured on 11/11/2026 on 50 of them (37.2 MB, the
+      corpus's palette, 16-bit, JNG and large files): bzip3:9 85.9% in
+      6.5 s, flzma2:10 86.4% in 7.4 s (0.8 s to extract), zstd:19 86.6%,
+      lzma:9 86.6%, deflate:12 86.8% in 1.6 s; -m4 86.8% in 3.2 s, -m1
+      87.4% in 0.3 s, -m5 84.9% but in 147 s (46 times -m4's for 1.9
+      points, so last), kanzi:9 85.5% in 39 s left out }
+    'fallback_ma=bzip3:9,flzma2:10,zstd:19,lzma:9,deflate:12'#10 +
+    'fallback_m=4,1,2,3,5'#10;
 
 { data(): the ZPAQL decoder only as ZS_DATA_ZPAQL_ARGS (its H and M come
   from the query), and the card; anything else, ZS_DATA_ZPAQL included, nil }

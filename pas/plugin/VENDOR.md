@@ -25,6 +25,11 @@ One codec, index 0 of `zpaqstd_codecs_v1`, ABI 1:
   of its largest file.
 - Detection by the bytes only, and only what the ZPAQL decodes. The ZPAQL
   is handed out as `ZS_DATA_ZPAQL_ARGS` only.
+- `+rcmd` (zpaq-std 2.9.0): the card carries
+  `fallback_ma=bzip3:9,flzma2:10,zstd:19,lzma:9,deflate:12` and
+  `fallback_m=4,1,2,3,5`, measured on 50 PNG, MNG and JNG files ppa1 does
+  not take (37.2 MB): bzip3:9 85.9% in 6.5 s; -m5 84.9% but in 147 s, so
+  last.
 - `ppa1` is frozen once published: its stream, what it takes and its ZPAQL
   byte for byte. A change to any is a new codec name; `ppa1` stays in the
   plugin to read.
