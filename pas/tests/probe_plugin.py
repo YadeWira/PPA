@@ -313,9 +313,12 @@ for dname, fs in files_by_dir:
         det = lib.zpaqstd_detect_v1(b'ppa1', d, len(d))
         if lib.zpaqstd_detect_v1(b'ppa', d, len(d)) or lib.zpaqstd_detect_v1(b'pja', d, len(d)):
             fail('%s: detect takes it for another codec name' % f)
-        if det != int(want):
-            fail('%s: detect says %d (expected %d%s)' % (f, det, want, ', ' + why if why else ''))
-        if not det:
+        # 1 taken; 2 a file of the PNG family not taken (+rcmd); 0 anything else
+        family = len(d) >= 8 and d[:1] in (b'\x89', b'\x8a', b'\x8b') and d[1:8] in (b'PNG\r\n\x1a\n', b'MNG\r\n\x1a\n', b'JNG\r\n\x1a\n')
+        expected = 1 if want else (2 if family else 0)
+        if det != expected:
+            fail('%s: detect says %d (expected %d%s)' % (f, det, expected, ', ' + why if why else ''))
+        if det != 1:
             refusals[why] = refusals.get(why, 0) + 1
             continue
         taken.append((f, d))

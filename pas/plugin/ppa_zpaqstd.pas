@@ -38,7 +38,8 @@
     query(ZS_QUERY_WEIGHT) a file's images' bytes and
     query(ZS_QUERY_GROUP_WEIGHT) 7 MiB, the most a group of them may weigh.
     data(ZS_DATA_INFO) is the card zpaq-std shows in codecinfoex.
-  - zpaqstd_detect_v1: 1 if ppa1 takes the file, by its bytes only, and
+  - zpaqstd_detect_v1: 1 if ppa1 takes the file (2 for one of the PNG
+    family it does not take, for +rcmd), by its bytes only, and
     only what its ZPAQL decodes (ppazpaqlargs.Ppa1Takes): a PNG, APNG or
     MNG (no JNG, no MNG holding a JNG) whose every image is 8-bit gray, gray
     + alpha, RGB or RGBA (Adam7 or not), its images within
@@ -233,16 +234,29 @@ begin
   end;
 end;
 
+{ 1: ppa1 takes the file; 2: a file of the PNG family (PNG, APNG, MNG,
+  JNG: by its signature) ppa1 does not take, which zpaq-std 2.9.0's +rcmd
+  stores with the card's fallback_ma / fallback_m (older zpaq-std and runs
+  without +rcmd read 2 as 0); 0: anything else }
 function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
-var why: string;
+const TAIL: array[0..6] of Byte = ($4E, $47, $0D, $0A, $1A, $0A, 0);
+var why: string; p: PByte; k: Integer; ours: Boolean;
 begin
   Result := 0;
-  if (codecName = nil) or (src = nil) or (n < 8) or (n > MAX_BLOCK) then Exit;
+  if (codecName = nil) or (src = nil) or (n < 8) then Exit;
   if StrComp(codecName, 'ppa1') <> 0 then Exit;
+  { \x89PNG, \x8AMNG, \x8BJNG, then \r\n\x1A\n }
+  p := src;
+  ours := ((p[0] = $89) and (p[1] = $50)) or ((p[0] = $8A) and (p[1] = $4D)) or ((p[0] = $8B) and (p[1] = $4A));
+  for k := 0 to 5 do
+    if p[2 + k] <> TAIL[k] then ours := False;
+  if not ours then Exit;
+  Result := 2;
+  if n > MAX_BLOCK then Exit;
   try
-    Result := Ord(Ppa1Takes(Bytes(src, n), why));
+    if Ppa1Takes(Bytes(src, n), why) then Result := 1;
   except
-    Result := 0;
+    Result := 2;
   end;
 end;
 
