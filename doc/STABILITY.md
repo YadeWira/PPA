@@ -59,9 +59,18 @@ does not know as an error.
 PPA's own; archives written with the experimental one keep opening in
 every release after.
 
-## The zpaq-std codecs (to come)
+## The zpaq-std codecs
 
-PPA's codecs for zpaq-std will carry versioned names: each name keeps its
+| codec | published | takes | stream | ZPAQL |
+|---|---|---|---|---|
+| `ppa1` | 0.2.0 | PNG, APNG, MNG whose every image is 8-bit gray, gray+alpha, RGB or RGBA (no JNG), up to 7 MiB of image a file | codec stream version 2, every image with the static model, the rest as bytes | `pas/plugin/ppa1zpaql.inc`, 19,264 bytes, `comp 0 0 $3 $4 0` |
+
+`pas/plugin/VENDOR.md` has the rest (queries, `+rcmd`); every release
+carries the sources as `ppa-<tag>-zpaqstd.tar.gz`. What `ppa1` takes and
+writes may still change in the encoder (which images go as bytes, for
+one), never in what its decoder reads.
+
+PPA's codecs for zpaq-std carry versioned names: each name keeps its
 index, its stream, what it takes and its ZPAQL decoder byte for byte from
 the release that publishes it, whatever PPA's own formats do later (any
 zpaq extracts a block through the decoder it carries). A new stream, or a
