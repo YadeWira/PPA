@@ -526,6 +526,7 @@ var
   sym, s, l, d, k: Integer;
   ad: LongWord;
   ta: TTokensArgs;
+  cs: Word;
 begin
   bw := Default(TBitWriter);
   if not z.raw then begin
@@ -552,9 +553,13 @@ begin
             for i := 0 to hclen - 1 do PutBits(bw, clen[CLEN_ORDER[i]], 3);
             BuildEnc(cl, clen, 19);
             for i := 0 to High(clenSeq) do begin
-              s := clenSeq[i] and $1F;
+              { the element into a Word first: `clenSeq[i] and $1F` loads 4
+                bytes on x86 and x86-64, 2 past the last element (a fault where the
+                block ends with its memory: Windows XP's heap) }
+              cs := clenSeq[i];
+              s := cs and $1F;
               PutBits(bw, cl.code[s], cl.len[s]);
-              if s >= 16 then PutBits(bw, clenSeq[i] shr 5, CLEN_EXTRA[s]);
+              if s >= 16 then PutBits(bw, cs shr 5, CLEN_EXTRA[s]);
             end;
           end;
           if btype = btFixed then begin

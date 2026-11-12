@@ -106,7 +106,7 @@ var
     resPrev, xPrev, rq: Integer;
   rs, rn, pos: SizeInt;
   cur, up: PByte; fc, fu: PSmallInt;
-  x, s: Cardinal;
+  x, s, f: Cardinal;
 begin
   w := a.w; nc := a.nc; y := a.y;
   rs := (w + 2 * SM_PAD) * nc;
@@ -148,7 +148,11 @@ begin
         s := x and (SM_TOT - 1);
         sym := a.slot[ctx * (SM_TOT div 16) + Integer(s shr 4)];
         while a.cum[ctx * 257 + sym + 1] <= s do Inc(sym);
-        x := Cardinal(a.freq[ctx * 256 + sym]) * (x shr SM_PB) + s - a.cum[ctx * 257 + sym];
+        { the Word into a Cardinal first: Cardinal(a.freq[..]) loads 4 bytes
+          (FreePascal's movzx + and made a mov, -O2 x86-64), 2 past the
+          element: into cum here, but no read past what it means to read }
+        f := a.freq[ctx * 256 + sym];
+        x := f * (x shr SM_PB) + s - a.cum[ctx * 257 + sym];
         while x < SM_L do begin
           if (pos >= 0) and (pos < a.len) then x := (x shl 8) or a.buf[pos] else x := x shl 8;
           Inc(pos);
