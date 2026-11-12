@@ -69,9 +69,16 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed ${{ matrix.gcc }}
+      - name: The 32-bit 7-Zip, for the 32-bit plugin
+        if: matrix.platform == 'windows-x86'
+        shell: pwsh
+        run: |
+          curl.exe -L --fail --retry 3 -o "$env:TEMP\7z32.exe" https://www.7-zip.org/a/7z2501.exe
+          & 'C:\Program Files\7-Zip\7z.exe' x -y -bso0 "-oC:\7z32" "$env:TEMP\7z32.exe"
       - name: Build and check
         shell: bash
         env:
+          SEVEN32: ${{ matrix.platform == 'windows-x86' && '/c/7z32' || '' }}
           FPC: ${{ matrix.platform == 'linux-x86' && '/tmp/fpc-i386/fpc' || matrix.fpc || 'fpc' }}
           CC: ${{ matrix.platform == 'linux-x86' && 'gcc -m32' || matrix.cc || 'cc' }}
           PPA_OUT: build/rel

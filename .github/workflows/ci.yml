@@ -144,11 +144,17 @@ jobs:
       - name: Install the C compiler (MSYS2's MinGW-w64 gcc)
         shell: pwsh
         run: C:\msys64\usr\bin\pacman.exe -S --noconfirm --needed mingw-w64-i686-gcc
+      - name: The 32-bit 7-Zip, for the 32-bit plugin
+        shell: pwsh
+        run: |
+          curl.exe -L --fail --retry 3 -o "$env:TEMP\7z32.exe" https://www.7-zip.org/a/7z2501.exe
+          & 'C:\Program Files\7-Zip\7z.exe' x -y -bso0 "-oC:\7z32" "$env:TEMP\7z32.exe"
       - name: Test
         shell: bash
         env:
           FPC: fpc -Pi386
           CC: /c/msys64/mingw32/bin/gcc
+          SEVEN32: /c/7z32
         run: sh .github/test.sh
       - uses: actions/upload-artifact@v4
         with:

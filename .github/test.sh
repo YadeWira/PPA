@@ -86,14 +86,16 @@ tail -3 "$OUT/lib/test.txt"
 # 7-Zip 23 or later (not p7zip, whose IUnknown differs): a copy with the
 # plugin in its Codecs folder (the same word size as the library), an
 # archive written and extracted. Linux: 7-Zip's package; Windows: the
-# 7-Zip installed (64-bit on the runners: the x64 build only)
+# 7-Zip installed (64-bit on the runners), and for a 32-bit library the
+# 32-bit 7-Zip in SEVEN32 (CI's windows-x86 job unpacks one there: the
+# Windows XP heap fault of 0.1.1 showed only in a 32-bit 7-Zip)
 case "$LIBF" in
   *.dll) SEVEN="/c/Program Files/7-Zip"; SLIB=7z.dll
     [ -f "$SEVEN/$SLIB" ] || { S=$(command -v 7z 2> /dev/null) && SEVEN=$(dirname "$S"); } || SEVEN= ;;
   *.so) SEVEN=/usr/lib/7zip; SLIB=7z.so ;;
   *) SEVEN=; SLIB= ;;
 esac
-case "${CC:-} $FPC" in *-m32*|*i386*) SEVEN= ;; esac
+case "${CC:-} $FPC" in *-m32*|*i386*) SEVEN=${SEVEN32:-} ;; esac
 if [ -z "$SEVEN" ] || [ ! -f "$SEVEN/$SLIB" ] || [ ! -f "$SEVEN/7z$EXE" ]; then
   echo "7-Zip: none of the library's word size here, not tried"
 else
