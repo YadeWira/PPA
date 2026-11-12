@@ -240,17 +240,17 @@ end;
   without +rcmd read 2 as 0); 0: anything else }
 function zpaqstd_detect_v1(codecName: PChar; src: Pointer; n: SizeUInt): LongInt; cdecl;
 const TAIL: array[0..6] of Byte = ($4E, $47, $0D, $0A, $1A, $0A, 0);
-var why: string; p: PByte; k: Integer; ours: Boolean;
+var why: string; p: PByte; k: Integer; isFamily: Boolean;
 begin
   Result := 0;
   if (codecName = nil) or (src = nil) or (n < 8) then Exit;
   if StrComp(codecName, 'ppa1') <> 0 then Exit;
   { \x89PNG, \x8AMNG, \x8BJNG, then \r\n\x1A\n }
   p := src;
-  ours := ((p[0] = $89) and (p[1] = $50)) or ((p[0] = $8A) and (p[1] = $4D)) or ((p[0] = $8B) and (p[1] = $4A));
+  isFamily := ((p[0] = $89) and (p[1] = $50)) or ((p[0] = $8A) and (p[1] = $4D)) or ((p[0] = $8B) and (p[1] = $4A));
   for k := 0 to 5 do
-    if p[2 + k] <> TAIL[k] then ours := False;
-  if not ours then Exit;
+    if p[2 + k] <> TAIL[k] then isFamily := False;
+  if not isFamily then Exit;
   Result := 2;
   if n > MAX_BLOCK then Exit;
   try
