@@ -145,10 +145,34 @@ A stream a newer PPA wrote (`PPA_E_VERSION`) comes out of the plugin as
 `E_NOTIMPL`, which 7-Zip reports as "Unsupported Method" for the block's
 files, and damaged data as "Data Error".
 
-`-mmt` sets the filter's threads when compressing; extracting, 7-Zip
-gives its thread count only to the first coder of the chain that takes one
-(LZMA2), so PPA uses the processors (up to 8; 2 in a 32-bit 7-Zip, whose
-memory the slow model's tables would fill). **The archive needs the
+`-mmt` sets the filter's threads, compressing and extracting alike;
+without it PPA uses the processors (up to 8; 2 in a 32-bit 7-Zip, whose
+memory the slow model's tables would fill, and which a larger `-mmt` does
+not pass). The threads change only the time and the memory, never the
+archive. Compressing, 7-Zip tells every coder of the chain its thread
+count. Extracting it tells one: `CDecoder::Decode`
+(`CPP/7zip/Archive/7z/7zDecode.cpp`, 7-Zip 25.01 and 7-Zip-zstd alike)
+calls `SetNumberOfThreads` (or `SetMemLimit`) on the first coder of the
+folder that takes either and then on no other (`mt_wasUsed`), and the
+folder lists the coders backwards from `-m0`, `-m1` (`7zEncode.cpp`:
+`folder.Coders[i]` is method `numMethods - 1 - i`), so the one told is
+LZMA2 (zstd, BZip2), never PPA; no other call reaches a decoder
+(`SetCoderPropertiesOpt` is the encoder's). So the plugin reads `-mmt` on
+the process's command line, the way 7-Zip's console parses it (`-mmt=4`,
+`-mmt4`, `-mmt=off`, `-mmt-`, `-mmt=p50`; the last one counts; nothing
+after `--`). Another host (7zFM, 7zG, a program) has no `-mmt` there, and
+PPA uses the processors. Extracting the photos below (20 files, solid,
+`-m0=PPA -m1=LZMA2`, 7-Zip 25.01 on Linux, 64 processors):
+
+| `7z x` | time | peak memory |
+|---|---|---|
+| `-mmt=1` | 16.6–17.5 s | 100 MB |
+| `-mmt=2` | 8.4–8.9 s | 185 MB |
+| `-mmt=4` | 4.9 s | 312 MB |
+| `-mmt=8`, or none | 3.1 s | 485–505 MB |
+| `-mmt=16` | 2.7 s | 744 MB |
+
+**The archive needs the
 plugin to be extracted**, in every 7-Zip that opens it. It works with
 7-Zip on Windows and with 7-Zip 23 or later on Linux and macOS; p7zip (the
 old port, `7z` 16.02) builds its interfaces differently and does not load
