@@ -74,34 +74,34 @@ The command's manual is [doc/CLI.md](doc/CLI.md).
 
 ## Against other compressors
 
-One file at a time, against the other recompressors that give a PNG back
-byte for byte: [packPNG](https://github.com/YadeWira/packPNG) 2.0b (its
-default: preflate and WebP-lossless) and
-[precomp](https://github.com/schnaader/precomp-cpp) 0.4.7 (preflate and
-LZMA). Each set's whole output against its input, every file extracted and
-compared; a file a tool does not take would count at its own size (every
-tool took every file; [how, and the details][wComp]).
+The published PPA 0.2.1, one file at a time, against the other
+recompressors that give a PNG back byte for byte (13/11/2026):
+[packPNG](https://github.com/YadeWira/packPNG) 2.0l (its default: preflate
+and WebP-lossless) and [precomp](https://github.com/schnaader/precomp-cpp)
+0.4.7 (preflate and LZMA). Each set's whole output against its input, every
+file extracted and compared (every tool took and gave back every file;
+[how, and the details][wComp]).
 
-| set | files | size | packPNG 2.0b | precomp 0.4.7 | PPA 0.1.1 |
+| set | files | size | packPNG 2.0l | precomp 0.4.7 | PPA 0.2.1 |
 |---|---|---|---|---|---|
 | the PNG family of a sample corpus (PNG, APNG, MNG, JNG, CgBI) | 70 | 32.9 MB | 76.99% | 97.81% | **56.30%** |
 | photos as PNG (1.3 to 2.9 MP) | 20 | 40.3 MB | 73.92% | 103.62% | **60.51%** |
 | generated (zlib levels, filters and strategies, colour types, 16 bits, Adam7, optipng, oxipng) | 75 | 15.7 MB | 75.59% | 95.86% | **58.86%** |
 
 Speed on the 20 photos (two Xeon E5-2697A v4; "8 at once": `ppa -th 8`,
-the others 8 processes):
+the others 8 processes; the best of three runs):
 
-| | packPNG 2.0b | precomp 0.4.7 | PPA 0.1.1 |
+| | packPNG 2.0l | precomp 0.4.7 | PPA 0.2.1 |
 |---|---|---|---|
-| compress, 1 thread | 77.0 s | **17.3 s** | 32.6 s |
-| decompress, 1 thread | **8.3 s** | 11.7 s | 15.1 s |
-| compress, 8 at once | 12.3 s | **2.6 s** | 6.1 s |
-| decompress, 8 at once | **1.3 s** | 2.0 s | 2.6 s |
+| compress, 1 thread | 75.5 s | **16.8 s** | 28.4 s |
+| decompress, 1 thread | **8.0 s** | 11.6 s | 12.1 s |
+| compress, 8 at once | 12.3 s | **2.6 s** | 5.1 s |
+| decompress, 8 at once | **1.3 s** | 1.8 s | 2.1 s |
 
 PPA is the smallest on every set, 18 to 27% smaller than packPNG, and
-compresses faster than it; it is slower to decompress (1.8 times on one
-thread), as rebuilding zlib's choices costs about as much as packPNG's
-whole decompression. One photo extracts in 0.31 s on 8 threads.
+compresses 2.7 times as fast as it; it is slower to decompress (1.5 times
+on one thread), as rebuilding zlib's choices costs about as much as
+packPNG's whole decompression. One photo extracts in 0.30 s on 8 threads.
 `ppa a --max` takes the slowest model for every image: 51.04%, 58.53% and
 55.39% of the three sets (measured with a build before 0.1.1), about ten
 times slower to extract.
@@ -137,25 +137,26 @@ hash catches accidents, not tampering).
 
 ## Against archivers
 
-One archive per set, 8 threads; every file extracted and compared. Size,
-then the time to write / extract. 7-Zip + PPA: 7-Zip 25.01 with PPA
-0.1.1's plugin, `-m0=PPA -m1=LZMA2` (07/11/2026);
-[Aqueous](https://github.com/lifthrasiir/aqueous) 0.0.20261101 at its
-default level; 7-Zip and zpaq-std 2.0.3 without PPA for reference
-(01/11/2026).
+One archive per set, 8 threads, every file extracted and compared; size,
+then the best of three times to write / extract (13/11/2026). 7-Zip 25.01
+with PPA 0.2.1's plugin, `-m0=PPA -m1=LZMA2`; zpaq-std 2.9.0 `-m5`, with
+`-sa` (PPA 0.2.0's `ppa1`) and without; [Aqueous](https://github.com/lifthrasiir/aqueous)
+0.0.20261101 at its default level and 7-Zip alone (`-mx=9`) for reference.
 
-| set | 7-Zip + PPA | Aqueous | 7-Zip | zpaq-std |
-|---|---|---|---|---|
-| corpus (70) | **42.06%**, 72.1 / 33.2 s | 94.17%, 2.3 / 0.3 s | 84.36%, 2.9 / 0.5 s | 85.45%, 0.3 / 0.2 s |
-| photos (20) | **60.51%**, 6.7 / 3.2 s | 81.42%, 1.3 / 0.4 s | 99.11%, 3.8 / 1.0 s | 100.06%, 0.3 / 0.3 s |
-| generated (75) | **27.47%**, 17.2 / 7.1 s | 52.27%, 1.0 / 0.2 s | 70.70%, 1.2 / 0.2 s | 71.94%, 0.2 / 0.2 s |
+| set | 7-Zip + PPA | zpaq-std -sa -m5 | zpaq-std -m5 | Aqueous | 7-Zip |
+|---|---|---|---|---|---|
+| corpus (70) | **42.06%**, 66.2 / 29.4 s | 83.33%, 63.3 / 61.6 s | 83.26%, 119.2 / 123.4 s | 94.18%, 2.0 / 0.3 s | 84.36%, 3.1 / 0.5 s |
+| photos (20) | **60.51%**, 5.8 / 2.4 s | 66.17%, 15.7 / 13.3 s | 96.31%, 170.2 / 168.9 s | 81.42%, 1.2 / 0.4 s | 99.11%, 3.6 / 1.0 s |
+| generated (75) | **27.47%**, 15.3 / 6.4 s | 60.43%, 7.4 / 6.8 s | 69.53%, 46.5 / 45.1 s | 52.27%, 0.9 / 0.2 s | 70.69%, 1.1 / 0.2 s |
 
 7-Zip + PPA is the smallest on every set, by far where files repeat an
 image (the corpus holds the same pictures in several files, the generated
 set five images written many ways): in one solid block LZMA2 finds the
-repeats PPA alone cannot. Aqueous is much faster and takes PNG too, but
-leaves 1.3 to 2.2 times as much. Why each number is what it is: [the
-benchmarks page][wComp].
+repeats PPA alone cannot. zpaq-std's `-sa` takes 30 points off the photos
+and makes `-m5` ten times faster on them, but leaves the corpus as it was
+(`ppa1`'s 7 MiB cap leaves its large files out). Aqueous is much faster
+and takes PNG too, but leaves 1.3 to 2.2 times as much as 7-Zip + PPA. Why
+each number is what it is: [the benchmarks page][wComp].
 
 ## In 7-Zip and zpaq-std
 
@@ -177,7 +178,7 @@ same library is a C API (`ppa.h`) for any program.
 0.2.0) has the codec `ppa1`: PNG, APNG and MNG whose images take PPA's
 static model (8-bit gray, gray and alpha, RGB, RGBA), up to 7 MiB of image
 a file. Each block carries a ZPAQL decoder (19 KB), so any zpaq extracts
-it, even without the plugin. With `-m5`, 20 photos come to 65.35% of their
+it, even without the plugin. With `-m5`, 20 photos come to 66.17% of their
 size against 96.31% without it ([details][wPlugin]). zpaq-std ships it
 since 2.9.0, in its extra-codecs zip, as an experimental codec:
 
