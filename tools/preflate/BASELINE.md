@@ -1,0 +1,266 @@
+# Baseline for PPA's own preflate (milestone M0, 2026-11-13)
+
+These figures are what PPA 0.3.0's deflate recipes are measured against.
+They come from PPA at commit `c995d1f` (0.2.1, codec stream version 2) and
+from preflate 0.3.4. How they were made: [README.md](README.md). The raw
+TSVs are frozen read-only in `/mnt/IA_LAB/agentes/ppa/preflate/m0/bench/`.
+
+## What the numbers say
+
+**The v2 hash gate is set.** `ppa a` was run for real on 179 files: tests/png
+plus sets corpus, generated and photos. Each file was compressed three ways:
+C with 8 threads, C with 1 thread, and Pascal (`PPA_NOC=1`). All three gave
+the same `.ppa` bytes for every file. The per-file sha256 are committed in
+[gate-v2.tsv](gate-v2.tsv).
+M1 must reproduce them exactly.
+
+**The review's doubt about the M4 gate is settled.** It asked whether the
+gate baselines (`ppa info` estimates) match real compression. They do:
+
+- On all 1,035 PNG-family files the harness compressed, `ppa info`'s size
+  equals `ppa a`'s.
+- The census's 82-file corpus totals 19,432,160 B with real `ppa a`.
+- `sets/generated` totals 9,216,406 B.
+
+Both totals equal the design's figures. One caution: 19,432,160 B is the
+total of the **82** corpus files (`png-zlib` `corpus__*` plus `png-nonzlib`
+`corpus__*`). It is not `sets/corpus`, which has only 70 of those files and
+compresses to 18,549,124 B. Before M4, rewrite the M4 gate in terms of the
+82 files.
+
+**On streams zlib reproduces, preflate is far from free, and PPA v2 is.**
+- `png-zlib` has 392 streams, all reproduced by PPA's search. preflate's
+  diff on them is 2,037,796 B, 4.18% of the deflate bytes.
+- The cost sits in the filtered and RLE strategies and in large L1 streams:
+  the 5 MB L1 photo costs 15.2%, `L7 filtered ml9` 3.05%, `L9 filtered ml8`
+  2.26%, `L1 rle` 14.7%. PPA v2 codes all of these in a few parameter bytes.
+- So kind 0 (today's search) must always be tried first, and the M3 gate
+  "zlib streams ≤ v2 + 3 B" is the right one.
+
+**preflate on the streams PPA keeps as bytes today (`png-nonzlib`):** 121,634 B in all, 11.23% of 1,083,584 B.
+
+| family | streams | preflate's cost, % of stream | census gain if reproduced | net gain at preflate's cost |
+|---|---:|---:|---:|---:|
+| libdeflate L11 (oxipng) | 5 | 13.17% | 276,225 B | about 170 KB |
+| miniz 1.x L9 | 12 | 9.70% | 21,720 B | 8,884 B |
+| spider (unidentified) | 6 | 1.93% | ≤ 46,245 B | ≤ 43,629 B |
+| CgBI `ipad.png` | 1 | 1.50% (160 B) | 5,422 B | 5,262 B |
+
+- For the corpus's 19 streams, preflate's diffs come to 15,612 B against a gain of 73,387 B. The M4 target (0.7 × 73,387 = 51,371 B saved) is therefore reachable at preflate's level of correction cost.
+- miniz's net is small, as the review warned. The M5 exact port is what pays for it.
+
+**Flushes and mid-stream parameter changes (`png-synth` `zfl-*`).**
+- PPA reproduces 0 of these 288 streams today.
+- preflate's cost ranges widely: from 0.02% (`Z_BLOCK`) and 0.33% (mixed
+  sync/full/partial at L6) to 26.8% for `deflateParams` 6→1 and 36.1% for L1
+  with a sync every 8 rows at memLevel 7.
+- So level 1 with flushes, and parameter changes, are where a model of
+  zlib's real flush semantics (M2) beats preflate by the most.
+
+**A zlib-family miss nobody had listed.** pngcrush 1.8.13 builds with its own libpng 1.6.32 and zlib 1.2.11.
+- Its method 1 is zlib level 4 with the default strategy and a 32K window (`pngcrush -v`). Method 7 was not looked at.
+- On the larger images, PPA's search does not reproduce these streams: only 9 of 32 (`-m 1`) and 8 of 31 (`-m 7`) come back.
+- An exhaustive search with Python's zlib 1.3.1 does not reproduce them either: level 1-9 × strategy × memLevel × window, tried on `s04.pngcrush-m1.png`.
+- The streams differ from the second byte of deflate data on.
+- The cause is not investigated yet. It could be zlib 1.2.11 against 1.3.1, or the way libpng drives deflate. It is open for M2/M3.
+
+**PDA sample (742 streams):**
+- census3 calls 568 of them zlib (with flush replay). PPA v2's search, which has no flushes, reproduces 334 of those.
+- preflate's cost:
+
+  | streams | preflate's cost, % of stream |
+  |---|---:|
+  | zlib | 0.23% |
+  | not zlib | 3.17% |
+  | MS Office 2013+ | 5.08% |
+  | cairo/Firefox | 2.41% |
+  | Aspose | 2.44% |
+
+**Hostile.**
+- preflate rebuilt every one of the 15 streams that inflate, including distance 32768, 258 written as 284, 1-byte stored blocks with non-zero pad bits, and 64 MiB zero runs (about 1.4 s and 200 MB RSS each).
+- PPA decodes the same 15. It rejects the truncated stream, block type 3 and FDICT with a position. FDICT is read as raw deflate because `IsZlibHeader` refuses FDICT.
+
+**The reference reproduces the study.**
+- All 33 `raw` cells shared with report0 §2 (text, exe and bmp × 11 encoders) give exactly the study's diff sizes. ecoli under 7z mx9 also matches: 390,563 B.
+- The corpus is deterministic: a second full `mkcorpus.py all` gave the same sha256 for every file in every manifest.
+
+<!-- generated by baseline.py summary: everything below this line -->
+
+# preflate harness baseline (M0)
+
+Measured 2026-11-13 at PPA commit `c995d1f` (ppa 0.2.1, codec stream version 2) with preflate 0.3.4 (precomp 0.4.7 contrib), by `tools/preflate/baseline.py`. Corpus: `$PF/corpus` (`tools/preflate/mkcorpus.py`); tool versions: `$PF/tools/VERSIONS.tsv`; raw TSVs: `$PF/m0/bench/`.
+
+## v2 `.ppa` hash gate (M1: none of these may change)
+
+Real `ppa a` (not `ppa info` estimates). Each file was compressed three ways, C path with 8 threads and with 1, and the Pascal path (`PPA_NOC=1`); "identical" counts files whose three `.ppa` are the same bytes. Per-file sizes and sha256 are in `gate.tsv`.
+
+| set | files | original B | `.ppa` B | ratio | identical |
+|---|---:|---:|---:|---:|---:|
+| sets-corpus | 70 | 32,946,419 | 18,549,124 | 56.30% | 70/70 |
+| sets-generated | 75 | 15,658,410 | 9,216,406 | 58.86% | 75/75 |
+| sets-photos | 20 | 40,267,407 | 24,365,081 | 60.51% | 20/20 |
+| tests-png | 14 | 83,757 | 82,044 | 97.95% | 14/14 |
+
+## png-zlib
+
+133 files, 49,026,239 B -> `ppa a` 27,561,322 B (56.22%); 0 image streams kept as bytes; `ppa info` size differs from `ppa a` on 0 files.
+
+| group | streams | deflate B | plain B | zlib-reproduced (PPA v2) | PPA as bytes | preflate ok | preflate diff B | diff % deflate | diff % plain | split MB/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| zlib | 392 | 48,711,215 | 301,673,385 | 392 | 0 | 392 | 2,037,796 | 4.18 | 0.68 | 2.4 |
+| **total** | 392 | 48,711,215 | 301,673,385 | 392 | 0 | 392 | 2,037,796 | 4.18 | 0.68 | |
+
+## png-nonzlib
+
+24 files, 1,101,050 B -> `ppa a` 1,087,244 B (98.75%); 24 image streams kept as bytes; `ppa info` size differs from `ppa a` on 0 files.
+
+| group | streams | deflate B | plain B | zlib-reproduced (PPA v2) | PPA as bytes | preflate ok | preflate diff B | diff % deflate | diff % plain | split MB/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| libdeflate (oxipng) | 5 | 804,935 | 6,389,563 | 0 | 5 | 5 | 106,022 | 13.17 | 1.66 | 1.0 |
+| miniz | 12 | 132,365 | 4,429,865 | 0 | 12 | 12 | 12,836 | 9.70 | 0.29 | 4.4 |
+| unidentified | 6 | 135,615 | 303,901 | 0 | 6 | 6 | 2,616 | 1.93 | 0.86 | 1.5 |
+| zlib | 1 | 10,669 | 20,808 | 0 | 1 | 1 | 160 | 1.50 | 0.77 | 0.8 |
+| **total** | 24 | 1,083,584 | 11,144,137 | 0 | 24 | 24 | 121,634 | 11.23 | 1.09 | |
+
+## png-synth
+
+878 files, 223,858,414 B -> `ppa a` 201,812,271 B (90.15%); 662 image streams kept as bytes; `ppa info` size differs from `ppa a` on 0 files.
+
+| group | streams | deflate B | plain B | zlib-reproduced (PPA v2) | PPA as bytes | preflate ok | preflate diff B | diff % deflate | diff % plain | split MB/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 7z-gzip-mx9 | 14 | 3,610,518 | 38,013,369 | 0 | 12 | 14 | 328,691 | 9.10 | 0.86 | 4.0 |
+| advpng-z1 | 19 | 5,768,144 | 32,523,335 | 19 | 0 | 19 | 502 | 0.01 | 0.00 | 10.4 |
+| advpng-z2 | 20 | 5,720,010 | 40,129,849 | 0 | 19 | 20 | 546,024 | 9.55 | 1.36 | 5.9 |
+| advpng-z3 | 22 | 5,925,374 | 40,696,140 | 0 | 20 | 22 | 572,141 | 9.66 | 1.41 | 6.4 |
+| advpng-z4 | 19 | 4,958,497 | 36,658,076 | 0 | 18 | 19 | 423,620 | 8.54 | 1.16 | 8.1 |
+| libdeflate-1 | 14 | 4,338,885 | 38,013,369 | 0 | 13 | 14 | 782,176 | 18.03 | 2.06 | 3.6 |
+| libdeflate-12 | 10 | 2,969,993 | 35,450,135 | 0 | 8 | 10 | 291,959 | 9.83 | 0.82 | 3.9 |
+| libdeflate-6 | 14 | 3,947,177 | 38,013,369 | 0 | 12 | 14 | 352,336 | 8.93 | 0.93 | 4.9 |
+| libdeflate-9 | 13 | 3,636,048 | 37,816,505 | 0 | 12 | 13 | 189,370 | 5.21 | 0.50 | 5.3 |
+| miniz114-9 | 14 | 3,900,157 | 38,013,369 | 0 | 12 | 14 | 123,690 | 3.17 | 0.33 | 6.9 |
+| miniz3-1 | 13 | 4,316,048 | 37,816,505 | 0 | 13 | 13 | 1,221,645 | 28.30 | 3.23 | 2.9 |
+| miniz3-10 | 14 | 3,880,876 | 38,013,369 | 0 | 12 | 14 | 113,032 | 2.91 | 0.30 | 6.6 |
+| miniz3-6 | 14 | 3,989,118 | 38,013,369 | 0 | 12 | 14 | 252,385 | 6.33 | 0.66 | 6.7 |
+| optipng-o2 | 30 | 7,052,356 | 40,214,960 | 30 | 0 | 30 | 142,141 | 2.02 | 0.35 | 3.9 |
+| oxipng-o0 | 34 | 7,381,252 | 41,625,205 | 0 | 28 | 34 | 877,661 | 11.89 | 2.11 | 1.6 |
+| oxipng-o2 | 34 | 6,574,897 | 41,625,205 | 1 | 30 | 34 | 632,251 | 9.62 | 1.52 | 1.8 |
+| oxipng-o2-zopfli | 34 | 6,601,386 | 41,625,205 | 0 | 31 | 34 | 543,716 | 8.24 | 1.31 | 1.9 |
+| oxipng-o4 | 33 | 6,266,986 | 41,428,341 | 0 | 32 | 33 | 621,622 | 9.92 | 1.50 | 1.8 |
+| oxipng-omax | 18 | 5,701,877 | 36,145,398 | 0 | 15 | 18 | 558,847 | 9.80 | 1.55 | 1.9 |
+| pngcrush-m1 | 32 | 9,991,752 | 62,200,570 | 9 | 23 | 32 | 364,213 | 3.65 | 0.59 | 18.3 |
+| pngcrush-m124 | 33 | 7,103,961 | 62,203,610 | 33 | 0 | 33 | 265,328 | 3.73 | 0.43 | 5.1 |
+| pngcrush-m4 | 32 | 10,025,788 | 62,072,282 | 32 | 0 | 32 | 282,227 | 2.82 | 0.45 | 10.0 |
+| pngcrush-m7 | 31 | 9,390,190 | 49,487,322 | 8 | 22 | 31 | 260,061 | 2.77 | 0.53 | 7.5 |
+| zfl-L1-sync8-ml7 | 32 | 8,820,415 | 59,563,660 | 0 | 29 | 32 | 3,182,601 | 36.08 | 5.34 | 1.9 |
+| zfl-L1to9-params | 32 | 7,959,865 | 59,563,660 | 0 | 28 | 32 | 1,898,878 | 23.86 | 3.19 | 2.1 |
+| zfl-L6-mixed | 32 | 7,389,805 | 59,563,660 | 0 | 27 | 32 | 24,360 | 0.33 | 0.04 | 14.0 |
+| zfl-L6-partial32 | 32 | 7,389,857 | 59,563,660 | 0 | 26 | 32 | 77,550 | 1.05 | 0.13 | 9.5 |
+| zfl-L6-sync16 | 32 | 7,409,121 | 59,563,660 | 0 | 27 | 32 | 225,062 | 3.04 | 0.38 | 4.1 |
+| zfl-L6to1-params | 32 | 8,275,599 | 59,563,660 | 0 | 29 | 32 | 2,214,685 | 26.76 | 3.72 | 4.1 |
+| zfl-L9-block3 | 32 | 7,148,233 | 59,563,660 | 0 | 28 | 32 | 1,766 | 0.02 | 0.00 | 6.0 |
+| zfl-L9f-full-half | 32 | 7,144,085 | 59,563,660 | 0 | 30 | 32 | 260,542 | 3.65 | 0.44 | 5.6 |
+| zfl-L9to-filtered-params | 32 | 7,142,088 | 59,563,660 | 0 | 29 | 32 | 237,842 | 3.33 | 0.40 | 5.9 |
+| zlibng-1 | 14 | 6,298,178 | 38,013,369 | 0 | 14 | 14 | 2,102,246 | 33.38 | 5.53 | 2.6 |
+| zlibng-6 | 14 | 3,975,729 | 38,013,369 | 1 | 12 | 14 | 372,513 | 9.37 | 0.98 | 5.2 |
+| zlibng-9 | 12 | 3,844,830 | 37,878,775 | 3 | 7 | 12 | 94,636 | 2.46 | 0.25 | 6.1 |
+| zopfli-15 | 5 | 25,231 | 439,729 | 0 | 4 | 5 | 3,082 | 12.22 | 0.70 | 1.4 |
+| zopflipng | 34 | 6,674,236 | 62,399,487 | 0 | 28 | 34 | 553,340 | 8.29 | 0.89 | 2.9 |
+| **total** | 878 | 222,548,562 | 1,680,616,526 | 136 | 662 | 878 | 20,994,741 | 9.43 | 1.25 | |
+
+## raw
+
+| group | streams | deflate B | plain B | zlib-reproduced (PPA v2) | PPA as bytes | preflate ok | preflate diff B | diff % deflate | diff % plain | split MB/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 7z5 | 3 | 1,063,133 | 2,834,770 | 0 | - | 3 | 43,870 | 4.13 | 1.55 | 6.3 |
+| 7z9 | 4 | 4,180,646 | 15,705,201 | 0 | - | 4 | 450,340 | 10.77 | 2.87 | 2.6 |
+| gnugzip9 | 3 | 1,074,790 | 2,834,770 | 0 | - | 3 | 393 | 0.04 | 0.01 | 7.6 |
+| ldf0 | 3 | 2,834,995 | 2,834,770 | 0 | - | 3 | 108 | 0.00 | 0.00 | 18.2 |
+| ldf1 | 3 | 1,125,946 | 2,834,770 | 0 | - | 3 | 62,001 | 5.51 | 2.19 | 5.6 |
+| ldf10 | 3 | 1,048,680 | 2,834,770 | 0 | - | 3 | 43,958 | 4.19 | 1.55 | 6.1 |
+| ldf11 | 3 | 1,046,911 | 2,834,770 | 0 | - | 3 | 44,238 | 4.23 | 1.56 | 5.9 |
+| ldf12 | 3 | 1,046,614 | 2,834,770 | 0 | - | 3 | 44,322 | 4.23 | 1.56 | 5.6 |
+| ldf2 | 3 | 1,102,804 | 2,834,770 | 0 | - | 3 | 47,515 | 4.31 | 1.68 | 6.5 |
+| ldf3 | 3 | 1,094,765 | 2,834,770 | 0 | - | 3 | 39,343 | 3.59 | 1.39 | 6.6 |
+| ldf4 | 3 | 1,088,845 | 2,834,770 | 0 | - | 3 | 33,381 | 3.07 | 1.18 | 6.8 |
+| ldf5 | 3 | 1,077,069 | 2,834,770 | 0 | - | 3 | 26,838 | 2.49 | 0.95 | 6.8 |
+| ldf6 | 3 | 1,070,769 | 2,834,770 | 0 | - | 3 | 20,495 | 1.91 | 0.72 | 6.5 |
+| ldf7 | 3 | 1,068,196 | 2,834,770 | 0 | - | 3 | 16,754 | 1.57 | 0.59 | 6.9 |
+| ldf8 | 3 | 1,065,080 | 2,834,770 | 0 | - | 3 | 16,501 | 1.55 | 0.58 | 6.8 |
+| ldf9 | 3 | 1,065,566 | 2,834,770 | 0 | - | 3 | 16,060 | 1.51 | 0.57 | 6.4 |
+| libdeflate1 | 3 | 1,125,946 | 2,834,770 | 0 | - | 3 | 62,001 | 5.51 | 2.19 | 5.9 |
+| libdeflate12 | 3 | 1,046,614 | 2,834,770 | 0 | - | 3 | 44,322 | 4.23 | 1.56 | 5.9 |
+| libdeflate6 | 3 | 1,070,769 | 2,834,770 | 0 | - | 3 | 20,495 | 1.91 | 0.72 | 6.3 |
+| libdeflate9 | 3 | 1,065,566 | 2,834,770 | 0 | - | 3 | 16,060 | 1.51 | 0.57 | 6.5 |
+| mz114-9 | 3 | 1,078,024 | 2,834,770 | 0 | - | 3 | 8,682 | 0.81 | 0.31 | 7.2 |
+| mz3-1 | 3 | 1,165,842 | 2,834,770 | 0 | - | 3 | 96,043 | 8.24 | 3.39 | 5.0 |
+| mz3-10 | 3 | 1,077,746 | 2,834,770 | 0 | - | 3 | 8,193 | 0.76 | 0.29 | 7.1 |
+| mz3-6 | 3 | 1,079,938 | 2,834,770 | 0 | - | 3 | 11,932 | 1.10 | 0.42 | 6.8 |
+| zfl-L6-sync64k | 3 | 1,076,582 | 2,834,770 | 0 | - | 3 | 471 | 0.04 | 0.02 | 10.5 |
+| zfl-L9-full-half | 3 | 1,075,465 | 2,834,770 | 0 | - | 3 | 3,891 | 0.36 | 0.14 | 8.1 |
+| zlib1 | 3 | 1,169,151 | 2,834,770 | 3 | - | 3 | 101 | 0.01 | 0.00 | 11.5 |
+| zlib6 | 3 | 1,076,407 | 2,834,770 | 3 | - | 3 | 116 | 0.01 | 0.00 | 10.9 |
+| zlib9 | 4 | 4,385,945 | 15,705,201 | 4 | - | 4 | 122 | 0.00 | 0.00 | 3.6 |
+| zng1 | 3 | 1,319,381 | 2,834,770 | 0 | - | 3 | 155,757 | 11.81 | 5.49 | 5.3 |
+| zng6 | 3 | 1,089,089 | 2,834,770 | 0 | - | 3 | 30,411 | 2.79 | 1.07 | 7.3 |
+| zng9 | 3 | 1,074,251 | 2,834,770 | 0 | - | 3 | 14,392 | 1.34 | 0.51 | 7.2 |
+| zopfli | 3 | 1,052,389 | 2,834,770 | 0 | - | 3 | 41,027 | 3.90 | 1.45 | 6.8 |
+| **total** | 101 | 44,083,914 | 119,288,272 | 10 | - | 101 | 1,420,133 | 3.22 | 1.19 | |
+
+## pda
+
+| group | streams | deflate B | plain B | zlib-reproduced (PPA v2) | PPA as bytes | preflate ok | preflate diff B | diff % deflate | diff % plain | split MB/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| not-zlib | 174 | 1,769,459 | 7,314,094 | 1 | - | 174 | 56,041 | 3.17 | 0.77 | 1.4 |
+| zlib | 568 | 17,182,875 | 133,921,648 | 334 | - | 568 | 38,867 | 0.23 | 0.03 | 6.5 |
+| **total** | 742 | 18,952,334 | 141,235,742 | 335 | - | 742 | 94,908 | 0.50 | 0.07 | |
+
+By creator (families; `pda/MANIFEST.tsv` has the full creator string):
+
+| creator | streams | not zlib (census3) | deflate B | zlib-reproduced (PPA v2) | preflate diff B | diff % deflate |
+|---|---:|---:|---:|---:|---:|---:|
+| other | 91 | 15 | 4,302,345 | 68 | 22,894 | 0.53 |
+| Quartz/macOS | 52 | 18 | 2,032,928 | 16 | 5,541 | 0.27 |
+| calibre | 12 | 0 | 1,685,101 | 12 | 409 | 0.02 |
+| MS Office 2007/2010 | 76 | 21 | 1,672,042 | 3 | 18,135 | 1.08 |
+| Adobe | 77 | 6 | 1,654,789 | 3 | 2,276 | 0.14 |
+| LibreOffice/OOo | 109 | 3 | 1,491,430 | 102 | 1,776 | 0.12 |
+| unknown | 17 | 7 | 1,479,953 | 4 | 13,487 | 0.91 |
+| TCPDF/FPDF | 24 | 0 | 961,193 | 24 | 465 | 0.05 |
+| iText | 31 | 10 | 950,265 | 10 | 1,033 | 0.11 |
+| Microsoft (other) | 23 | 2 | 592,203 | 21 | 1,372 | 0.23 |
+| Skia/Chrome | 28 | 17 | 503,886 | 11 | 4,007 | 0.80 |
+| cairo/Firefox | 13 | 7 | 287,588 | 2 | 6,921 | 2.41 |
+| pdfTeX | 37 | 6 | 281,702 | 22 | 358 | 0.13 |
+| PDFium | 6 | 0 | 256,595 | 3 | 65 | 0.03 |
+| SAMBox | 9 | 3 | 239,735 | 2 | 2,239 | 0.93 |
+| MS Office 2013+ | 90 | 54 | 188,489 | 1 | 9,580 | 5.08 |
+| Aspose | 16 | 3 | 169,250 | 9 | 4,122 | 2.44 |
+| Ghostscript | 23 | 2 | 141,885 | 18 | 162 | 0.11 |
+| FOP | 8 | 0 | 60,955 | 4 | 66 | 0.11 |
+
+## hostile
+
+| group | streams | deflate B | plain B | zlib-reproduced (PPA v2) | PPA as bytes | preflate ok | preflate diff B | diff % deflate | diff % plain | split MB/s |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| ab-run16m.L9 | 1 | 16,289 | 16,777,216 | 1 | - | 1 | 3 | 0.02 | 0.00 | 38.7 |
+| bad-adler | 1 | 30 | 2,300 | 1 | - | 1 | 15 | 50.00 | 0.65 | 0.1 |
+| bitflip | 1 | 30 | 54 | 0 | - | 1 | 9 | 30.00 | 16.67 | 0.0 |
+| btype3 | 1 | 0 | 0 | 0 | - | 0 | 0 | - | - | - |
+| dist32768-258 | 1 | 32,778 | 33,026 | 0 | - | 1 | 9 | 0.03 | 0.03 | 0.9 |
+| empty-fixed-blocks | 1 | 5 | 0 | 0 | - | 1 | 6 | 120.00 | - | 0.0 |
+| empty.L6 | 1 | 2 | 0 | 1 | - | 1 | 6 | 300.00 | - | 0.0 |
+| fdict | 1 | 0 | 0 | 0 | - | 0 | 0 | - | - | - |
+| len258as284 | 1 | 5 | 259 | 0 | - | 1 | 7 | 140.00 | 2.70 | 0.0 |
+| maxdist.ldf12 | 1 | 66,546 | 66,536 | 0 | - | 1 | 10 | 0.02 | 0.02 | 2.5 |
+| stored-1byte-pads | 1 | 460 | 250 | 0 | - | 1 | 114 | 24.78 | 45.60 | 0.0 |
+| stored-only.L0 | 1 | 153,615 | 153,600 | 0 | - | 1 | 12 | 0.01 | 0.01 | 5.7 |
+| trailing | 1 | 30 | 2,300 | 1 | - | 1 | 15 | 50.00 | 0.65 | 0.1 |
+| truncated | 1 | 0 | 0 | 0 | - | 0 | 0 | - | - | - |
+| wbits9.L9 | 1 | 99 | 36,000 | 1 | - | 1 | 3 | 3.03 | 0.01 | 1.8 |
+| zeros64m.L1 | 1 | 292,845 | 67,108,864 | 1 | - | 1 | 3 | 0.00 | 0.00 | 49.3 |
+| zeros64m.L9 | 1 | 65,232 | 67,108,864 | 1 | - | 1 | 3 | 0.00 | 0.00 | 50.9 |
+| zeros64m.ldf12 | 1 | 67,832 | 67,108,864 | 0 | - | 1 | 463 | 0.68 | 0.00 | 47.7 |
+| **total** | 18 | 695,798 | 218,398,133 | 7 | - | 15 | 678 | 0.10 | 0.00 | |
+
+Not through preflate: not-inflatable 3.
+
