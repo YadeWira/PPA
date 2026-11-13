@@ -494,6 +494,105 @@ Wira's, 07/11/2026: 15%). One thread, the same build:
 The slow model's own margin (`SLOW_GAIN`, 10%): 5% gives the corpus
 55.49% for 19% more time to extract, 2% 53.93% for 61% more.
 
+## Speed, third pass (13/11/2026)
+
+The goal (aim todo 18): extracting the 20 photos on one thread as fast as
+packPNG, without one byte of a `.ppa` changing. Measured first
+(`perf record` on `ppa x -th 1`, the 20 photos, 16.2 s): the fast model's
+loop 34% (9 of the photos take it), zlib's choices rebuilt 49%
+(`longest_match` 30%, the insertion of each position 10%, the loop 9%),
+the static model 7%, the rest (the byte model, the filters, the checksums,
+the deflate bits) 13%. A bench of zlib's choices alone on the 20 streams
+(all level 7, filtered, memLevel 9): 7.6 s.
+
+Every change below gives the same `.ppa` bytes, and every stream reads
+back the same: after each step, the four sets' 179 files (`tests/png`,
+the photos, the corpus, the generated set) compressed into the
+baseline's bytes and the baseline's `.ppa` extracted back to the
+originals; at the end, all four ways (one thread and eight, the C path
+and `PPA_NOC=1`): 716 `.ppa` the same bytes, 4 x 179 files back.
+
+- **A filtered stream's search starts at 5 bytes.** deflate_slow with the
+  filtered strategy drops every match of 5 bytes or fewer, so only one of 6
+  or more can count: the C search starts as if it had one of 5. Where the
+  longest is 6 or more it is the same match (a candidate improves on the
+  best only with more bytes, wherever the best started); where it is not,
+  the caller drops what it gets, as it dropped zlib's. And the first skip
+  level then needs 6 bytes the same, not 4: its links (t4, d4) are of the
+  same 6 bytes for that strategy. zlib's choices: 7.6 s -> 5.9 s.
+- **A window position's chain state in 8 bytes.** zlib's prev, the two
+  skip links and the order in the hash chain as 16-bit distances and
+  counts in one record (the window is at most 32 KB; the differences of
+  orders are exact modulo 2^16, two positions the walk compares being less
+  than the window apart): 896 KB to 256 KB, one cache line a step instead of
+  two. 5.9 s -> 5.4 s.
+- **The skip tables in sets of two.** A link was not known wherever the
+  table's slot held another key, and each one not known made the search
+  walk zlib's whole chain to the key. Two positions a set, at most one of
+  each key: not known only where both are in the window with other keys.
+  5.4 s -> 4.9 s.
+- **The loop in a copy for each of its constants** (deflate_fast or slow,
+  the first key's length, the 16 bytes' links kept or not), so that the
+  insertion and the search inline into it without their tests and
+  switches. 4.9 s -> 4.3 s.
+- **The fast model's later counters fetched early**: once a sample's
+  contexts are known, the slots its second guess, its first two class
+  decisions (both signs) and the last-value table may read are prefetched
+  while the zero decision is coded. 1.5-3% of a fast photo.
+- **The byte model in C** (`ppam_bytes`, its Pascal reference kept;
+  `test_arith` codes four kinds of data both ways in pieces of many
+  sizes): the structure, the streams kept as bytes and the static model's
+  tables. About 3% of a static photo.
+- **The slow model's tables kept from band to band.** Each band asked for
+  128 MB, which the system zeroed again page by page as it was touched; a
+  pool now keeps the blocks while the codec (each call) or the command
+  (its whole run) holds it, and a band zeros the one it takes. The corpus:
+  6.7 s -> 1.2 s of system time.
+
+Tried and left out (each measured, none faster, or slower):
+
+- the 16 bytes' links for every level from 4 (not only 8 and 9): fewer
+  steps along the 8 bytes' chain, but keeping them costs more (+12-30%);
+  also kept only for the positions with 8 bytes seen before (a link it
+  finds is still the newest, one it does not is not known): +13%;
+- the 8 bytes' links only for the positions with 6 seen before: the same;
+- no 8 bytes' links at all for a filtered stream: the same on photos;
+- the walk where a link is not known along the level below instead of
+  zlib's chain: the same (two-way sets left few of them);
+- the chain state in three arrays of 4 bytes, one per chain walked (128
+  KB each): the same;
+- smaller skip tables (2^17, 2^18 slots): 20% and 5% slower; the tables'
+  prefetch 8 or 16 positions ahead instead of 4, and head's and cnt's
+  slots prefetched: the same;
+- the match model's slot prefetched for the prediction's value: slower.
+
+What is left. zlib's choices on the 20 photos: 4.3 s in the bench, about
+half of it the search, most of whose steps (counted: 179 million of 230
+million) are along the 8 bytes' links (a search that finds 7 bytes or more
+then steps, a cache miss each, through every position with the same 8
+bytes on zlib's chain), the rest the insertion of every position. The fast
+model is now the largest part: about 740 instructions and 4 cache misses
+a sample, a serial chain of decisions, already tuned (first pass); a
+quicker one would mean another model, and other bytes.
+
+Measured on 13/11/2026, the build before this pass and after it one after
+the other, the best of three (two for the corpus and the generated set);
+packPNG 2.0l on `.ppg` made from the same photos:
+
+| | before | after | packPNG 2.0l |
+|---|---|---|---|
+| the 20 photos, `ppa x`, one thread | 15.5 s | **11.5 s** | 7.5 s |
+| the 20 photos, `ppa x -th 8` | 2.7 s | **2.1 s** | 1.3 s |
+| the 20 photos, `ppa a`, one thread | 34.2 s | **29.4 s** | |
+| the 20 photos, `ppa a -th 8` | 6.3 s | **5.2 s** | |
+| the corpus, `ppa x`, one thread / 8 | 66.8 s / 17.9 s | **55.7 s / 15.9 s** | |
+| the generated set, `ppa x`, one thread / 8 | 40.4 s / 6.5 s | **38.3 s / 6.2 s** | |
+| the `.ppa` files | | the same bytes | |
+
+So one thread extracts the photos 1.5 times as slowly as packPNG, no
+longer 2.1 times: not yet as fast. The corpus and the generated set are
+mostly the slow model, untouched here.
+
 ## Speed, first pass (31/10/2026)
 
 Measured first, phase by phase (`measure_phases`), on the corpus's
@@ -598,5 +697,6 @@ loop, -O2: none above the noise.
 | 01/11/2026 | JNG through PJA 0.6.0 (v7), the corpus's 13 JNG files (85,403 bytes) | 63.48% (as bytes: 88.54%), every one back |
 | 01/11/2026 | the fast model (`ppafast`) for 8-bit images, zlib's chains skipped, the filters and checksums unchecked inside; the 20 photos, one thread | every one back byte for byte; `ppa x` 116.0 s -> 27.5 s, `ppa a` 240.8 s -> 61.9 s; 23,669,672 bytes (the slow model: 23,569,576) |
 | 01/11/2026 | the model's loop without its two costly branches, its tables aligned, its mixer on vectors; the 20 photos, one thread | the same `.ppa` bytes; `ppa x` 155.1 s -> 116.0 s, `ppa a` 300.4 s -> 240.8 s |
+| 13/11/2026 | speed, third pass: the four sets (179 files), one thread and eight, C and `PPA_NOC=1` | the same 716 `.ppa` bytes as before it, every file back; the 20 photos' `ppa x -th 1` 15.5 s -> 11.5 s (packPNG 2.0l: 7.5 s) |
 | 01/11/2026 | the command, 8 threads, bands, the whole corpus (77 files) | every one back byte for byte; the 70 of the family 32.9 MB -> **16.8 MB = 51.11%** (was 58.81%), the 7 others stored; `ppa a` 220 s, `ppa x` 111 s |
 | 31/10/2026 | layer 6, the corpus's 70 files of the family (32.9 MB) | **19.4 MB = 58.81%**, every one back; 211 image streams as images, 30 as bytes (13 not zlib's, 17 JNG JPEGs); 2,387 s for compressing, verifying and decompressing, one thread: the zlib parameter search and the model are the slow parts |

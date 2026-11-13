@@ -85,11 +85,13 @@ static intptr_t ppaz_longest(const uint8_t *plain, intptr_t n, const zpos_t *pos
 /* longest_match again, the same result, with the hash chain skipped where
    no candidate can do better: a candidate improves on bestLen only with at
    least bestLen + 1 bytes the same, so only the positions with the same 3
-   bytes count while bestLen is 2, the same 4 from 3 on, the same 8 from 7
-   on. nx[1..2] link each position to the last one before it with the same
-   4 and 8 bytes (0: none; -1: not known, a table's collision); the same
-   3 bytes are found on zlib's own chain, walked (a table for them cost
-   more to keep than it saved: 4.5% of the time on photographs); ord
+   bytes count while bestLen is 2, the same k1 (4, or 6 for a filtered
+   deflate_slow) from k1 - 1 on, the same 8 from 7 on, 16 from 15 on.
+   zpos_t's d4 and d8 (and d16) link each position to the last one before
+   it with the same k1, 8 (and 16) bytes (0: none; LINK_UNKNOWN: not
+   known, a table's collision); the same 3 bytes are found on zlib's own
+   chain, walked (a table for them cost more to keep than it saved: 4.5%
+   of the time on photographs); ord
    numbers each position in its hash chain, so a jump from the scan to q
    costs zlib's walk ord[scan] - ord[q] steps (curMatch, the first, is step
    0) and the chain's length still ends the search where zlib's ends. A
