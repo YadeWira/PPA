@@ -691,6 +691,9 @@ begin
   why := '';
   was := StageEnter(stNone);
   StageEnter(was);
+  { the slow model's tables kept from band to band (ppamodel's pool) }
+  ModelPoolHold;
+  try
   Result := CompressRaw(data, stream, why, stats, threads, model, known);
   if not Result or not verify then begin StageEnter(was); Exit; end;
   { The stream decompressed and compared with the file, whole. Each image's
@@ -707,6 +710,9 @@ begin
     Result := False;
   end;
   StageEnter(was);
+  finally
+    ModelPoolRelease;
+  end;
 end;
 
 { ---------------------------------------------------------------- decompress }
@@ -1016,6 +1022,8 @@ var future: Boolean;
 begin
   failure := dfNone;
   future := False;
+  ModelPoolHold;
+  try
   try
     Result := DecompressRaw(stream, maxOut, data, why, threads, stages, known, future);
     if not Result then
@@ -1037,6 +1045,9 @@ begin
       failure := dfDamaged;
       Result := False;
     end;
+  end;
+  finally
+    ModelPoolRelease;
   end;
 end;
 

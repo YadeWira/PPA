@@ -60,6 +60,15 @@ var
     images both ways and demands the same streams }
   UseC: Boolean = True;
 
+{ The model's tables (128 MB, zeros) kept for the next band while anyone
+  holds the pool: a band takes a block the last one gave back and zeros it,
+  instead of asking the system for new memory, which zeros every page again
+  as it is touched (on the corpus, a ninth of ppa x). Holds nest; the last
+  release frees what is kept. The codec holds it for each call, the command
+  for its whole run. }
+procedure ModelPoolHold;
+procedure ModelPoolRelease;
+
 implementation
 
 {$L ppamodelc.o}
@@ -111,8 +120,9 @@ end;
 
 type
   PCounter = ^TCounter;
+  TCounterArray = array of TCounter;
   TModel = record
-    tall: array of TCounter;                  { the tables' memory, with room to align }
+    tall: TCounterArray;                      { the tables' memory, with room to align }
     t: array[0..NCTX - 1] of PCounter;        { the tables, in tall }
     w: array[0..MIXER_SETS - 1, 0..NINP - 1] of Integer;
     filt: array[0..5, 1..7] of TAdaptiveBit;
@@ -169,14 +179,65 @@ type
 
 procedure ppam_bytes(var a: TBytesArgs); cdecl; external name 'ppam_bytes';
 
+var
+  PoolLock: TRTLCriticalSection;
+  PoolHolds: Integer = 0;
+  PoolFree: array of TCounterArray;   { blocks given back, each of TALL_LEN }
+
+const
+  TALL_LEN = NCTX * (TABLE_MASK + 1) + TABLE_ALIGN div SizeOf(TCounter);
+
+procedure ModelPoolHold;
+begin
+  EnterCriticalSection(PoolLock);
+  Inc(PoolHolds);
+  LeaveCriticalSection(PoolLock);
+end;
+
+procedure ModelPoolRelease;
+begin
+  EnterCriticalSection(PoolLock);
+  Dec(PoolHolds);
+  if PoolHolds <= 0 then begin PoolHolds := 0; PoolFree := nil; end;
+  LeaveCriticalSection(PoolLock);
+end;
+
+{ the tables' block: one given back (zeroed here), or a new one (zeros) }
+procedure TakeTables(var m: TModel);
+var n: SizeInt;
+begin
+  m.tall := nil;
+  EnterCriticalSection(PoolLock);
+  n := Length(PoolFree);
+  if n > 0 then begin
+    m.tall := PoolFree[n - 1];
+    PoolFree[n - 1] := nil;
+    SetLength(PoolFree, n - 1);
+  end;
+  LeaveCriticalSection(PoolLock);
+  if m.tall <> nil then FillChar(m.tall[0], TALL_LEN * SizeOf(TCounter), 0)
+  else SetLength(m.tall, TALL_LEN);
+end;
+
+{ the block back to the pool, while it is held; else freed }
+procedure GiveTables(var m: TModel);
+begin
+  EnterCriticalSection(PoolLock);
+  if (PoolHolds > 0) and (Length(m.tall) = TALL_LEN) then begin
+    SetLength(PoolFree, Length(PoolFree) + 1);
+    PoolFree[High(PoolFree)] := m.tall;
+  end;
+  LeaveCriticalSection(PoolLock);
+  m.tall := nil;
+end;
+
 procedure InitModel(var m: TModel);
 var i, j: Integer; a: PtrUInt;
 begin
   { one block for every table, zeros (every counter at 1/2), the tables
     aligned to 2 MiB: a bucket is then one cache line, and a system that
     backs memory with large pages can back all of it }
-  m.tall := nil;
-  SetLength(m.tall, NCTX * (TABLE_MASK + 1) + TABLE_ALIGN div SizeOf(TCounter));
+  TakeTables(m);
   a := (TABLE_ALIGN - PtrUInt(@m.tall[0]) mod TABLE_ALIGN) mod TABLE_ALIGN;
   for i := 0 to NCTX - 1 do
     m.t[i] := PCounter(PByte(@m.tall[0]) + a) + i * (TABLE_MASK + 1);
@@ -441,6 +502,7 @@ var
 
 begin
   InitModel(m);
+  try
   bpp := px.bpp;
   prevFilter := 5;
   ra := Default(TRowArgs);
@@ -507,6 +569,9 @@ begin
       end;
       PascalRow(m, px, row, prior, rb, y, y0, px.passes[pi_].first + y0 * rb, enc, dec);
     end;
+  end;
+  finally
+    GiveTables(m);
   end;
 end;
 
@@ -617,4 +682,8 @@ end;
 
 initialization
   UseC := GetEnvironmentVariable('PPA_NOC') <> '1';
+  InitCriticalSection(PoolLock);
+finalization
+  PoolFree := nil;
+  DoneCriticalSection(PoolLock);
 end.

@@ -29,7 +29,7 @@ uses
   {$ifdef MSWINDOWS} Windows, {$endif}
   SysUtils, Classes, ppablake3, ppaformat, ppacodec, ppafs, ppathreads, ppajoin,
   { the commands for reporting and checking (doc/CLI.md) }
-  ppastage, ppainfo, ppasysinfo, ppareport, ppabench, ppaselftest;
+  ppastage, ppainfo, ppasysinfo, ppareport, ppabench, ppaselftest, ppamodel;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -1222,6 +1222,9 @@ begin
   BuildCommit := {$I %PPA_COMMIT%};
   BuildDate := {$I %DATE%};
   errors := 0; bugs := 0; bugFile := ''; sumIn := 0; sumOut := 0; outputError := '';
+  { the slow model's tables kept from file to file for the whole run, not
+    asked of the system again for each (ppamodel's pool) }
+  ModelPoolHold;
   try
   ParseArgs;
   { before any write: report's and bench's too }
