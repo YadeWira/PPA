@@ -352,6 +352,15 @@ static inline __attribute__((always_inline)) void row_nc(fm_args_t *a, const int
       const uint32_t hx = hsh((uint32_t)xPrev | (uint32_t)((P - xPrev) & 511) << 8 | (uint32_t)chx << 17 | (uint32_t)eb4 << 19);
       const uint32_t hn = ((uint32_t)W | (uint32_t)N << 8 | (uint32_t)NE << 16 | (uint32_t)NW << 24) * 0x9E3779B1u ^ (uint32_t)(chx + 1) * 0x85EBCA6Bu;
       const int sel = eb | (chx > 0) << 4;
+      /* the hashed counters the decisions after the first may read, fetched
+         while it is coded (a hint: nothing depends on it) */
+      __builtin_prefetch(&ctab[hn >> cs]);
+      for (int sn_ = 0; sn_ < 2; sn_++) {
+        const uint32_t t_ = (uint32_t)(sn_ << 1) * 0x27D4EB2Fu + 3;
+        __builtin_prefetch(&h[((hx + t_) * 0x165667B1u) >> hs]);
+      }
+      __builtin_prefetch(&h[((hx + 5) * 0x2545F491u) >> hs]);
+      __builtin_prefetch(&h[((hn + 5) * 0x2545F491u) >> hs]);
       const intptr_t spos = rowPos + i;
       const int mexp = mlen > 0 ? data[mptr] : -1;
       const int mst = mlen == 0 ? 0 : mexp != P ? 3 : mlen < 16 ? 1 : 2;
