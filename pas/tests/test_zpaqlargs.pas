@@ -6,8 +6,10 @@
     from 1 to 20,000 pixels; zlib's level, strategy, memLevel 1..9 and
     window 2^9..2^15; its IDAT cut into many chunks; an APNG of frames of
     other sizes; bytes after IEND; an IDAT with a 3 MiB pixels' tail, whose
-    image goes as bytes) is taken by the detection, compressed
-    as the plugin does (every image static), and its stream's needs
+    image goes as bytes) is taken by the detection, compressed with
+    every image static (KeepGivenModel) and as the plugin does (an image
+    that does not beat its deflate bytes may go as bytes, the plugin's
+    stream no larger), and both streams' needs
     (Ppa1Needs) hold: the records' part is the image's chunks and
     substreams, the image part at least its lines' and deflate's for some
     memLevel and window, M at least the segment, the stream and the largest
@@ -291,16 +293,13 @@ begin
   case ct of 0: Result := 1; 2: Result := 3; 4: Result := 2; else Result := 4; end;
 end;
 
-{ the plugin's compress (every image static, not verified: zpaq-std
-  decodes), then the needs; written for check_zpaqlargs.py }
-function Take(const name: string; const d: TBytes; out stream: TBytes; out nd: TPpa1Needs): Boolean;
-var why: string; stats: TCodecStats; seg: TBytes; t: Text; i: Integer;
+{ a stream's needs (Ppa1Needs), checked, and written with the file for
+  check_zpaqlargs.py }
+function Needs(const name: string; const d, stream: TBytes; out nd: TPpa1Needs): Boolean;
+var seg: TBytes; t: Text; i: Integer;
 begin
-  Result := False;
-  stream := nil;
-  if not Ppa1Takes(d, why) then begin Check(False, name + ': detection refuses it: ' + why); Exit; end;
-  if not Compress(d, stream, why, stats, False, 1, MODE_STATIC) then begin Check(False, name + ': compress: ' + why); Exit; end;
-  if not Ppa1Needs(stream, nd) then begin Check(False, name + ': no needs for its stream'); Exit; end;
+  Result := Ppa1Needs(stream, nd);
+  if not Result then begin Check(False, name + ': no needs for its stream'); Exit; end;
   Check(Ppa1Args(stream) = nd.ph or (nd.pm shl 8), name + ': the query is $3 | $4 << 8');
   Check((nd.ph = Log2Up(nd.hWords)) and (nd.pm = Log2Up(nd.mBytes)) and (nd.ph <= PPA1_MAX_PH) and (nd.pm <= PPA1_MAX_PM),
         name + ': $3, $4 within the limits');
@@ -318,7 +317,40 @@ begin
     Close(t);
     Inc(written);
   end;
-  Result := True;
+end;
+
+{ the plugin's compress (not verified: zpaq-std decodes), then the needs.
+  The plugin sends an image whose coding does not beat its own deflate
+  bytes as bytes when the file comes out smaller so, which most of the
+  tiny images built here are; keep: the stream with every image static
+  as well (ppacodec.KeepGivenModel, the plugin's choice skipped), the one
+  returned, so that the built images still give the decoder static
+  images of every size, their H checked exactly. The plugin's own stream
+  is checked and written too (NAME_own, when it differs), and must be no
+  larger. }
+function Take(const name: string; const d: TBytes; out stream: TBytes; out nd: TPpa1Needs;
+  keep: Boolean = True): Boolean;
+var why: string; stats: TCodecStats; own: TBytes; ownNd: TPpa1Needs;
+begin
+  Result := False;
+  stream := nil;
+  if not Ppa1Takes(d, why) then begin Check(False, name + ': detection refuses it: ' + why); Exit; end;
+  if not Compress(d, own, why, stats, False, 1, MODE_STATIC) then begin Check(False, name + ': compress: ' + why); Exit; end;
+  if not keep then begin
+    stream := own;
+    Result := Needs(name, d, stream, nd);
+    Exit;
+  end;
+  KeepGivenModel := True;
+  try
+    if not Compress(d, stream, why, stats, False, 1, MODE_STATIC) then begin
+      Check(False, name + ': compress, every image static: ' + why); Exit;
+    end;
+  finally KeepGivenModel := False; end;
+  Check(Length(own) <= Length(stream), name + ': the plugin''s stream no larger than every image static');
+  if (Length(own) <> Length(stream)) or not CompareMem(@own[0], @stream[0], Length(own)) then
+    if not Needs(name + '_own', d, own, ownNd) then Exit;
+  Result := Needs(name, d, stream, nd);
 end;
 
 { an image built: taken, one static image, its records and lines exactly }
@@ -476,7 +508,7 @@ begin
     name := ExtractFileName(files[i]);
     if not Ppa1Takes(d, why) then Continue;
     Inc(nFiles);
-    Take('f_' + name, d, stream, nd);
+    Take('f_' + name, d, stream, nd, False);
   end;
   files.Free;
 

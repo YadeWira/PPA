@@ -18,7 +18,9 @@
     fragments after it when the file is alone or the last of its group) and
     gives back ppacodec.Compress's stream with every image forced to the
     static model (its model parameter, not the global TestModel: several
-    calls run at once, and the ppa command's streams do not change); the
+    calls run at once, and the ppa command's streams do not change), but
+    for those whose coding does not beat their own deflate bytes when the
+    file comes out smaller with them as bytes (many small frames); the
     bytes after the file's last chunk ride in its structure, so the
     fragments come back too. It does not verify the stream itself: zpaq-std
     decodes every block (-sa: with this plugin's decompress, -sat: also

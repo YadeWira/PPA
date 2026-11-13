@@ -51,6 +51,11 @@ var
     says each image's model: it decodes as any other). From the
     environment: PPA_TEST_MODEL=slow, fast or static. }
   TestModel: Integer = -1;
+  { For pas/tests/test_zpaqlargs only: with a model given, every image the
+    model takes stays with it, even when the file would be smaller with
+    it as bytes (CompressRaw's last choice skipped), so the tests' tiny
+    images still give the decoder static images of every size. }
+  KeepGivenModel: Boolean = False;
 
 const
   { how each image stream is kept, the byte the stream writes for it }
@@ -400,9 +405,11 @@ var
   p: TPng; r: TPngResult; w: TWriter; meta: TBytes;
   plans: array of TStreamPlan;
   i, s: SizeInt;
-  enc: TArithEncoder; bm, rm: TByteModel; sub0: TBytes;
+  sub0: TBytes;
   jobs: array of TBandJob; subs: array of TBytes; nJobs, nJpeg: SizeInt;
   total: Int64; big: SizeInt; grew: Boolean; coded: array of Int64;
+  drop: array of Boolean; anyDrop: Boolean; saved: array of TStreamPlan; meta2, sub0b: TBytes;
+  jpegLens: array of SizeInt; oldLen, newLen: Int64; k: SizeInt;
 
   procedure PlanOne(k: SizeInt);
   begin
@@ -463,6 +470,60 @@ var
     Result := w.Bytes;
   end;
 
+  { what the verification knows, and the stats, of the plans }
+  procedure Tally;
+  var s: SizeInt;
+  begin
+    stats := Default(TCodecStats);
+    known := nil;
+    SetLength(known, Length(p.streams));
+    for s := 0 to High(p.streams) do begin
+      if plans[s].mode in IMAGE_MODES then begin
+        known[s].plain := plans[s].z.plain;
+        known[s].data := p.streams[s].data;
+      end;
+      Inc(stats.modes[plans[s].mode]);
+      if plans[s].mode in IMAGE_MODES + [MODE_JPEG] then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
+      else begin Inc(stats.rawStreams); Inc(stats.rawBytes, Length(p.streams[s].data)); end;
+    end;
+  end;
+
+  { substream 0: the structure m, and the streams kept as bytes }
+  function Sub0Of(m: TBytes): TBytes;
+  var enc: TArithEncoder; bm, rm: TByteModel; s: SizeInt;
+  begin
+    enc.Init;
+    enc.Direct(Length(m), 32);
+    bm.Init;
+    CodeBytes(bm, m, 0, Length(m), @enc, nil);
+    rm.Init;
+    for s := 0 to High(p.streams) do
+      if plans[s].mode = MODE_BYTES then CodeBytes(rm, p.streams[s].data, 0, Length(p.streams[s].data), @enc, nil);
+    Result := enc.Finish;
+  end;
+
+  function VarLen(x: QWord): Integer;
+  begin
+    Result := 1;
+    while x >= 128 do begin Inc(Result); x := x shr 7; end;
+  end;
+
+  { the stream's length: its header, substream 0 of n0 bytes, the bands of
+    the images not in skip (nil: all of them), the JPEGs }
+  function StreamLen(n0: SizeInt; const skip: array of Boolean): Int64;
+  var i, n: SizeInt;
+  begin
+    n := 1 + Length(jpegLens);
+    Result := n0 + VarLen(n0);
+    for i := 0 to nJobs - 1 do
+      if (Length(skip) = 0) or not skip[jobs[i].s] then begin
+        Inc(n);
+        Inc(Result, Int64(Length(subs[i])) + VarLen(Length(subs[i])));
+      end;
+    for i := 0 to High(jpegLens) do Inc(Result, Int64(jpegLens[i]) + VarLen(jpegLens[i]));
+    Inc(Result, 1 + VarLen(n));
+  end;
+
 begin
   Result := False;
   stream := nil;
@@ -513,27 +574,10 @@ begin
     plans[big].z := Default(TZStream);
     meta := BuildMeta;
   end;
-  known := nil;
-  SetLength(known, Length(p.streams));
-  for s := 0 to High(p.streams) do begin
-    if plans[s].mode in IMAGE_MODES then begin
-      known[s].plain := plans[s].z.plain;
-      known[s].data := p.streams[s].data;
-    end;
-    Inc(stats.modes[plans[s].mode]);
-    if plans[s].mode in IMAGE_MODES + [MODE_JPEG] then begin Inc(stats.images); Inc(stats.imageBytes, Length(p.streams[s].data)); end
-    else begin Inc(stats.rawStreams); Inc(stats.rawBytes, Length(p.streams[s].data)); end;
-  end;
+  Tally;
 
   { substream 0: the structure, and the streams kept as bytes }
-  enc.Init;
-  enc.Direct(Length(meta), 32);
-  bm.Init;
-  CodeBytes(bm, meta, 0, Length(meta), @enc, nil);
-  rm.Init;
-  for s := 0 to High(p.streams) do
-    if plans[s].mode = MODE_BYTES then CodeBytes(rm, p.streams[s].data, 0, Length(p.streams[s].data), @enc, nil);
-  sub0 := enc.Finish;
+  sub0 := Sub0Of(meta);
   { then each band of each image, in order, in parallel }
   nJobs := 0;
   for s := 0 to High(p.streams) do
@@ -557,9 +601,62 @@ begin
         plans[s].z := Default(TZStream);
         grew := True;
       end;
-    if grew then stats := Default(TCodecStats);
   end;
   until not grew;
+
+  { then, with a model given (unless KeepGivenModel): the file as a whole.
+    An image of that model whose coding does not beat its own deflate
+    bytes (a small frame's tables, noise) goes as bytes if the file
+    comes out smaller
+    so: an APNG or MNG of many small frames paid each frame's tables, up
+    to twice the file, under the rule above (those 9 files: 1,534,422
+    bytes before this, 1,294,937 with it). Only substream 0 is coded
+    again (whatever the threads, the same stream): the other images'
+    bands do not change. The ppa command's streams (model -1) do not take
+    this path. }
+  jpegLens := nil;
+  for s := 0 to High(p.streams) do
+    if plans[s].mode = MODE_JPEG then begin
+      SetLength(jpegLens, Length(jpegLens) + 1);
+      jpegLens[High(jpegLens)] := Length(plans[s].jpeg);
+    end;
+  if (model >= 0) and not KeepGivenModel then begin
+    drop := nil; SetLength(drop, Length(p.streams));
+    anyDrop := False;
+    for s := 0 to High(p.streams) do
+      if (plans[s].mode = model) and (coded[s] >= Length(p.streams[s].data)) then begin
+        drop[s] := True; anyDrop := True;
+      end;
+    if anyDrop then begin
+      saved := Copy(plans, 0, Length(plans));
+      for s := 0 to High(p.streams) do
+        if drop[s] then plans[s].mode := MODE_BYTES;
+      meta2 := BuildMeta;
+      sub0b := Sub0Of(meta2);
+      oldLen := StreamLen(Length(sub0), []);
+      newLen := StreamLen(Length(sub0b), drop);
+      if newLen < oldLen then begin
+        for s := 0 to High(p.streams) do
+          if drop[s] then begin
+            plans[s].px := Default(TPixels);
+            plans[s].z := Default(TZStream);
+          end;
+        meta := meta2;
+        sub0 := sub0b;
+        k := 0;
+        for i := 0 to nJobs - 1 do
+          if not drop[jobs[i].s] then begin
+            jobs[k] := jobs[i]; subs[k] := subs[i]; Inc(k);
+          end;
+        nJobs := k;
+        SetLength(jobs, nJobs); SetLength(subs, nJobs);
+        Tally;
+        stats.bands := nJobs;
+      end else
+        plans := saved;
+      saved := nil;
+    end;
+  end;
 
   { then each JNG JPEG's PJA stream, in order }
   nJpeg := 0;
