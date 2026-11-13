@@ -157,8 +157,11 @@ var stream: TBytes; why: string; stats: TCodecStats;
 begin
   if (n > MAX_BLOCK) or (src = nil) then Exit(ZS_ERR_DATA);
   try
-    { no verification here: zpaq-std decodes every block and compares }
-    if not Compress(Bytes(src, n), stream, why, stats, False, threads, MODE_STATIC) then Exit(ZS_ERR_DATA);
+    { no verification here: zpaq-std decodes every block and compares.
+      The stream version its ZPAQL decodes, no newer: an image stream that
+      would need one (a later deflate recipe) goes as bytes }
+    if not Compress(Bytes(src, n), stream, why, stats, False, threads, MODE_STATIC, PPA1_ZPAQL_STREAM_VERSION) then
+      Exit(ZS_ERR_DATA);
     { only what the ZPAQL decodes, within its memory }
     if Ppa1Args(stream) < 0 then Exit(ZS_ERR_DATA);
     if SizeUInt(Length(stream)) > cap then Exit(ZS_ERR_DATA);

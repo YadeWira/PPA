@@ -3,6 +3,8 @@
 #
 #   pas/run_tests.sh                          what is in the repo
 #   PNG_CORPUS=dir1:dir2 pas/run_tests.sh     plus the round trip over those directories
+#   PREFLATE_CORPUS=dir pas/run_tests.sh      ppapreflate on the preflate corpus (tools/preflate):
+#                                             default /mnt/IA_LAB/agentes/ppa/preflate/corpus when there
 #
 # Each test demands its own minimum count: one that runs zero cells is not green.
 set -euo pipefail
@@ -20,7 +22,7 @@ grep -q "(${MM}u << 16) | ${MV}u;" "$PAS/lib/ppa7z.c" || { echo "FAIL: ppa7z.c's
 echo "== build"
 # the C part (CC: the platform's C compiler)
 sh "$PAS/build_c.sh" "$OUT/c"
-for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_pixels test_arith measure_model measure_fast measure_static test_blake3 test_codec test_format; do
+for prog in test_png test_png_corrupt test_deflate test_deflate_corrupt test_zlib test_preflate test_pixels test_arith measure_model measure_fast measure_static test_blake3 test_codec test_format; do
   $FPC -O2 -g -gl -Fu"$PAS" -Fi"$PAS" -Fu"$PPA/vendor/pja/pas" -Fi"$PPA/vendor/pja/pas" -Fo"$OUT/c" -FU"$OUT" -FE"$OUT" "$PAS/tests/$prog.pas" > "$OUT/fpc.log" 2>&1 \
     || { cat "$OUT/fpc.log"; exit 1; }
 done
@@ -51,6 +53,18 @@ done
 echo "== layer 2b: zlib's choices predicted"
 "$OUT/test_zlib" "$PPA/tests/png" | tail -1
 "$OUT/test_zlib" "$PPA/tests/png" | grep -q '16 told by their zlib parameters'
+
+echo "== layer 2: one deflate stream <-> its bytes and its recipe (ppapreflate)"
+# every stream kind 0 and back the same (on 1 and 4 threads), Compress's
+# maxVersion, and the crafted streams and damaged recipes
+"$OUT/test_preflate" "$PPA/tests/png" 16 -all0 -codec | tail -1
+PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/png" 16 -all0 | tail -1
+PF_CORPUS=${PREFLATE_CORPUS-/mnt/IA_LAB/agentes/ppa/preflate/corpus}
+if [ -d "$PF_CORPUS/png-zlib" ]; then
+  # the regression set: all 392 streams kind 0; zlib does not write the 24 others
+  "$OUT/test_preflate" "$PF_CORPUS/png-zlib" 392 -all0 | tail -1
+  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 | tail -1
+fi
 
 echo "== layer 3: filtered lines <-> each line's filter and the image's bytes"
 "$OUT/test_pixels" "$PPA/tests/png" 16 | tail -1

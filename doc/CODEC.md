@@ -22,6 +22,7 @@ over a large corpus, is the oracle for the whole project.
 | 1 | `ppapng` | file ↔ chunks + one data stream per image (IDAT, fdAT, JDAT, JDAA) + what is needed to cut them into the same chunks | done |
 | 2a | `ppadeflate` | zlib stream ↔ the bytes it holds + every choice its encoder made (blocks, codes, tokens, pad bits): the same bits back | done |
 | 2b | `ppazlib` | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | in progress: zlib's choices exact |
+| 2 | `ppapreflate` | one deflate stream's API, independent of PNG (for PDA too): stream ↔ its bytes + a recipe (the framing, and how the deflate data is made: kind 0, zlib's parameters), checked bit for bit; the codec keeps each image stream's recipe | kind 0 (zlib's parameters exact), written as stream version 2 writes it |
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
 | 4 | `ppaarith` | binary arithmetic coder, adaptive bit counters, stretch and squash | done |
 | 5 | `ppastatic`, `ppafast`, `ppamodel` | modelling the pixels (three models, chosen by image; the slow one for all with `--max`), the deflate corrections and the raw bytes | static and fast models; slow one, second version |
@@ -199,7 +200,7 @@ with a prototype of each when the ZPAQL is written.
 ## Layer 6: the stream
 
 `ppacodec.Compress` takes a whole file. The stream is one version byte
-(`STREAM_VERSION`: 2 since 0.1.1, the static model's 320 contexts; 1, PPA 0.1.0's, still read), the count and lengths of its substreams (varints),
+(`STREAM_VERSION`: 2 since 0.1.1, the static model's 320 contexts; 1, PPA 0.1.0's, still read; a file is written with the oldest version that holds it, never newer than `Compress`'s `maxVersion`, which ppa1 sets to 2), the count and lengths of its substreams (varints),
 and the substreams, each its own arithmetic stream. Substream 0 holds:
 
 - the file's structure, written as bytes (numbers as varints) and coded with

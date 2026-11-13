@@ -5,6 +5,7 @@ and what preflate 0.3.4's reconstruction data costs, per stream; and the v2
 
     python3 tools/preflate/baseline.py streams SUBSET... [-j N] [--out DIR]
     python3 tools/preflate/baseline.py gate [SET...] [--out DIR]
+    python3 tools/preflate/baseline.py gatecheck [--out DIR] [--against TSV]
     python3 tools/preflate/baseline.py summary [--out DIR] [--md FILE]
 
 streams   SUBSET is a folder of $PF/corpus (png-zlib, png-nonzlib, png-synth,
@@ -15,12 +16,19 @@ streams   SUBSET is a folder of $PF/corpus (png-zlib, png-nonzlib, png-synth,
           round trip is compared byte for byte. Writes DIR/SUBSET.files.tsv
           and DIR/SUBSET.streams.tsv.
 gate      `ppa a` on whole sets (default: tests/png, sets corpus, generated,
-          photos) with 8 threads, 1 thread, and the Pascal path (PPA_NOC=1),
-          the .ppa sha256 of each: DIR/gate.tsv. This is the M1 hash gate.
+          photos; also png-zlib, png-nonzlib, png-synth of the corpus) with 8
+          threads, 1 thread, and the Pascal path (PPA_NOC=1), the .ppa sha256
+          of each: DIR/gate.tsv. This is the M1 hash gate.
+gatecheck DIR/gate.tsv against TSV (default tools/preflate/gate-v2.tsv: set,
+          file, ppa_sha256): every file of every set TSV names must be in
+          DIR's, identical in its three runs and with TSV's hash. Exit 1 if
+          not.
 summary   the tables of BASELINE.md from DIR's TSVs.
 
 DIR defaults to $PF/m0/bench, the frozen M0 baseline (read-only): pass
---out for a new run. Every child runs under ulimit -v 6000000."""
+--out for a new run. PPA_BIN names the ppa binary (default $PF/tools/bin/ppa,
+which build_tools.sh makes from the repository). Every child runs under
+ulimit -v 6000000."""
 import collections, datetime, json, os, re, resource, shutil, subprocess, sys, tempfile, time
 from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -29,7 +37,7 @@ from pfcommon import *
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 JOBS = 4
 OUT = os.path.join(PF, 'm0', 'bench')
-PPA = os.path.join(BIN, 'ppa')
+PPA = os.environ.get('PPA_BIN', os.path.join(BIN, 'ppa'))
 PNG_SUBSETS = ('png-zlib', 'png-nonzlib', 'png-synth')
 PF_TIMEOUT = 600
 VMEM = 6000000 * 1024
@@ -206,16 +214,21 @@ GATE_SETS = {
     'sets-corpus': os.path.join(SETS, 'corpus'),
     'sets-generated': os.path.join(SETS, 'generated'),
     'sets-photos': os.path.join(SETS, 'photos'),
+    'png-zlib': os.path.join(CORPUS, 'png-zlib'),
+    'png-nonzlib': os.path.join(CORPUS, 'png-nonzlib'),
+    'png-synth': os.path.join(CORPUS, 'png-synth'),
 }
+GATE_DEFAULT = ('tests-png', 'sets-corpus', 'sets-generated', 'sets-photos')
 VARIANTS = [('c-th8', [], {}), ('c-th1', ['-th', '1'], {}), ('pas-th8', [], {'PPA_NOC': '1'})]
 
 
 def do_gate(names):
     rows = []
     os.makedirs(OUT, exist_ok=True)
-    for name in names or GATE_SETS:
+    for name in names or GATE_DEFAULT:
         folder = GATE_SETS[name]
-        files = sorted(os.path.join(folder, f) for f in os.listdir(folder) if os.path.isfile(os.path.join(folder, f)))
+        files = sorted(os.path.join(folder, f) for f in os.listdir(folder)
+                       if os.path.isfile(os.path.join(folder, f)) and f != 'MANIFEST.tsv')
         per = collections.defaultdict(dict)
         for v, args, env in VARIANTS:
             d = os.path.join(os.path.dirname(OUT), 'work', 'gate', name, v)
@@ -249,6 +262,25 @@ def do_gate(names):
         print('%s: %d files, %d -> %d B, identical across variants: %d/%d' % (
             name, len(rs), sum(int(r['bytes']) for r in rs), sum(int(r['c-th8_size'] or 0) for r in rs),
             sum(r['identical'] == 'yes' for r in rs), len(rs)))
+
+
+def do_gatecheck(against):
+    new = {(r['set'], r['file']): r for r in tsv_read(os.path.join(OUT, 'gate.tsv'))}
+    ref = tsv_read(against)
+    bad = 0
+    for name in sorted({r['set'] for r in ref}):
+        rs = [r for r in ref if r['set'] == name]
+        same = 0
+        for r in rs:
+            n = new.get((name, r['file']))
+            if n and n['identical'] == 'yes' and n['c-th8_sha256'] == r['ppa_sha256']:
+                same += 1
+            else:
+                bad += 1
+                print('  DIFFERS %s %s' % (name, r['file']))
+        print('%s: %d/%d .ppa identical to %s (in all three runs)' % (name, same, len(rs), os.path.basename(against)))
+    if bad:
+        raise SystemExit('gatecheck: %d files differ' % bad)
 
 
 # ---------------------------------------------------------------- summary
@@ -370,11 +402,16 @@ def main():
         i = a.index('--out'); OUT = a[i + 1]; del a[i:i + 2]
     if '--md' in a:
         i = a.index('--md'); md = a[i + 1]; del a[i:i + 2]
+    against = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gate-v2.tsv')
+    if '--against' in a:
+        i = a.index('--against'); against = a[i + 1]; del a[i:i + 2]
     cmd, rest = a[0], a[1:]
     if cmd == 'streams':
         for s in rest: do_streams(s)
     elif cmd == 'gate':
         do_gate(rest)
+    elif cmd == 'gatecheck':
+        do_gatecheck(against)
     elif cmd == 'summary':
         do_summary(md)
     else:

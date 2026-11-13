@@ -39,6 +39,11 @@ const
     older ones: 1, PPA 0.1.0's; 2, the static model's 320 contexts (the
     channel before's residual among them). }
   STREAM_VERSION = 2;
+  { the oldest version Compress writes: what every file needs (version 1's
+    static model is not written any more). A file writes the oldest
+    version that holds everything in it, so a file the zlib parameters
+    give back is a version 2 stream also when newer versions exist. }
+  OLDEST_WRITTEN_VERSION = 2;
 
 var
   { the images ppafast takes (8-bit samples, not a palette) with it, about
@@ -88,9 +93,13 @@ type
   model can take with it (the zpaq-std plugin's ppa1: the static model,
   the one its ZPAQL decodes). A parameter, not a global: the plugin's
   calls run on several threads at once, and the ppa command's streams do
-  not change. }
+  not change. maxVersion: the newest stream version it may write (from
+  OLDEST_WRITTEN_VERSION to STREAM_VERSION); an image stream whose recipe
+  needs a newer one goes as bytes. ppa1 (the zpaq-std plugin) passes 2: its
+  ZPAQL decodes version 2 only. }
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; verify: Boolean = True; threads: Integer = 1; model: Integer = -1): Boolean;
+  out stats: TCodecStats; verify: Boolean = True; threads: Integer = 1; model: Integer = -1;
+  maxVersion: Integer = STREAM_VERSION): Boolean;
 { stream -> data; maxOut caps the file. False (with why) on any damage.
   threads: the bands decoded and the deflate streams rebuilt on as many. }
 function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
@@ -115,7 +124,7 @@ function DecompressEx(const stream: TBytes; maxOut: Int64; out data: TBytes; out
 
 implementation
 
-uses Math, ppapng, ppadeflate, ppazlib, ppapixels, ppaarith, ppamodel, ppafast, ppastatic, ppathreads, ppastage,
+uses Math, ppapng, ppadeflate, ppazlib, ppapreflate, ppapixels, ppaarith, ppamodel, ppafast, ppastatic, ppathreads, ppastage,
   ppablake3, pjablake3, pjacodec, pjamodel, pjav7;
 
 const
@@ -305,7 +314,7 @@ end;
 type
   TStreamPlan = record
     mode: Integer;
-    prm: TZlibParams;
+    recipe: TDeflRecipe;  { how its deflate stream is made from the bytes (ppapreflate) }
     z: TZStream;          { encoder: the decoded stream }
     px: TPixels;          { encoder: the image }
     jpeg: TBytes;         { encoder: PJA's stream of a JNG's JPEG }
@@ -357,10 +366,18 @@ begin
   if Int64(sSlow) * 100 < Int64(sFast) * (100 - SLOW_GAIN) then Result := MODE_IMAGE;
 end;
 
+{ The stream version a deflate recipe needs: kind 0's, zlib's parameters,
+  is version 2's }
+function RecipeVersion(const recipe: TDeflRecipe): Integer;
+begin
+  if recipe.kind = RECIPE_ZLIB then Result := 2 else Result := High(Integer);
+end;
+
 { Whether stream s can be kept as an image, and its plan. model: Compress's
-  (-1: TestModel's, which is -1 outside the tests) }
-function PlanImage(const p: TPng; s: SizeInt; model: Integer; out plan: TStreamPlan): Boolean;
-var info: TImageInfo; e: TZStream; back: TBytes; a: TBytes;
+  (-1: TestModel's, which is -1 outside the tests); maxVersion: the newest
+  stream version Compress may write }
+function PlanImage(const p: TPng; s: SizeInt; model, maxVersion: Integer; out plan: TStreamPlan): Boolean;
+var info: TImageInfo; a: TBytes;
 begin
   if model < 0 then model := TestModel;
   Result := False;
@@ -369,16 +386,13 @@ begin
   if not (p.streams[s].kind in [skIdat, skFdat]) then Exit;
   a := p.streams[s].data;
   if Length(a) = 0 then Exit;
-  if not ppadeflate.Decode(a, not IsZlibHeader(a), MAX_IMAGE_BYTES, plan.z).Ok then Exit;
+  if not ppapreflate.Parse(a, dfAuto, MAX_IMAGE_BYTES, plan.z).Ok then Exit;
   if not StreamImage(p, s, info) then Exit;
   if not Unfilter(plan.z.plain, info, plan.px) then Exit;
-  { the choices zlib makes with them (all of them: the search compared
-    every block), written, must be the stream }
-  if not FindZlibParams(plan.z, plan.prm, e) then Exit;
-  e.raw := plan.z.raw; e.header := plan.z.header; e.adlerOk := plan.z.adlerOk;
-  e.endPad := plan.z.endPad; e.tail := plan.z.tail;
-  back := Encode(e);
-  if (Length(back) <> Length(a)) or not CompareMem(@back[0], @a[0], Length(a)) then Exit;
+  { a recipe whose rebuild is the stream, bit for bit (checked); one the
+    stream version the caller allows can hold }
+  if FindRecipe(a, plan.z, plan.recipe) <> dsOk then Exit;
+  if RecipeVersion(plan.recipe) > maxVersion then Exit;
   { a model given takes every image it can (ChooseModel's trials skipped) }
   if (model = MODE_IMAGE) or ((model in [MODE_FAST, MODE_STATIC]) and FastEligible(info)) then
     plan.mode := model
@@ -400,7 +414,7 @@ type
   PKnownStreams = ^TKnownStreams;
 
 function CompressRaw(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; threads, model: Integer; out known: TKnownStreams): Boolean;
+  out stats: TCodecStats; threads, model, maxVersion: Integer; out known: TKnownStreams): Boolean;
 var
   p: TPng; r: TPngResult; w: TWriter; meta: TBytes;
   plans: array of TStreamPlan;
@@ -409,12 +423,12 @@ var
   jobs: array of TBandJob; subs: array of TBytes; nJobs, nJpeg: SizeInt;
   total: Int64; big: SizeInt; grew: Boolean; coded: array of Int64;
   drop: array of Boolean; anyDrop: Boolean; saved: array of TStreamPlan; meta2, sub0b: TBytes;
-  jpegLens: array of SizeInt; oldLen, newLen: Int64; k: SizeInt;
+  jpegLens: array of SizeInt; oldLen, newLen: Int64; k: SizeInt; streamVer: Integer;
 
   procedure PlanOne(k: SizeInt);
   begin
     if p.streams[k].kind in [skJdat, skJdaa] then PlanJpeg(p, k, 1, plans[k])
-    else PlanImage(p, k, model, plans[k]);
+    else PlanImage(p, k, model, maxVersion, plans[k]);
   end;
 
   procedure CodeBand(k: SizeInt);
@@ -433,7 +447,7 @@ var
   { the structure: the chunks (each one's own data, or its stream's
     number), the bytes after them, each stream's mode and parameters }
   function BuildMeta: TBytes;
-  var w: TWriter; i, s: SizeInt; c: TChunk;
+  var w: TWriter; i, s: SizeInt; c: TChunk; rb: TBytes;
   begin
     w := Default(TWriter);
     w.Put(Ord(p.kind));
@@ -460,10 +474,10 @@ var
       w.Put(plans[s].mode);
       if plans[s].mode in IMAGE_MODES then
         with plans[s] do begin
-          w.Put(prm.level); w.Put(prm.strategy); w.Put(prm.memLevel); w.Put(prm.wbits);
-          w.Put(Ord(z.raw) or (Ord(z.adlerOk) shl 1));
-          w.Put(z.header[0]); w.Put(z.header[1]); w.Put(z.endPad);
-          w.PutVar(Length(z.tail)); w.PutBytes(z.tail, 0, Length(z.tail));
+          { its deflate stream's recipe (kind 0: zlib's parameters and the
+            framing), as version 2 writes it }
+          rb := RecipeBytesV2(recipe);
+          w.PutBytes(rb, 0, Length(rb));
           w.PutVar(Length(px.tail)); w.PutBytes(px.tail, 0, Length(px.tail));
         end;
     end;
@@ -667,9 +681,14 @@ begin
   for s := 0 to High(p.streams) do
     if plans[s].mode = MODE_JPEG then begin subs[i] := plans[s].jpeg; Inc(i); end;
 
-  { the stream: version, the substreams' count and lengths, the substreams }
+  { the stream: version, the substreams' count and lengths, the substreams.
+    The version: the oldest that holds every image stream's recipe }
+  streamVer := OLDEST_WRITTEN_VERSION;
+  for s := 0 to High(p.streams) do
+    if plans[s].mode in IMAGE_MODES then streamVer := Max(streamVer, RecipeVersion(plans[s].recipe));
+  if streamVer > maxVersion then begin why := 'a stream version newer than allowed (a PPA bug)'; Exit; end;
   w := Default(TWriter);
-  w.Put(STREAM_VERSION);
+  w.Put(streamVer);
   w.PutVar(1 + Length(subs));
   w.PutVar(Length(sub0));
   for i := 0 to High(subs) do w.PutVar(Length(subs[i]));
@@ -685,16 +704,23 @@ function DecompressSafe(const stream: TBytes; maxOut: Int64; out data: TBytes; o
   threads: Integer; stages: Boolean; known: PKnownStreams; out failure: TDecodeFailure): Boolean; forward;
 
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; verify: Boolean; threads, model: Integer): Boolean;
+  out stats: TCodecStats; verify: Boolean; threads, model, maxVersion: Integer): Boolean;
 var back: TBytes; why2: string; was: TStage; known: TKnownStreams; fail: TDecodeFailure;
 begin
   why := '';
+  stream := nil;
+  stats := Default(TCodecStats);
+  if (maxVersion < OLDEST_WRITTEN_VERSION) or (maxVersion > STREAM_VERSION) then begin
+    why := Format('stream version %d is not one this PPA writes (%d to %d)',
+      [maxVersion, OLDEST_WRITTEN_VERSION, STREAM_VERSION]);
+    Exit(False);
+  end;
   was := StageEnter(stNone);
   StageEnter(was);
   { the slow model's tables kept from band to band (ppamodel's pool) }
   ModelPoolHold;
   try
-  Result := CompressRaw(data, stream, why, stats, threads, model, known);
+  Result := CompressRaw(data, stream, why, stats, threads, model, maxVersion, known);
   if not Result or not verify then begin StageEnter(was); Exit; end;
   { The stream decompressed and compared with the file, whole. Each image's
     deflate stream is not written again: what the decoder refilters is
@@ -747,7 +773,7 @@ var
   metaLen: Cardinal; meta: TBytes; r: TReader;
   p: TPng; nChunks, nStreams, total, len: Int64; i, s: SizeInt;
   flags: Byte; c: TChunk;
-  modes: array of Integer; prms: array of TZlibParams; zs: array of TZStream; pxTails: array of TBytes;
+  modes: array of Integer; recipes: array of TDeflRecipe; pxTails: array of TBytes;
   streamLen: array of Int64;
   info: TImageInfo; pxs: array of TPixels; plains: array of TBytes;
   maxSmall: Int64;
@@ -776,8 +802,8 @@ var
     else CodeImageBand(pxs[jobs[k].s], jobs[k].firstRow, jobs[k].rows, nil, @d);
   end;
 
-  procedure Rebuild(k: SizeInt);
-  var e: TZStream; r: TCodecResult; j: TBytes;
+  procedure RebuildStream(k: SizeInt);
+  var r: TCodecResult; j: TBytes;
   begin
     if modes[k] = MODE_JPEG then begin
       { PJA's stream back to the JPEG, which must be exactly as long as
@@ -799,10 +825,9 @@ var
       plains[k] := nil;
       Exit;
     end;
-    ZlibChoices(plains[k], prms[k], nil, e, zThreads);
-    e.raw := zs[k].raw; e.adlerOk := zs[k].adlerOk; e.header := zs[k].header;
-    e.endPad := zs[k].endPad; e.tail := zs[k].tail;
-    p.streams[k].data := Encode(e);
+    { the recipe was checked as it was read: Rebuild takes it }
+    if not ppapreflate.Rebuild(plains[k], recipes[k], j, zThreads) then j := nil;
+    p.streams[k].data := j;
     plains[k] := nil;
   end;
 
@@ -889,8 +914,7 @@ begin
   if not r.ok then Exit(Bad('bad structure'));
   SetLength(p.streams, nStreams);
   modes := nil; SetLength(modes, nStreams);
-  prms := nil; SetLength(prms, nStreams);
-  zs := nil; SetLength(zs, nStreams);
+  recipes := nil; SetLength(recipes, nStreams);
   pxTails := nil; SetLength(pxTails, nStreams);
   streamLen := nil; SetLength(streamLen, nStreams);
   for i := 0 to nChunks - 1 do
@@ -909,17 +933,11 @@ begin
     if not r.ok or (modes[s] > MODE_STATIC) then Exit(Bad('bad structure'));
     if (modes[s] = MODE_JPEG) and not (p.streams[s].kind in [skJdat, skJdaa]) then Exit(Bad('bad structure'));
     if modes[s] in IMAGE_MODES then begin
-      prms[s].level := r.Get; prms[s].strategy := r.Get; prms[s].memLevel := r.Get; prms[s].wbits := r.Get;
-      if (prms[s].level < 1) or (prms[s].level > 9) or (prms[s].strategy > Z_FIXED) or
-         (prms[s].memLevel < 1) or (prms[s].memLevel > 9) or (prms[s].wbits < 8) or (prms[s].wbits > 15) then
-        Exit(Bad('bad zlib parameters'));
-      flags := r.Get;
-      if flags > 3 then Exit(Bad('bad structure'));
-      zs[s].raw := (flags and 1) <> 0;
-      zs[s].adlerOk := (flags and 2) <> 0;
-      zs[s].header[0] := r.Get; zs[s].header[1] := r.Get; zs[s].endPad := r.Get;
-      len := r.GetVar(streamLen[s]);
-      zs[s].tail := r.GetBytes(len);
+      { its deflate stream's recipe, as version 2 writes it (ppapreflate) }
+      case ReadRecipeV2(r.b, r.pos, streamLen[s], recipes[s]) of
+        rrBadParams: Exit(Bad('bad zlib parameters'));
+        rrBad: Exit(Bad('bad structure'));
+      end;
       len := r.GetVar(MAX_IMAGE_BYTES);
       pxTails[s] := r.GetBytes(len);
       if not r.ok then Exit(Bad('bad structure'));
@@ -990,7 +1008,7 @@ begin
   if nImages > 1 then begin
     if nImages < threads then zThreads := threads div nImages else zThreads := 1;
   end;
-  ParallelFor(nStreams, threads, @Rebuild);
+  ParallelFor(nStreams, threads, @RebuildStream);
   for s := 0 to nStreams - 1 do
     if (modes[s] in IMAGE_MODES + [MODE_JPEG]) and (Length(p.streams[s].data) <> streamLen[s]) then
       Exit(Bad('image stream damaged or of another length'));

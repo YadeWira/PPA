@@ -92,12 +92,22 @@ Every child process runs under `ulimit -v 6000000`, with at most 4 at a time.
 
 ## For the next milestones
 
-- M1 gate: `baseline.py gate --out DIR`, then
-  `diff <(cut -f1-5 DIR/gate.tsv | tail -n +2) <(tail -n +2 tools/preflate/gate-v2.tsv)`
-  must print nothing, and `DIR/gate.tsv`'s `identical` column must be all
-  `yes`. `gate-v2.tsv` is the committed reference (set, file, bytes, `.ppa`
-  size and sha256, C 8 threads). Also `streams png-zlib`: `ppa_sha256` in
-  `png-zlib.files.tsv` must not change.
+- The hash gate (M1 and every milestone until codec v3): with the ppa to
+  check (`PPA_BIN=...`, default `$PF/tools/bin/ppa`),
+  `baseline.py gate tests-png sets-corpus sets-generated sets-photos png-zlib png-nonzlib png-synth --out DIR`,
+  then `baseline.py gatecheck --out DIR`: every file `gate-v2.tsv` names
+  must have the same `.ppa` sha256 in all three runs. `gate-v2.tsv` is the
+  committed reference (set, file, bytes, `.ppa` size and sha256, C 8
+  threads), written by M0's ppa (`c45ea74`); M1 added the three corpus
+  sets to it, from that same build. About 50 minutes on this machine
+  (png-synth is most of it).
+- M1 moved the stream layer into `pas/ppapreflate.pas`
+  (`Parse`/`FindRecipe`/`Analyze`, `Rebuild`, `RecipeBytesV2`/`ReadRecipeV2`,
+  kind 0 only) and gave `ppacodec.Compress` a `maxVersion` (ppa1 passes 2).
+  `pas/tests/test_preflate` runs every stream of a folder through it;
+  `run_tests.sh` runs it on `tests/png` and, when `$PF/corpus` is there
+  (`PREFLATE_CORPUS`), on `png-zlib` (all 392 kind 0) and `png-nonzlib`
+  (none).
 - M2: `png-synth` files named `*.zfl-*` and `raw/*.zfl-*` are zlib with
   flushes or `deflateParams`; `ipad.png` in `png-nonzlib`; the PDA streams
   whose manifest settings carry `flushes:`. The `ppa_zlib` column of the
