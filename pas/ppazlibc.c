@@ -29,12 +29,35 @@ static inline intptr_t common(const uint8_t *a, const uint8_t *b, intptr_t from,
   return len;
 }
 
+/* What the loop keeps of each position in the window (pos[str & wmask]),
+   in 8 bytes, so that the window's 32 KB positions take 256 KB, a core's
+   own cache, and a step along a chain reads one line: the links back as
+   distances (the window is at most 32 KB: a distance fits in 15 bits; 0:
+   none, or further than the window, where no match reaches; LINK_UNKNOWN:
+   a skip table's collision) and the position's order in its hash chain,
+   modulo 2^16 (two positions a chain step apart are less than the window
+   apart, so the difference of their orders is less than 2^15: exact).
+   prev: zlib's hash chain; d4, d8: the last position before with the same
+   k1 (4 or 6) and 8 bytes (longest_skip). */
+typedef struct { uint16_t prev, d4, d8, ord; } zpos_t;
+#define LINK_UNKNOWN 0xFFFFu
+
+/* the position a link of `from` names: 0 none, -1 not known */
+static inline intptr_t link_at(uint16_t d, intptr_t from) {
+  return d == 0 ? 0 : d == LINK_UNKNOWN ? -1 : from - d;
+}
+/* zlib's prev[from & wmask] (0: none, or out of the window) */
+static inline intptr_t prev_of(const zpos_t *pos, intptr_t wmask, intptr_t from) {
+  const uint16_t d = pos[from & wmask].prev;
+  return d ? from - d : 0;
+}
+
 /* the longest match for the string at scan, walking the hash chain from
    cur; returns the best length (not yet capped to the lookahead) and sets
    *matchStart where it improves on bestLen */
-intptr_t ppaz_longest(const uint8_t *plain, intptr_t n, const intptr_t *prev, intptr_t wmask,
-                      intptr_t scan, intptr_t cur, intptr_t limit, intptr_t chain,
-                      intptr_t bestLen, intptr_t nice, intptr_t *matchStart) {
+static intptr_t ppaz_longest(const uint8_t *plain, intptr_t n, const zpos_t *pos, intptr_t wmask,
+                             intptr_t scan, intptr_t cur, intptr_t limit, intptr_t chain,
+                             intptr_t bestLen, intptr_t nice, intptr_t *matchStart) {
   uint8_t e1 = win(plain, n, scan + bestLen - 1), e = win(plain, n, scan + bestLen);
   const uint8_t s0 = win(plain, n, scan), s1 = win(plain, n, scan + 1);
   const intptr_t avail = n - scan;   /* bytes from scan to the end */
@@ -53,7 +76,7 @@ intptr_t ppaz_longest(const uint8_t *plain, intptr_t n, const intptr_t *prev, in
         e = win(plain, n, scan + bestLen);
       }
     }
-    cur = prev[cur & wmask];
+    cur = prev_of(pos, wmask, cur);
     chain--;
   } while (cur > limit && chain != 0);
   return bestLen;
@@ -104,32 +127,43 @@ static inline int same_key(const uint8_t *plain, intptr_t a, intptr_t b, int lv,
 #endif
 }
 
-static intptr_t longest_skip(const uint8_t *plain, intptr_t n, const intptr_t *prev, intptr_t *const nx[4],
-                             const uint32_t *ord, intptr_t wmask, intptr_t scan, intptr_t cur, intptr_t limit,
+/* the link of level lv (1..3) at position from */
+static inline intptr_t link_of(const zpos_t *pos, const uint16_t *d16, intptr_t wmask, int lv, intptr_t from) {
+  const intptr_t i = from & wmask;
+  return link_at(lv == 1 ? pos[i].d4 : lv == 2 ? pos[i].d8 : d16[i], from);
+}
+/* zlib's chain steps from a position of order o0 back to q, less one, as
+   the walk counts them (o0 - ord - 1 modulo 2^16) */
+static inline uint32_t steps(const zpos_t *pos, intptr_t wmask, uint16_t o0, intptr_t q) {
+  return (uint16_t)(o0 - pos[q & wmask].ord - 1);
+}
+
+static intptr_t longest_skip(const uint8_t *plain, intptr_t n, const zpos_t *pos, const uint16_t *d16,
+                             intptr_t wmask, intptr_t scan, intptr_t cur, intptr_t limit,
                              intptr_t chain, intptr_t bestLen, intptr_t nice, intptr_t *matchStart, int k1) {
   if (bestLen < 2 || scan + (k1 == 6 ? 8 : 4) > n)
-    return ppaz_longest(plain, n, prev, wmask, scan, cur, limit, chain, bestLen, nice, matchStart);
-  const uint32_t o0 = ord[scan & wmask];
+    return ppaz_longest(plain, n, pos, wmask, scan, cur, limit, chain, bestLen, nice, matchStart);
+  const uint16_t o0 = pos[scan & wmask].ord;
   const intptr_t avail = n - scan;
   const intptr_t top = avail < MAX_MATCH ? avail : MAX_MATCH;
   /* the 16 bytes' links where they are kept (zlib's levels 8 and 9) */
-  const int lmax = nx[3] && scan + 16 <= n ? 3 : scan + 8 <= n ? 2 : 1;
+  const int lmax = d16 && scan + 16 <= n ? 3 : scan + 8 <= n ? 2 : 1;
   int lv = skip_level(bestLen, lmax, k1);
   intptr_t from = scan;                 /* the position whose link q is */
-  intptr_t q = lv ? nx[lv][scan & wmask] : -1;
+  intptr_t q = lv ? link_of(pos, d16, wmask, lv, scan) : -1;
   for (;;) {
     if (q < 0) {
       /* not known (a table's collision): zlib's chain from `from`, every
          position on it a candidate, to the first with the key; the ones
          before it cannot do better (their key differs, and the key is no
          longer than bestLen + 1) */
-      q = prev[from & wmask];
-      while (q != 0 && (q > limit || q == cur) && (uint32_t)(o0 - ord[q & wmask] - 1) < (uint32_t)chain &&
+      q = prev_of(pos, wmask, from);
+      while (q != 0 && (q > limit || q == cur) && steps(pos, wmask, o0, q) < (uint32_t)chain &&
              !same_key(plain, q, scan, lv, k1))
-        q = prev[q & wmask];
+        q = prev_of(pos, wmask, q);
     }
     if (q == 0 || (q <= limit && q != cur)) break;          /* none left (zlib takes curMatch anyway) */
-    if ((uint32_t)(o0 - ord[q & wmask] - 1) >= (uint32_t)chain) break;   /* past zlib's chain */
+    if (steps(pos, wmask, o0, q) >= (uint32_t)chain) break;   /* past zlib's chain */
     /* as zlib: a candidate without the byte at bestLen the same cannot do better */
     if (bestLen >= top || plain[q + bestLen] == plain[scan + bestLen]) {
       intptr_t len = common(plain + q, plain + scan, 0, top);
@@ -144,13 +178,13 @@ static intptr_t longest_skip(const uint8_t *plain, intptr_t n, const intptr_t *p
              scan's, whose first is older than q */
           lv = l2;
           from = len >= skip_key(lv, k1) ? q : scan;
-          q = nx[lv][from & wmask];   /* lv > 0 here */
+          q = link_of(pos, d16, wmask, lv, from);   /* lv > 0 here */
           continue;
         }
       }
     }
     from = q;
-    q = lv ? nx[lv][q & wmask] : -1;
+    q = lv ? link_of(pos, d16, wmask, lv, q) : -1;
   }
   return bestLen;
 }
@@ -169,7 +203,10 @@ enum { ZD_DONE = 0, ZD_FLUSH = 1, ZD_STOP = 2, ZD_SEGEND = 3 };
 typedef struct {
   const uint8_t *plain; intptr_t n;
   intptr_t wsize, wmask, maxDist, hashMask, hashShift;
-  intptr_t *head, *prev, *nx4, *nx8; uint32_t *ord, *cnt, *t4, *t8;
+  uint32_t *head;                /* zlib's head[], positions (0: none) */
+  zpos_t *pos;                   /* each position in the window: zpos_t */
+  uint16_t *cnt;                 /* each hash chain's insertions, modulo 2^16 */
+  uint32_t *t4, *t8;
   intptr_t insH;
   intptr_t strstart, matchStart, prevMatch, winBase;
   intptr_t matchLength, prevLength, matchAvailable;
@@ -180,7 +217,7 @@ typedef struct {
   const uint8_t *lengthCode, *distCode;
   intptr_t pending;              /* after a flush: the literal's strstart++ still to do */
   intptr_t skipBits;             /* the tables t4, t8 (t16): 2^skipBits positions each */
-  intptr_t *nx16; uint32_t *t16; /* the same 16 bytes, where the chains are long (levels 8, 9); else 0 */
+  uint16_t *d16; uint32_t *t16; /* the same 16 bytes (as d8), where the chains are long (levels 8, 9); else 0 */
   /* a segment (ppazlib's parallel rebuild, deflate_slow only): stop at the
      top of the loop once strstart reaches stopAt (0: never); after each
      match, where the parse is as it starts (no match pending, none found
@@ -190,7 +227,7 @@ typedef struct {
   intptr_t *syncPos, *syncTok; intptr_t nSync, maxSync;
   intptr_t endLit;
   intptr_t syncLo, syncHi;       /* only the positions up to syncLo and from syncHi are kept */
-  intptr_t key1;                 /* the key of nx4 (t4): 4 bytes, or 6 (filtered deflate_slow: skip_key) */
+  intptr_t key1;                 /* the key of d4 (t4): 4 bytes, or 6 (filtered deflate_slow: skip_key) */
 } zdeflate_t;
 
 #if (defined(__GNUC__) || defined(__clang__)) && defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
@@ -206,12 +243,19 @@ static inline uint64_t zd_load8(const uint8_t *p) { uint64_t v; __builtin_memcpy
 /* t4's slot of a key: k4 its 4 bytes, k6 its 6 (both little-endian) */
 static inline uint32_t zd_h4(uint32_t k4, int sb) { return (k4 * 2246822519u) >> (32 - sb); }
 static inline uint32_t zd_h6(uint64_t k6, int sb) { return (uint32_t)((k6 * 0xD6E8FEB86659FD93ull) >> (64 - sb)); }
+/* a skip link from str to c, the last position in t's slot: none (empty,
+   or out of the window), c (the same key), or not known (another key) */
+static inline uint16_t zd_link(intptr_t str, intptr_t c, int same, intptr_t wsize) {
+  return (c == 0 || str - c >= wsize) ? 0 : same ? (uint16_t)(str - c) : LINK_UNKNOWN;
+}
 static inline void zd_skip(zdeflate_t *s, intptr_t str) {
   const uint8_t *p = s->plain;
   const intptr_t i = str & s->wmask, n = s->n;
   const int sb = (int)s->skipBits;
   const int six = s->key1 == 6;
-  s->ord[i] = s->cnt[s->insH]++;
+  zpos_t *const ps = &s->pos[i];
+  const intptr_t w = s->wsize;
+  ps->ord = s->cnt[s->insH]++;
 #ifdef ZD_LE
   if (str + ZD_PF + 8 <= n) {
     /* little-endian, 8 bytes to read: the keys out of one load (the 3, 4
@@ -227,26 +271,26 @@ static inline void zd_skip(zdeflate_t *s, intptr_t str) {
       const uint64_t k6 = k8 & M6;
       h = zd_h6(k6, sb);
       c = s->t4[h];
-      s->nx4[i] = (c == 0 || str - c >= s->wsize) ? 0 : (zd_load8(p + c) & M6) == k6 ? c : -1;
+      ps->d4 = zd_link(str, c, (zd_load8(p + c) & M6) == k6, w);
     } else {
       const uint32_t k4 = (uint32_t)k8;
       h = zd_h4(k4, sb);
       c = s->t4[h];
-      s->nx4[i] = (c == 0 || str - c >= s->wsize) ? 0 : (uint32_t)zd_load8(p + c) == k4 ? c : -1;
+      ps->d4 = zd_link(str, c, (uint32_t)zd_load8(p + c) == k4, w);
     }
     s->t4[h] = (uint32_t)str;
     h = (uint32_t)((k8 * 0x9E3779B97F4A7C15ull) >> (64 - sb));
     c = s->t8[h];
-    s->nx8[i] = (c == 0 || str - c >= s->wsize) ? 0 : zd_load8(p + c) == k8 ? c : -1;
+    ps->d8 = zd_link(str, c, zd_load8(p + c) == k8, w);
     s->t8[h] = (uint32_t)str;
     if (s->t16) {
       if (str + 16 <= n) {
         const uint64_t k8b = zd_load8(p + str + 8);
         h = (uint32_t)(((k8 ^ (k8b * 0xC2B2AE3D27D4EB4Full)) * 0x9E3779B97F4A7C15ull) >> (64 - sb));
         c = s->t16[h];
-        s->nx16[i] = (c == 0 || str - c >= s->wsize) ? 0 : (zd_load8(p + c) == k8 && zd_load8(p + c + 8) == k8b) ? c : -1;
+        s->d16[i] = zd_link(str, c, zd_load8(p + c) == k8 && zd_load8(p + c + 8) == k8b, w);
         s->t16[h] = (uint32_t)str;
-      } else s->nx16[i] = -1;
+      } else s->d16[i] = LINK_UNKNOWN;
     }
     return;
   }
@@ -261,47 +305,47 @@ static inline void zd_skip(zdeflate_t *s, intptr_t str) {
     for (int b = k1 - 1; b >= 0; b--) k = k << 8 | p[str + b];
     h = six ? zd_h6(k, sb) : zd_h4((uint32_t)k, sb);
     c = s->t4[h];
-    if (c == 0 || str - c >= s->wsize) s->nx4[i] = 0;
+    if (c == 0 || str - c >= w) ps->d4 = 0;
     else {
       for (int b = k1 - 1; b >= 0; b--) kc = kc << 8 | p[c + b];
-      s->nx4[i] = kc == k ? c : -1;
+      ps->d4 = zd_link(str, c, kc == k, w);
     }
     s->t4[h] = (uint32_t)str;
-  } else s->nx4[i] = -1;
+  } else ps->d4 = LINK_UNKNOWN;
   if (str + 7 < n) {
     uint64_t k8 = 0, kc;
     for (int b = 7; b >= 0; b--) k8 = k8 << 8 | p[str + b];
     h = (uint32_t)((k8 * 0x9E3779B97F4A7C15ull) >> (64 - sb));
     c = s->t8[h];
-    if (c == 0 || str - c >= s->wsize) s->nx8[i] = 0;
+    if (c == 0 || str - c >= w) ps->d8 = 0;
     else {
       kc = 0;
       for (int b = 7; b >= 0; b--) kc = kc << 8 | p[c + b];
-      s->nx8[i] = kc == k8 ? c : -1;
+      ps->d8 = zd_link(str, c, kc == k8, w);
     }
     s->t8[h] = (uint32_t)str;
-  } else s->nx8[i] = -1;
+  } else ps->d8 = LINK_UNKNOWN;
   if (s->t16) {
     if (str + 15 < n) {
       uint64_t a8 = 0, b8 = 0, ca = 0, cb = 0;
       for (int b = 7; b >= 0; b--) { a8 = a8 << 8 | p[str + b]; b8 = b8 << 8 | p[str + 8 + b]; }
       h = (uint32_t)(((a8 ^ (b8 * 0xC2B2AE3D27D4EB4Full)) * 0x9E3779B97F4A7C15ull) >> (64 - sb));
       c = s->t16[h];
-      if (c == 0 || str - c >= s->wsize) s->nx16[i] = 0;
+      if (c == 0 || str - c >= w) s->d16[i] = 0;
       else {
         for (int b = 7; b >= 0; b--) { ca = ca << 8 | p[c + b]; cb = cb << 8 | p[c + 8 + b]; }
-        s->nx16[i] = (ca == a8 && cb == b8) ? c : -1;
+        s->d16[i] = zd_link(str, c, ca == a8 && cb == b8, w);
       }
       s->t16[h] = (uint32_t)str;
-    } else s->nx16[i] = -1;
+    } else s->d16[i] = LINK_UNKNOWN;
   }
 }
 
 static inline intptr_t zd_insert(zdeflate_t *s, intptr_t str) {
   s->insH = ((s->insH << s->hashShift) ^ win(s->plain, s->n, str + MIN_MATCH - 1)) & s->hashMask;
   const intptr_t r = s->head[s->insH];
-  s->prev[str & s->wmask] = r;
-  s->head[s->insH] = str;
+  s->pos[str & s->wmask].prev = (r == 0 || str - r >= s->wsize) ? 0 : (uint16_t)(str - r);
+  s->head[s->insH] = (uint32_t)str;
   if (str + 2 < s->n) zd_skip(s, str);
   return r;
 }
@@ -312,7 +356,6 @@ static inline intptr_t zd_longest(zdeflate_t *s, intptr_t cur) {
   const intptr_t limit = s->strstart > s->maxDist ? s->strstart - s->maxDist : 0;
   if (s->prevLength >= s->goodMatch) chain >>= 2;
   if (nice > look) nice = look;
-  intptr_t *const nx[4] = {0, s->nx4, s->nx8, s->nx16};   /* level 0: zlib's chain */
   /* deflate_slow with the filtered strategy drops a match of 5 bytes or
      fewer: only one of 6 or more can count, so the search may start as if
      it had one of 5. Where the longest is 6 or more it is the same match,
@@ -321,7 +364,7 @@ static inline intptr_t zd_longest(zdeflate_t *s, intptr_t cur) {
      caller drops what it gets, as it dropped zlib's */
   intptr_t best0 = s->prevLength;
   if (s->filtered && !s->fast && best0 < FILTERED_MIN) best0 = FILTERED_MIN;
-  const intptr_t best = longest_skip(s->plain, s->n, s->prev, nx, s->ord, s->wmask, s->strstart,
+  const intptr_t best = longest_skip(s->plain, s->n, s->pos, s->d16, s->wmask, s->strstart,
                                      cur, limit, chain, best0, nice, &s->matchStart, s->key1 == 6 ? 6 : 4);
   return best <= look ? best : look;
 }

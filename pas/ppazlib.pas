@@ -92,7 +92,7 @@ type
   TZDeflate = record
     plain: PByte; n: SizeInt;
     wsize, wmask, maxDist, hashMask, hashShift: SizeInt;
-    head, prev, nx4, nx8: PSizeInt; ord, cnt: PLongWord; t4, t8: PLongWord;
+    head: PLongWord; pos: PQWord; cnt: PWord; t4, t8: PLongWord;
     insH: SizeInt;
     strstart, matchStart, prevMatch, winBase: SizeInt;
     matchLength, prevLength, matchAvailable: SizeInt;
@@ -103,12 +103,12 @@ type
     lengthCode, distCode: PByte;
     pending: SizeInt;
     skipBits: SizeInt;
-    nx16: PSizeInt; t16: PLongWord;
+    d16: PWord; t16: PLongWord;
     stopAt: SizeInt;
     syncPos, syncTok: PSizeInt; nSync, maxSync: SizeInt;
     endLit: SizeInt;
     syncLo, syncHi: SizeInt;
-    key1: SizeInt;    { nx4's key: 4 bytes, or 6 for deflate_slow's filtered strategy }
+    key1: SizeInt;    { d4's key: 4 bytes, or 6 for deflate_slow's filtered strategy }
   end;
 
 const
@@ -346,16 +346,16 @@ var
   hashBits, hashSize, hashMask, hashShift: Integer;
   head: array of SizeInt;
   prev: array of SizeInt;
-  { DeflateC's chains skipped (ppazlibc.c): for each position, the last one
-    before it with the same 4 and 8 bytes, through the tables t4 and t8
-    (the same 3 bytes: zlib's own chain, walked); its order in its hash
-    chain, by cnt, each chain's insertions }
-  nx4, nx8: array of SizeInt;
+  { DeflateC's state (ppazlibc.c): zlib's head as 32-bit positions; each
+    window position's zpos_t (8 bytes: zlib's prev, the last position
+    before it with the same 4 (or 6) and 8 bytes, through the tables t4 and
+    t8, and its order in its hash chain, by cnt, each chain's insertions) }
+  head32: array of LongWord;
+  posC: array of QWord;
   { the same 16 bytes, for the long chains of levels 8 and 9 only }
-  nx16: array of SizeInt;
+  d16: array of Word;
   t16: array of LongWord;
-  chainOrd: array of LongWord;
-  cnt: array of LongWord;
+  cnt: array of Word;
   t4, t8: array of LongWord;
   skipBits: Integer;
   insH: LongWord;
@@ -716,9 +716,8 @@ var
     st.plain := @plain[0]; st.n := n;
     st.wsize := wsize; st.wmask := wmask; st.maxDist := maxDist;
     st.hashMask := hashMask; st.hashShift := hashShift;
-    st.head := @head[0]; st.prev := @prev[0]; st.nx4 := @nx4[0]; st.nx8 := @nx8[0];
-    st.ord := @chainOrd[0]; st.cnt := @cnt[0]; st.t4 := @t4[0]; st.t8 := @t8[0];
-    if Length(t16) > 0 then begin st.nx16 := @nx16[0]; st.t16 := @t16[0]; end;
+    st.head := @head32[0]; st.pos := @posC[0]; st.cnt := @cnt[0]; st.t4 := @t4[0]; st.t8 := @t8[0];
+    if Length(t16) > 0 then begin st.d16 := @d16[0]; st.t16 := @t16[0]; end;
     st.insH := insH;
     st.strstart := strstart; st.matchStart := matchStart; st.prevMatch := prevMatch; st.winBase := winBase;
     st.matchLength := matchLength; st.prevLength := prevLength; st.matchAvailable := matchAvailable;
@@ -780,7 +779,7 @@ var
     ok: Boolean;
 
     procedure RunSeg(k: SizeInt);
-    var st: TZDeflate; hd, pv, n4, n8, n16: array of SizeInt; o32, c32, a4, a8, a16: array of LongWord;
+    var st: TZDeflate; hd, a4, a8, a16: array of LongWord; pv: array of QWord; c16, n16: array of Word;
         lf, df: array of LongInt; sb, len, pre, r, maxSync: SizeInt;
     begin
       with segs[k] do begin
@@ -788,8 +787,7 @@ var
         if stopAt = 0 then len := n - a;
         pre := a - wsize; if pre < 0 then pre := 0;
         hd := nil; SetLength(hd, hashSize); pv := nil; SetLength(pv, wsize);
-        n4 := nil; SetLength(n4, wsize); n8 := nil; SetLength(n8, wsize);
-        o32 := nil; SetLength(o32, wsize); c32 := nil; SetLength(c32, hashSize);
+        c16 := nil; SetLength(c16, hashSize);
         { a segment's tables: its window's positions live, a few times their
           number of slots is enough (and stays in the cache) }
         sb := SKIP_BITS_MIN;
@@ -805,9 +803,8 @@ var
         st.plain := @plain[0]; st.n := n;
         st.wsize := wsize; st.wmask := wmask; st.maxDist := maxDist;
         st.hashMask := hashMask; st.hashShift := hashShift;
-        st.head := @hd[0]; st.prev := @pv[0]; st.nx4 := @n4[0]; st.nx8 := @n8[0];
-        st.ord := @o32[0]; st.cnt := @c32[0]; st.t4 := @a4[0]; st.t8 := @a8[0];
-        if Length(a16) > 0 then begin st.nx16 := @n16[0]; st.t16 := @a16[0]; end;
+        st.head := @hd[0]; st.pos := @pv[0]; st.cnt := @c16[0]; st.t4 := @a4[0]; st.t8 := @a8[0];
+        if Length(a16) > 0 then begin st.d16 := @n16[0]; st.t16 := @a16[0]; end;
         st.skipBits := sb;
         st.key1 := Key1(False);   { before the window is inserted: its links have this key }
         ppaz_preinsert(st, pre, a);
@@ -931,18 +928,22 @@ begin
   hashBits := prm.memLevel + 7;
   hashSize := 1 shl hashBits; hashMask := hashSize - 1;
   hashShift := (hashBits + MIN_MATCH - 1) div MIN_MATCH;
-  head := nil; SetLength(head, hashSize);
-  prev := nil; SetLength(prev, wsize);
-  if UseZlibC then begin
-    nx4 := nil; SetLength(nx4, wsize); nx8 := nil; SetLength(nx8, wsize);
-    chainOrd := nil; SetLength(chainOrd, wsize); cnt := nil; SetLength(cnt, hashSize);
+  { the chains: Pascal's (the reference, DeflateFast and DeflateSlow) or
+    C's; deflate_huff and deflate_rle keep none }
+  head := nil; prev := nil;
+  if prm.strategy in [Z_HUFFMAN_ONLY, Z_RLE] then
+  else if not UseZlibC then begin
+    SetLength(head, hashSize); SetLength(prev, wsize);
+  end else begin
+    head32 := nil; SetLength(head32, hashSize);
+    posC := nil; SetLength(posC, wsize); cnt := nil; SetLength(cnt, hashSize);
     skipBits := SKIP_BITS_MIN;
     while (skipBits < SKIP_BITS_MAX) and (SizeInt(1) shl skipBits < 2 * n) do Inc(skipBits);
     t4 := nil; SetLength(t4, 1 shl skipBits);
     t8 := nil; SetLength(t8, 1 shl skipBits);
-    nx16 := nil; t16 := nil;
+    d16 := nil; t16 := nil;
     if CONFIG[prm.level, 3] >= 1024 then begin
-      SetLength(nx16, wsize); SetLength(t16, 1 shl skipBits);
+      SetLength(d16, wsize); SetLength(t16, 1 shl skipBits);
     end;
   end;
   symEnd := (1 shl (prm.memLevel + 6)) - 1;
