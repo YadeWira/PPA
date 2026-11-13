@@ -152,6 +152,23 @@ type
 
 procedure ppam_row(var a: TRowArgs); cdecl; external name 'ppam_row';
 
+type
+  { ppamodelc.c's bytesargs_t: CodeBytes in C }
+  TBytesArgs = record
+    t: array[0..3] of Pointer;
+    w: PInteger;
+    hist: PCardinal;
+    data: PByte; n: SizeInt;
+    recip: PInteger; stretchTab: PSmallInt; squashTab: PWord;
+    x1, x2, x: PCardinal;
+    buf: PByte;
+    pos: PSizeInt;
+    len: SizeInt;
+    encoding: SizeInt;
+  end;
+
+procedure ppam_bytes(var a: TBytesArgs); cdecl; external name 'ppam_bytes';
+
 procedure InitModel(var m: TModel);
 var i, j: Integer; a: PtrUInt;
 begin
@@ -524,12 +541,46 @@ begin
 end;
 {$pop}
 
+{ CodeBytes in C (ppamodelc.c's ppam_bytes), the same bits: the encoder's
+  buffer made large enough for each piece first (a bit's probability is at
+  least 1/65536, and a range may be down to one value: at most four
+  bytes out a bit) }
+procedure CodeBytesC(var m: TByteModel; var data: TBytes; first, n: SizeInt;
+  enc: PArithEncoder; dec: PArithDecoder);
+const PIECE = 4096;
+var a: TBytesArgs; i: Integer; k, need: SizeInt;
+begin
+  a := Default(TBytesArgs);
+  for i := 0 to 3 do a.t[i] := @m.t[i][0];
+  a.w := @m.w[0, 0]; a.hist := @m.hist;
+  a.recip := @RECIPROCAL[0]; a.stretchTab := @STRETCH_TAB[0]; a.squashTab := @SQUASH_TAB[0];
+  a.encoding := Ord(enc <> nil);
+  while n > 0 do begin
+    k := n; if k > PIECE then k := PIECE;
+    a.data := @data[first]; a.n := k;
+    if enc <> nil then begin
+      need := enc^.n + 33 * k + 16;
+      if Length(enc^.d) < need then
+        if 2 * Length(enc^.d) > need then SetLength(enc^.d, 2 * Length(enc^.d)) else SetLength(enc^.d, need);
+      a.x1 := @enc^.x1; a.x2 := @enc^.x2; a.buf := @enc^.d[0]; a.pos := @enc^.n;
+    end else begin
+      a.x1 := @dec^.x1; a.x2 := @dec^.x2; a.x := @dec^.x; a.pos := @dec^.p;
+      a.len := Length(dec^.d);
+      if a.len > 0 then a.buf := @dec^.d[0] else a.buf := nil;
+    end;
+    ppam_bytes(a);
+    first := first + k; n := n - k;   { (Dec is the decoder here) }
+  end;
+end;
+
 procedure CodeBytes(var m: TByteModel; var data: TBytes; first, n: SizeInt;
   enc: PArithEncoder; dec: PArithDecoder);
 var
   q: SizeInt; j, i, bit, dot, p, err, value: Integer;
   partial: Cardinal; idx: array[0..3] of Cardinal; st: array[0..4] of Integer;
 begin
+  if UseC and (n > 0) then begin CodeBytesC(m, data, first, n, enc, dec); Exit; end;
+  { the Pascal reference }
   for q := first to first + n - 1 do begin
     if enc <> nil then value := data[q] else value := 0;
     partial := 1;

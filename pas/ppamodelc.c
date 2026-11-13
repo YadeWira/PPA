@@ -331,3 +331,107 @@ void ppam_row(rowargs_t *a) {
   if (!enc) *a->x = x;
   *a->pos = pos;
 }
+
+/* ---- ppamodel's byte model (TByteModel, CodeBytes), bit for bit what its
+   Pascal reference does: the bytes kept as bytes (the structure, the
+   streams that are not images, the static model's tables). Four hashed
+   orders (0 to 3 bytes before) and a bias, mixed by the bit's position. */
+typedef struct { uint16_t p; uint8_t n, pad; } abit_t;   /* ppaarith.TAdaptiveBit, p as p xor 0x8000 */
+
+/* ppamodel.TBytesArgs */
+typedef struct {
+  abit_t *t[4];            /* TByteModel.t: 2^18 counters each */
+  int32_t *w;              /* TByteModel.w: [8][5] */
+  uint32_t *hist;          /* TByteModel.hist */
+  uint8_t *data; intptr_t n;   /* the bytes: read when encoding, written when decoding */
+  const int32_t *recip; const int16_t *stretch; const uint16_t *squash;
+  uint32_t *x1, *x2, *x;   /* the coder's state (x: the decoder's only) */
+  uint8_t *buf;            /* the encoder's output (room enough: the caller sees to it), or the decoder's input */
+  intptr_t *pos;           /* where in buf */
+  intptr_t len;            /* the decoder's input length */
+  intptr_t encoding;
+} bytesargs_t;
+
+#define BT_BITS 18
+#define BT_LIMIT 127
+#define BT_WMAX (1 << 19)
+
+static inline uint32_t byte_slot(int order, uint32_t hist, uint32_t partial) {
+  uint32_t h = order == 0 ? 0 : order == 1 ? hist & 0xFF : order == 2 ? hist & 0xFFFF : hist & 0xFFFFFF;
+  h = (h + ((uint32_t)order << 24)) * 2654435761u;
+  return ((h >> (32 - BT_BITS)) ^ ((partial * 2246822519u) >> (32 - BT_BITS))) & ((1u << BT_BITS) - 1);
+}
+
+static inline __attribute__((always_inline)) void bytes_k(bytesargs_t *a, const int enc) {
+  int32_t *const w = a->w;
+  const int16_t *const st_tab = a->stretch;
+  const uint16_t *const sq = a->squash;
+  const int32_t *const recip = a->recip;
+  uint32_t hist = *a->hist, x1 = *a->x1, x2 = *a->x2, x = enc ? 0 : *a->x;
+  uint8_t *const buf = a->buf;
+  intptr_t pos = *a->pos;
+  const intptr_t len = a->len;
+  for (intptr_t q = 0; q < a->n; q++) {
+    const int value = enc ? a->data[q] : 0;
+    uint32_t partial = 1;
+    for (int j = 7; j >= 0; j--) {
+      abit_t *c[4];
+      int st[4], dot = 0;
+      int32_t *const wj = w + j * 5;
+      for (int i = 0; i < 4; i++) {
+        c[i] = &a->t[i][byte_slot(i, hist, partial)];
+        st[i] = st_tab[(c[i]->p ^ 0x8000) >> 4];
+        dot += (wj[i] * st[i]) / 8192;
+      }
+      dot += (wj[4] * 256) / 8192;
+      int d8 = dot / 8;
+      d8 = d8 > 2047 ? 2047 : d8 < -2048 ? -2048 : d8;
+      const int p = sq[d8 + 2048];
+      const int pc = p < 1 ? 1 : p > 65535 ? 65535 : p;
+      const uint32_t xm = x1 + (uint32_t)(((uint64_t)(x2 - x1) * (uint32_t)pc) >> 16);
+      int bit;
+      if (enc) {
+        bit = (value >> j) & 1;
+        if (bit) x2 = xm; else x1 = xm + 1;
+        while (((x1 ^ x2) & 0xFF000000u) == 0) {
+          buf[pos++] = (uint8_t)(x2 >> 24); x1 <<= 8; x2 = (x2 << 8) | 255;
+        }
+      } else {
+        if (x <= xm) { bit = 1; x2 = xm; } else { bit = 0; x1 = xm + 1; }
+        while (((x1 ^ x2) & 0xFF000000u) == 0) {
+          const uint8_t b = (pos >= 0 && pos < len) ? buf[pos] : 0;
+          pos++; x1 <<= 8; x2 = (x2 << 8) | 255; x = (x << 8) | b;
+        }
+      }
+      const int err = ((bit << 16) - p) / 16;
+      for (int i = 0; i < 4; i++) {
+        int v = wj[i] + (st[i] * err * 12) / 65536;
+        wj[i] = v > BT_WMAX ? BT_WMAX : v < -BT_WMAX ? -BT_WMAX : v;
+      }
+      {
+        int v = wj[4] + (256 * err * 12) / 65536;
+        wj[4] = v > BT_WMAX ? BT_WMAX : v < -BT_WMAX ? -BT_WMAX : v;
+      }
+      for (int i = 0; i < 4; i++) {
+        /* TAdaptiveBit.Update on p xor 0x8000: toward the target by
+           recip[n] / 65536 of the way, truncated toward zero */
+        const int pp = c[i]->p ^ 0x8000;
+        const int64_t prod = (int64_t)((bit ? 65535 : 1) - pp) * recip[c[i]->n];
+        const int64_t dq = (prod + ((prod >> 63) & 0xFFFF)) >> 16;
+        c[i]->p = (uint16_t)((pp + (int)dq) ^ 0x8000);
+        if (c[i]->n < BT_LIMIT) c[i]->n++;
+      }
+      partial = partial * 2 + (uint32_t)bit;
+    }
+    const int v = (int)(partial & 0xFF);
+    if (!enc) a->data[q] = (uint8_t)v;
+    hist = ((hist << 8) | (uint32_t)v) & 0xFFFFFF;
+  }
+  *a->hist = hist; *a->x1 = x1; *a->x2 = x2;
+  if (!enc) *a->x = x;
+  *a->pos = pos;
+}
+
+void ppam_bytes(bytesargs_t *a) {
+  if (a->encoding) bytes_k(a, 1); else bytes_k(a, 0);
+}
