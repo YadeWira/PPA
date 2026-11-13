@@ -25,7 +25,7 @@ type
   TCodePath = (cpC, cpPascal);
 
 const
-  VERSION = '0.2.0';
+  VERSION = '0.2.1';
   CODE_PATH_NAMES: array[TCodePath] of string = ('c', 'pascal');
   ISSUES_URL = 'https://github.com/YadeWira/PPA/issues';
 

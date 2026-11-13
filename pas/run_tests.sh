@@ -12,7 +12,7 @@ mkdir -p "$OUT" "$OUT/cli"
 
 echo "== source guards"
 python3 "$PAS/collisions.py" "$PAS"
-# the 7-Zip plugin's module version is the command's (0.2.0 -> 0.20)
+# the 7-Zip plugin's module version is the command's (0.2.1 -> 0.21)
 V=$(sed -n "s/^  VERSION = '\(.*\)';/\1/p" "$PAS/ppasysinfo.pas")
 MV=$(echo "$V" | awk -F. '{print $2*10+$3}'); MM=$(echo "$V" | cut -d. -f1)
 grep -q "(${MM}u << 16) | ${MV}u;" "$PAS/lib/ppa7z.c" || { echo "FAIL: ppa7z.c's module version is not $V"; exit 1; }

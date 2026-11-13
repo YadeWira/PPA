@@ -169,7 +169,7 @@ again, and `pas/run_tests.sh` fails while it is not current.
 ### `ppa --version`
 
 ```
-ppa 0.2.0
+ppa 0.2.1
 stream_version: 1
 format_version: 1
 commit: 1854965

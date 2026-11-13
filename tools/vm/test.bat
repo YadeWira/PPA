@@ -61,6 +61,14 @@ for %%f in (s\*) do (
 )
 if !BAD!==0 (echo PASS: 7-Zip with PPA, every file back) else (echo FAIL: !BAD! files differ after 7-Zip & set /a FAILS+=1)
 for %%a in (o\t.7z) do echo 7z archive: %%~za bytes
+7z\7z.exe x -bso0 -bsp0 -mmt=1 -oo\71 o\t.7z
+if errorlevel 1 (echo FAIL: 7z x -mmt=1 & set /a FAILS+=1)
+set BAD=0
+for %%f in (s\*) do (
+  fc /b "%%f" "o\71\s\%%~nxf" > nul 2>&1
+  if errorlevel 1 (echo DIFF71: %%~nxf & set /a BAD+=1)
+)
+if !BAD!==0 (echo PASS: 7-Zip -mmt=1, every file back) else (echo FAIL: !BAD! files differ after 7-Zip -mmt=1 & set /a FAILS+=1)
 
 echo FAILS=!FAILS!
 exit /b !FAILS!
