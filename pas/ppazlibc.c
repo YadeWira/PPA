@@ -138,7 +138,7 @@ static inline uint32_t steps(const zpos_t *pos, intptr_t wmask, uint16_t o0, int
   return (uint16_t)(o0 - pos[q & wmask].ord - 1);
 }
 
-static intptr_t longest_skip(const uint8_t *plain, intptr_t n, const zpos_t *pos, const uint16_t *d16,
+static inline __attribute__((always_inline)) intptr_t longest_skip(const uint8_t *plain, intptr_t n, const zpos_t *pos, const uint16_t *d16,
                              intptr_t wmask, intptr_t scan, intptr_t cur, intptr_t limit,
                              intptr_t chain, intptr_t bestLen, intptr_t nice, intptr_t *matchStart, int k1) {
   if (bestLen < 2 || scan + (k1 == 6 ? 8 : 4) > n)
@@ -277,11 +277,12 @@ static inline uint16_t zd_put(const uint8_t *p, uint32_t *t, intptr_t str, intpt
   if (b != 0 && str - b < w) return zd_eq(p, b, str, K) ? (uint16_t)(str - b) : LINK_UNKNOWN;
   return 0;
 }
-static inline void zd_skip(zdeflate_t *s, intptr_t str) {
+/* k1 (4 or 6) and h16 (t16 kept or not) are constants in each copy of
+   the loop (ppaz_deflate) */
+static inline __attribute__((always_inline)) void zd_skip(zdeflate_t *s, intptr_t str, const int k1, const int h16) {
   const uint8_t *p = s->plain;
   const intptr_t i = str & s->wmask, n = s->n;
   const int sb = (int)s->skipBits;
-  const int k1 = s->key1 == 6 ? 6 : 4;
   zpos_t *const ps = &s->pos[i];
   const intptr_t w = s->wsize;
   ps->ord = s->cnt[s->insH]++;
@@ -290,23 +291,24 @@ static inline void zd_skip(zdeflate_t *s, intptr_t str) {
   if (str + ZD_PF + 16 <= n) {
     __builtin_prefetch(s->t4 + 2 * (intptr_t)zd_hk(p, str + ZD_PF, k1, sb));
     __builtin_prefetch(s->t8 + 2 * (intptr_t)zd_hk(p, str + ZD_PF, 8, sb));
-    if (s->t16) __builtin_prefetch(s->t16 + 2 * (intptr_t)zd_hk(p, str + ZD_PF, 16, sb));
+    if (h16) __builtin_prefetch(s->t16 + 2 * (intptr_t)zd_hk(p, str + ZD_PF, 16, sb));
   }
   ps->d4 = str + k1 <= n ? zd_put(p, s->t4, str, w, k1, sb) : LINK_UNKNOWN;
   ps->d8 = str + 8 <= n ? zd_put(p, s->t8, str, w, 8, sb) : LINK_UNKNOWN;
-  if (s->t16) s->d16[i] = str + 16 <= n ? zd_put(p, s->t16, str, w, 16, sb) : LINK_UNKNOWN;
+  if (h16) s->d16[i] = str + 16 <= n ? zd_put(p, s->t16, str, w, 16, sb) : LINK_UNKNOWN;
 }
 
-static inline intptr_t zd_insert(zdeflate_t *s, intptr_t str) {
+static inline __attribute__((always_inline)) intptr_t zd_insert(zdeflate_t *s, intptr_t str, const int k1, const int h16) {
   s->insH = ((s->insH << s->hashShift) ^ win(s->plain, s->n, str + MIN_MATCH - 1)) & s->hashMask;
   const intptr_t r = s->head[s->insH];
   s->pos[str & s->wmask].prev = (r == 0 || str - r >= s->wsize) ? 0 : (uint16_t)(str - r);
   s->head[s->insH] = (uint32_t)str;
-  if (str + 2 < s->n) zd_skip(s, str);
+  if (str + 2 < s->n) zd_skip(s, str, k1, h16);
   return r;
 }
 
-static inline intptr_t zd_longest(zdeflate_t *s, intptr_t cur) {
+static inline __attribute__((always_inline)) intptr_t zd_longest(zdeflate_t *s, intptr_t cur, const int fast,
+                                                                   const int k1, const int h16) {
   const intptr_t look = s->n - s->strstart;
   intptr_t chain = s->maxChain, nice = s->niceMatch;
   const intptr_t limit = s->strstart > s->maxDist ? s->strstart - s->maxDist : 0;
@@ -319,9 +321,9 @@ static inline intptr_t zd_longest(zdeflate_t *s, intptr_t cur) {
      only with more bytes, wherever the best started); where it is not, the
      caller drops what it gets, as it dropped zlib's */
   intptr_t best0 = s->prevLength;
-  if (s->filtered && !s->fast && best0 < FILTERED_MIN) best0 = FILTERED_MIN;
-  const intptr_t best = longest_skip(s->plain, s->n, s->pos, s->d16, s->wmask, s->strstart,
-                                     cur, limit, chain, best0, nice, &s->matchStart, s->key1 == 6 ? 6 : 4);
+  if (s->filtered && !fast && best0 < FILTERED_MIN) best0 = FILTERED_MIN;
+  const intptr_t best = longest_skip(s->plain, s->n, s->pos, h16 ? s->d16 : 0, s->wmask, s->strstart,
+                                     cur, limit, chain, best0, nice, &s->matchStart, k1);
   return best <= look ? best : look;
 }
 
@@ -342,7 +344,7 @@ static inline int zd_dist(zdeflate_t *s, intptr_t dist, intptr_t lenMinus3) {
   return ++s->symNext == s->symEnd;
 }
 
-intptr_t ppaz_deflate(zdeflate_t *s) {
+static inline __attribute__((always_inline)) intptr_t zd_run(zdeflate_t *s, const int fast, const int k1, const int h16) {
   if (s->pending) { s->strstart++; s->pending = 0; }
   for (;;) {
     if (s->stop) return ZD_STOP;
@@ -351,15 +353,15 @@ intptr_t ppaz_deflate(zdeflate_t *s) {
     const intptr_t look = s->n - s->strstart;
     if (look == 0) break;
     intptr_t hashHead = 0;
-    if (look >= MIN_MATCH) hashHead = zd_insert(s, s->strstart);
-    if (s->fast) {
+    if (look >= MIN_MATCH) hashHead = zd_insert(s, s->strstart, k1, h16);
+    if (fast) {
       int bflush;
-      if (hashHead != 0 && s->strstart - hashHead <= s->maxDist) s->matchLength = zd_longest(s, hashHead);
+      if (hashHead != 0 && s->strstart - hashHead <= s->maxDist) s->matchLength = zd_longest(s, hashHead, fast, k1, h16);
       if (s->matchLength >= MIN_MATCH) {
         bflush = zd_dist(s, s->strstart - s->matchStart, s->matchLength - MIN_MATCH);
         if (s->matchLength <= s->maxLazy && look - s->matchLength >= MIN_MATCH) {
           s->matchLength--;
-          do { s->strstart++; zd_insert(s, s->strstart); s->matchLength--; } while (s->matchLength != 0);
+          do { s->strstart++; zd_insert(s, s->strstart, k1, h16); s->matchLength--; } while (s->matchLength != 0);
           s->strstart++;
         } else {
           s->strstart += s->matchLength;
@@ -377,7 +379,7 @@ intptr_t ppaz_deflate(zdeflate_t *s) {
     s->prevLength = s->matchLength; s->prevMatch = s->matchStart;
     s->matchLength = MIN_MATCH - 1;
     if (hashHead != 0 && s->prevLength < s->maxLazy && s->strstart - hashHead <= s->maxDist) {
-      s->matchLength = zd_longest(s, hashHead);
+      s->matchLength = zd_longest(s, hashHead, fast, k1, h16);
       if (s->matchLength <= FILTERED_MIN && (s->filtered || (s->matchLength == MIN_MATCH && s->strstart - s->matchStart > TOO_FAR)))
         s->matchLength = MIN_MATCH - 1;
     }
@@ -387,7 +389,7 @@ intptr_t ppaz_deflate(zdeflate_t *s) {
       s->prevLength -= 2;
       do {
         s->strstart++;
-        if (s->strstart <= maxInsert) zd_insert(s, s->strstart);
+        if (s->strstart <= maxInsert) zd_insert(s, s->strstart, k1, h16);
         s->prevLength--;
       } while (s->prevLength != 0);
       s->matchAvailable = 0;
@@ -405,12 +407,21 @@ intptr_t ppaz_deflate(zdeflate_t *s) {
       s->strstart++;
     }
   }
-  if (!s->fast && s->matchAvailable) {
+  if (!fast && s->matchAvailable) {
     zd_lit(s, s->plain[s->strstart - 1]);
     s->matchAvailable = 0;
     s->endLit = 1;
   }
   return ZD_DONE;
+}
+
+/* the loop with its constants: deflate_fast or deflate_slow, the key of
+   d4, t16 kept or not */
+intptr_t ppaz_deflate(zdeflate_t *s) {
+  const int six = s->key1 == 6, h16 = s->t16 != 0;
+  if (s->fast) return six ? zd_run(s, 1, 6, h16) : h16 ? zd_run(s, 1, 4, 1) : zd_run(s, 1, 4, 0);
+  if (six) return h16 ? zd_run(s, 0, 6, 1) : zd_run(s, 0, 6, 0);
+  return h16 ? zd_run(s, 0, 4, 1) : zd_run(s, 0, 4, 0);
 }
 
 /* A segment's start: every position from `from` to `to` - 1 inserted as
@@ -420,6 +431,7 @@ intptr_t ppaz_deflate(zdeflate_t *s) {
 void ppaz_preinsert(zdeflate_t *s, intptr_t from, intptr_t to) {
   const uint8_t *p = s->plain;
   if (from + 1 < s->n) s->insH = (((intptr_t)p[from] << s->hashShift) ^ p[from + 1]) & s->hashMask;
+  const int k1 = s->key1 == 6 ? 6 : 4, h16 = s->t16 != 0;
   for (intptr_t str = from; str < to; str++)
-    if (str + MIN_MATCH <= s->n) zd_insert(s, str);
+    if (str + MIN_MATCH <= s->n) zd_insert(s, str, k1, h16);
 }
