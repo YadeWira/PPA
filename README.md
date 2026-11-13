@@ -178,8 +178,12 @@ same library is a C API (`ppa.h`) for any program.
 static model (8-bit gray, gray and alpha, RGB, RGBA), up to 7 MiB of image
 a file. Each block carries a ZPAQL decoder (19 KB), so any zpaq extracts
 it, even without the plugin. With `-m5`, 20 photos come to 65.35% of their
-size against 96.31% without it ([details][wPlugin]); zpaq-std ships it
-from a coming release (`-sa`).
+size against 96.31% without it ([details][wPlugin]). zpaq-std ships it
+since 2.9.0, in its extra-codecs zip, as an experimental codec:
+
+```sh
+zpaq-std a images.zpaq images/ -sa -m5     # -sa:ppa for ppa1 alone; -rcmd for what it refuses
+```
 
 ## Reporting a bug
 
