@@ -108,6 +108,7 @@ type
     syncPos, syncTok: PSizeInt; nSync, maxSync: SizeInt;
     endLit: SizeInt;
     syncLo, syncHi: SizeInt;
+    key1: SizeInt;    { nx4's key: 4 bytes, or 6 for deflate_slow's filtered strategy }
   end;
 
 const
@@ -697,6 +698,14 @@ var
     if not stop then FlushBlock(True);
   end;
 
+  { the key of DeflateC's nx4 links: deflate_slow with the filtered strategy
+    drops every match of 5 bytes or fewer, so its search starts at 5 and the
+    links of the same 6 bytes skip more (ppazlibc.c's zd_longest) }
+  function Key1(fast: Boolean): SizeInt;
+  begin
+    if not fast and (prm.strategy = Z_FILTERED) then Result := 6 else Result := 4;
+  end;
+
   { DeflateFast or DeflateSlow in C (ppazlibc.c's ppaz_deflate), which
     comes back here to flush each block }
   procedure DeflateC(fast: Boolean);
@@ -723,6 +732,7 @@ var
     st.symNext := symNext; st.symEnd := symEnd;
     st.lengthCode := @LengthCode[0]; st.distCode := @DistCode[0];
     st.skipBits := skipBits;
+    st.key1 := Key1(fast);
     repeat
       st.checkNow := Ord(checkNow); st.stop := Ord(stop);
       r := ppaz_deflate(st);
@@ -799,6 +809,7 @@ var
         st.ord := @o32[0]; st.cnt := @c32[0]; st.t4 := @a4[0]; st.t8 := @a8[0];
         if Length(a16) > 0 then begin st.nx16 := @n16[0]; st.t16 := @a16[0]; end;
         st.skipBits := sb;
+        st.key1 := Key1(False);   { before the window is inserted: its links have this key }
         ppaz_preinsert(st, pre, a);
         st.strstart := a; st.matchStart := 0; st.prevMatch := 0; st.winBase := 0;
         st.matchLength := MIN_MATCH - 1; st.prevLength := MIN_MATCH - 1; st.matchAvailable := 0;
