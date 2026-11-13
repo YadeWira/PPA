@@ -230,115 +230,71 @@ typedef struct {
   intptr_t key1;                 /* the key of d4 (t4): 4 bytes, or 6 (filtered deflate_slow: skip_key) */
 } zdeflate_t;
 
-#if (defined(__GNUC__) || defined(__clang__)) && defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-#define ZD_LE 1
-#endif
-
 static inline uint64_t zd_load8(const uint8_t *p) { uint64_t v; __builtin_memcpy(&v, p, 8); return v; }
+static inline uint32_t zd_load4(const uint8_t *p) { uint32_t v; __builtin_memcpy(&v, p, 4); return v; }
+static inline uint32_t zd_load2(const uint8_t *p) { uint16_t v; __builtin_memcpy(&v, p, 2); return v; }
 
 #ifndef ZD_PF
 #define ZD_PF 4
 #endif
-#define M6 0xFFFFFFFFFFFFull
-/* t4's slot of a key: k4 its 4 bytes, k6 its 6 (both little-endian) */
-static inline uint32_t zd_h4(uint32_t k4, int sb) { return (k4 * 2246822519u) >> (32 - sb); }
-static inline uint32_t zd_h6(uint64_t k6, int sb) { return (uint32_t)((k6 * 0xD6E8FEB86659FD93ull) >> (64 - sb)); }
-/* a skip link from str to c, the last position in t's slot: none (empty,
-   or out of the window), c (the same key), or not known (another key) */
-static inline uint16_t zd_link(intptr_t str, intptr_t c, int same, intptr_t wsize) {
-  return (c == 0 || str - c >= wsize) ? 0 : same ? (uint16_t)(str - c) : LINK_UNKNOWN;
+/* The skip tables t4 (k1 bytes: 4 or 6), t8 and t16: 2^skipBits slots in
+   sets of two, the newest position whose key hashes there first, at most
+   one position of each key (the newest of it). A key's newest position is
+   in its set or was pushed out, older than both there; so where neither
+   has the key, there is none in the window when the older of the two is
+   out of it (or empty), and it is not known otherwise. Two ways and not
+   one: a collision makes the search walk zlib's chain to the key, and two
+   ways have far fewer. The keys are read as the bytes in memory (the
+   order a machine loads them in only changes the slots). */
+static inline uint32_t zd_hk(const uint8_t *p, intptr_t str, int K, int sb) {
+  const int b = sb - 1;   /* the set's bits */
+  switch (K) {
+  case 4: return (zd_load4(p + str) * 2246822519u) >> (32 - b);
+  case 6: return (uint32_t)(((zd_load4(p + str) | (uint64_t)zd_load2(p + str + 4) << 32) * 0xD6E8FEB86659FD93ull) >> (64 - b));
+  case 8: return (uint32_t)((zd_load8(p + str) * 0x9E3779B97F4A7C15ull) >> (64 - b));
+  default: return (uint32_t)(((zd_load8(p + str) ^ (zd_load8(p + str + 8) * 0xC2B2AE3D27D4EB4Full)) * 0x9E3779B97F4A7C15ull) >> (64 - b));
+  }
+}
+/* the K bytes at a and at b the same */
+static inline int zd_eq(const uint8_t *p, intptr_t a, intptr_t b, int K) {
+  switch (K) {
+  case 4: return zd_load4(p + a) == zd_load4(p + b);
+  case 6: return zd_load4(p + a) == zd_load4(p + b) && zd_load2(p + a + 4) == zd_load2(p + b + 4);
+  case 8: return zd_load8(p + a) == zd_load8(p + b);
+  default: return zd_load8(p + a) == zd_load8(p + b) && zd_load8(p + a + 8) == zd_load8(p + b + 8);
+  }
+}
+/* str into its set of t (K bytes to read at str): its link back, as
+   zpos_t keeps it */
+static inline uint16_t zd_put(const uint8_t *p, uint32_t *t, intptr_t str, intptr_t w, int K, int sb) {
+  uint32_t *const set = t + 2 * (intptr_t)zd_hk(p, str, K, sb);
+  const intptr_t a = set[0], b = set[1];
+  const int liveA = a != 0 && str - a < w;
+  set[0] = (uint32_t)str;
+  if (liveA && zd_eq(p, a, str, K)) return (uint16_t)(str - a);           /* b stays */
+  set[1] = (uint32_t)a;
+  if (!liveA) return 0;                                                   /* b is older still */
+  if (b != 0 && str - b < w) return zd_eq(p, b, str, K) ? (uint16_t)(str - b) : LINK_UNKNOWN;
+  return 0;
 }
 static inline void zd_skip(zdeflate_t *s, intptr_t str) {
   const uint8_t *p = s->plain;
   const intptr_t i = str & s->wmask, n = s->n;
   const int sb = (int)s->skipBits;
-  const int six = s->key1 == 6;
+  const int k1 = s->key1 == 6 ? 6 : 4;
   zpos_t *const ps = &s->pos[i];
   const intptr_t w = s->wsize;
   ps->ord = s->cnt[s->insH]++;
-#ifdef ZD_LE
-  if (str + ZD_PF + 8 <= n) {
-    /* little-endian, 8 bytes to read: the keys out of one load (the 3, 4
-       and 6 first bytes are its low ones), and the tables' slots a few
-       positions ahead fetched meanwhile (a hint: nothing depends on it) */
-    const uint64_t f8 = zd_load8(p + str + ZD_PF);
-    __builtin_prefetch(&s->t4[six ? zd_h6(f8 & M6, sb) : zd_h4((uint32_t)f8, sb)]);
-    __builtin_prefetch(&s->t8[(uint32_t)((f8 * 0x9E3779B97F4A7C15ull) >> (64 - sb))]);
-    const uint64_t k8 = zd_load8(p + str);
-    uint32_t h;
-    intptr_t c;
-    if (six) {
-      const uint64_t k6 = k8 & M6;
-      h = zd_h6(k6, sb);
-      c = s->t4[h];
-      ps->d4 = zd_link(str, c, (zd_load8(p + c) & M6) == k6, w);
-    } else {
-      const uint32_t k4 = (uint32_t)k8;
-      h = zd_h4(k4, sb);
-      c = s->t4[h];
-      ps->d4 = zd_link(str, c, (uint32_t)zd_load8(p + c) == k4, w);
-    }
-    s->t4[h] = (uint32_t)str;
-    h = (uint32_t)((k8 * 0x9E3779B97F4A7C15ull) >> (64 - sb));
-    c = s->t8[h];
-    ps->d8 = zd_link(str, c, zd_load8(p + c) == k8, w);
-    s->t8[h] = (uint32_t)str;
-    if (s->t16) {
-      if (str + 16 <= n) {
-        const uint64_t k8b = zd_load8(p + str + 8);
-        h = (uint32_t)(((k8 ^ (k8b * 0xC2B2AE3D27D4EB4Full)) * 0x9E3779B97F4A7C15ull) >> (64 - sb));
-        c = s->t16[h];
-        s->d16[i] = zd_link(str, c, zd_load8(p + c) == k8 && zd_load8(p + c + 8) == k8b, w);
-        s->t16[h] = (uint32_t)str;
-      } else s->d16[i] = LINK_UNKNOWN;
-    }
-    return;
+  /* the tables' sets a few positions ahead fetched meanwhile (a hint:
+     nothing depends on it) */
+  if (str + ZD_PF + 16 <= n) {
+    __builtin_prefetch(s->t4 + 2 * (intptr_t)zd_hk(p, str + ZD_PF, k1, sb));
+    __builtin_prefetch(s->t8 + 2 * (intptr_t)zd_hk(p, str + ZD_PF, 8, sb));
+    if (s->t16) __builtin_prefetch(s->t16 + 2 * (intptr_t)zd_hk(p, str + ZD_PF, 16, sb));
   }
-#endif
-  /* near the end, or not little-endian: the keys a byte at a time, read
-     as the fast path reads them (the same slots) */
-  uint32_t h;
-  intptr_t c;
-  const int k1 = six ? 6 : 4;
-  if (str + k1 - 1 < n) {
-    uint64_t k = 0, kc = 0;
-    for (int b = k1 - 1; b >= 0; b--) k = k << 8 | p[str + b];
-    h = six ? zd_h6(k, sb) : zd_h4((uint32_t)k, sb);
-    c = s->t4[h];
-    if (c == 0 || str - c >= w) ps->d4 = 0;
-    else {
-      for (int b = k1 - 1; b >= 0; b--) kc = kc << 8 | p[c + b];
-      ps->d4 = zd_link(str, c, kc == k, w);
-    }
-    s->t4[h] = (uint32_t)str;
-  } else ps->d4 = LINK_UNKNOWN;
-  if (str + 7 < n) {
-    uint64_t k8 = 0, kc;
-    for (int b = 7; b >= 0; b--) k8 = k8 << 8 | p[str + b];
-    h = (uint32_t)((k8 * 0x9E3779B97F4A7C15ull) >> (64 - sb));
-    c = s->t8[h];
-    if (c == 0 || str - c >= w) ps->d8 = 0;
-    else {
-      kc = 0;
-      for (int b = 7; b >= 0; b--) kc = kc << 8 | p[c + b];
-      ps->d8 = zd_link(str, c, kc == k8, w);
-    }
-    s->t8[h] = (uint32_t)str;
-  } else ps->d8 = LINK_UNKNOWN;
-  if (s->t16) {
-    if (str + 15 < n) {
-      uint64_t a8 = 0, b8 = 0, ca = 0, cb = 0;
-      for (int b = 7; b >= 0; b--) { a8 = a8 << 8 | p[str + b]; b8 = b8 << 8 | p[str + 8 + b]; }
-      h = (uint32_t)(((a8 ^ (b8 * 0xC2B2AE3D27D4EB4Full)) * 0x9E3779B97F4A7C15ull) >> (64 - sb));
-      c = s->t16[h];
-      if (c == 0 || str - c >= w) s->d16[i] = 0;
-      else {
-        for (int b = 7; b >= 0; b--) { ca = ca << 8 | p[c + b]; cb = cb << 8 | p[c + 8 + b]; }
-        s->d16[i] = zd_link(str, c, ca == a8 && cb == b8, w);
-      }
-      s->t16[h] = (uint32_t)str;
-    } else s->d16[i] = LINK_UNKNOWN;
-  }
+  ps->d4 = str + k1 <= n ? zd_put(p, s->t4, str, w, k1, sb) : LINK_UNKNOWN;
+  ps->d8 = str + 8 <= n ? zd_put(p, s->t8, str, w, 8, sb) : LINK_UNKNOWN;
+  if (s->t16) s->d16[i] = str + 16 <= n ? zd_put(p, s->t16, str, w, 16, sb) : LINK_UNKNOWN;
 }
 
 static inline intptr_t zd_insert(zdeflate_t *s, intptr_t str) {
