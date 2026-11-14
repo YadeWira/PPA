@@ -129,3 +129,10 @@ Every child process runs under `ulimit -v 6000000`, with at most 4 at a time.
   writes a line per stream; `compare_recipes.py SUBSET FILE...` makes the
   per-group table against M0's preflate figures (doc/PREFLATE.md, "Status
   (M3a)"). Scratch and results: `$PF/m3/`.
+- M3b (14/11/2026) made kind-3 recipes small (context mixing, the longest
+  match as the length's guess, the rank walk's skips over runs, the tree
+  builders of libdeflate, miniz and zopfli, the parameters by coded size)
+  and found pngcrush's (and spider's) zlib: built with `TOO_FAR` 32767, now
+  kind 1 (`ZV_NO_TOO_FAR`). Same harness (`-all013 -diffc -tsv`,
+  `compare_recipes.py`); doc/PREFLATE.md, "Status (M3b)". Scratch and
+  results: `$PF/m3/m3b/`.

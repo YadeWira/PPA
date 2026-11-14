@@ -49,7 +49,7 @@ const
   RECIPE_CORR = 3;
   RECIPE_KIND_LAST = RECIPE_CORR;
   { the version of RecipeBytes' format (doc/PREFLATE.md) }
-  RECIPE_FORMAT = 1;
+  RECIPE_FORMAT = 2;
 
 type
   { how the stream is framed: bare deflate, zlib, or zlib when its first two
@@ -197,7 +197,7 @@ const
   another level) is followed by the rebuild but not looked for here. }
 function FindZlibFlow(const z: TZStream; out prm: TZlibParams; out flow: TZlibFlow; out choices: TZStream): Boolean;
 type
-  TCand = record prm: TZlibParams; prog: SizeInt; end;
+  TCand = record prm: TZlibParams; prog: SizeInt; noTooFar: Boolean; end;
   { what the fixes change: the zlib version, which syncs are full, Z_BLOCKs
     added, parameter changes added }
   TFixes = record
@@ -267,7 +267,7 @@ var
       { a run of markers at one position }
       j := b;
       while (j < nb - 1) and (mk[j] <> MK_DATA) do Inc(j);
-      if fx.variant = ZV_NEW then begin
+      if (fx.variant and ZV_VERSION) = ZV_NEW then begin
         for c := b to j - 1 do
           if mk[c] = MK_STORED then Add(st, bStart[c], FlushKind(c)) else Add(st, bStart[c], ZE_PARTIAL);
       end else begin
@@ -350,7 +350,22 @@ var
     if Result then Inc(work, n) else Inc(work, prog);
   end;
 
-  procedure Keep(const p: TZlibParams; prog: SizeInt);
+  { whether z's token at plain position q is a match of 3 further than
+    zlib's TOO_FAR (4096) }
+  function FarThreeAt(q: SizeInt): Boolean;
+  var b, t, x: SizeInt;
+  begin
+    Result := False;
+    b := 0;
+    while (b < nb) and (bEnd[b] <= q) do Inc(b);
+    if (b >= nb) or (z.blocks[b].btype = btStored) then Exit;
+    x := bStart[b]; t := z.blocks[b].firstToken;
+    while (t < z.blocks[b].firstToken + z.blocks[b].nTokens) and (x < q) do begin Inc(x, TokLen(t)); Inc(t); end;
+    Result := (x = q) and (t < z.blocks[b].firstToken + z.blocks[b].nTokens) and (z.tokLen[t] = 3) and
+      (z.tokVal[t] > 4096);
+  end;
+
+  procedure Keep(const p: TZlibParams; prog: SizeInt; noTooFar: Boolean);
   var j, x: Integer;
   begin
     j := nTop;
@@ -358,7 +373,7 @@ var
     if j >= FLOW_TOP then Exit;
     if nTop < FLOW_TOP then Inc(nTop);
     for x := nTop - 1 downto j + 1 do top[x] := top[x - 1];
-    top[j].prm := p; top[j].prog := prog;
+    top[j].prm := p; top[j].prog := prog; top[j].noTooFar := noTooFar;
   end;
 
   function CopyFixes(const a: TFixes): TFixes;
@@ -425,6 +440,7 @@ var
     Result := False;
     p := c.prm;
     fx := CopyFixes(base);
+    if c.noTooFar then fx.variant := fx.variant or ZV_NO_TOO_FAR;
     f := Build(p.memLevel, fx);
     runs0 := runs; work0 := work;
     if TryFlow(p, f, z, prog) then begin flow := f; prm := p; choices := e; Exit(True); end;
@@ -447,6 +463,13 @@ var
           found := Further;
         end;
       end;
+      { zlib built with TOO_FAR = 32767 (pngcrush's): deflate_slow keeps
+        a match of 3 however far; where they part at one, the other }
+      if not found and (prog < n) and (ZlibFunc(p.level, p.strategy) = FN_SLOW) then begin
+        f2 := CopyFixes(fx); f2.variant := fx.variant xor ZV_NO_TOO_FAR;
+        if TryFix(f2) then Exit(True);
+        found := Further;
+      end;
       { the last stored marker before where they part: the other of sync
         and full (one a match reaches back over is a sync) }
       if not found then begin
@@ -457,7 +480,7 @@ var
             { each zlib's: which it was can also change what full means }
             f2 := CopyFixes(fx);
             f2.full[lastS] := not f2.full[lastS];
-            f2.variant := v;
+            f2.variant := v or (fx.variant and ZV_NO_TOO_FAR);
             if TryFix(f2) then Exit(True);
           end;
         found := Further;
@@ -465,8 +488,8 @@ var
       { the other zlibs' flushes }
       if not found and (Length(f.events) > 0) then begin
         for v := ZV_NEW to ZV_LAST do
-          if v <> fx.variant then begin
-            f2 := CopyFixes(fx); f2.variant := v;
+          if v <> fx.variant and ZV_VERSION then begin
+            f2 := CopyFixes(fx); f2.variant := v or (fx.variant and ZV_NO_TOO_FAR);
             if TryFix(f2) then Exit(True);
           end;
         found := Further;
@@ -487,7 +510,7 @@ var
               if (sg in [Z_HUFFMAN_ONLY, Z_RLE]) and (lv <> 1) then Continue;
               if (sg = Z_FILTERED) and (lv <= 3) then Continue;
               f2 := CopyFixes(fx);
-              f2.variant := v;
+              f2.variant := v or (fx.variant and ZV_NO_TOO_FAR);
               SetParams(f2, last, lv, sg);
               if TryFix(f2) then Exit(True);
               if Over then Exit;
@@ -529,9 +552,10 @@ var
   wbs, mls, lvs: array of Integer;
   stOrder: array[0..4] of Integer = (Z_DEFAULT_STRATEGY, Z_FILTERED, Z_FIXED, Z_HUFFMAN_ONLY, Z_RLE);
   flows: array[1..9] of TZlibFlow;
+  ftf: TZlibFlow;
   wi, mi, si, li, hw, lvMin, lvMax, firstMl, best, cnt: Integer;
   p: TZlibParams;
-  prog, coverT: SizeInt;
+  prog, prog2, coverT: SizeInt;
   equivDone, ok: Boolean;
   bits: Int64;
 begin
@@ -669,17 +693,31 @@ begin
           p.level := lvs[li]; p.strategy := stOrder[si]; p.memLevel := mls[mi]; p.wbits := wbs[wi];
           if (p.strategy in [Z_HUFFMAN_ONLY, Z_RLE]) and (li > 0) then Continue;
           if (p.strategy = Z_FILTERED) and (p.level <= 3) then Continue;
-          ok := TryFlow(p, flows[p.memLevel], screen, prog);
+          ftf := flows[p.memLevel];
+          ok := TryFlow(p, ftf, screen, prog);
+          { parted at a match of 3 further than TOO_FAR: zlib built with
+            TOO_FAR = 32767 (pngcrush's) }
+          if not ok and (ZlibFunc(p.level, p.strategy) = FN_SLOW) and FarThreeAt(prog) then begin
+            ftf.variant := ftf.variant xor ZV_NO_TOO_FAR;
+            ok := TryFlow(p, ftf, screen, prog2);
+            { kept only where it goes further (a later deflate_fast keeps
+              far matches of 3 too) }
+            if ok or (prog2 > prog) then prog := prog2
+            else begin
+              ftf := flows[p.memLevel];
+              ok := TryFlow(p, ftf, screen, prog);
+            end;
+          end;
           if ok and (k >= nb) then begin
-            flow := flows[p.memLevel]; prm := p; choices := e; Exit(True);
+            flow := ftf; prm := p; choices := e; Exit(True);
           end;
           { the screen's blocks all the same: the whole stream }
           if (k < nb) and (good >= k) then begin
             { the whole stream, for those the screen passed }
-            ok := TryFlow(p, flows[p.memLevel], z, prog);
-            if ok then begin flow := flows[p.memLevel]; prm := p; choices := e; Exit(True); end;
+            ok := TryFlow(p, ftf, z, prog);
+            if ok then begin flow := ftf; prm := p; choices := e; Exit(True); end;
           end;
-          Keep(p, prog);
+          Keep(p, prog, (ftf.variant and ZV_NO_TOO_FAR) <> 0);
         end;
   end;
   { mended where they part }
@@ -750,7 +788,7 @@ begin
       (memLevel >= 1) and (memLevel <= 9) and (wbits >= 8) and (wbits <= 15);
   if not Result then Exit;
   if recipe.kind = RECIPE_ZLIB then Exit(Length(recipe.flow.events) = 0);
-  if recipe.flow.variant > ZV_LAST then Exit(False);
+  if (recipe.flow.variant and not ZV_NO_TOO_FAR) > ZV_LAST then Exit(False);
   for k := 0 to High(recipe.flow.events) do
     with recipe.flow.events[k] do
       if (kind < ZE_SYNC) or (kind > ZE_PARAMS) or (pos < 0) or
@@ -879,7 +917,7 @@ begin
   pos := r.pos;
 end;
 
-{ ---------------------------------------------------------------- RecipeBytes (provisional, RECIPE_FORMAT 1) }
+{ ---------------------------------------------------------------- RecipeBytes (provisional, RECIPE_FORMAT 2) }
 
 function RecipeBytes(const recipe: TDeflRecipe): TBytes;
 var o: TOut; k, last: SizeInt;
@@ -897,7 +935,7 @@ begin
     with recipe.pred do begin
       Put(o, predVersion);
       PutVar(o, chain); PutVar(o, nice); PutVar(o, lazy); PutVar(o, good);
-      Put(o, hbits); PutVar(o, maxDist); Put(o, flags); PutVar(o, symEnd);
+      Put(o, hbits); PutVar(o, maxDist); Put(o, flags); PutVar(o, symEnd); Put(o, tree);
     end;
     PutFramingBytes(o, recipe);
     PutVar(o, Length(recipe.corr));
@@ -939,6 +977,7 @@ begin
       if not r.ok or (predVersion <> PRED_VERSION) then Exit;
       chain := r.GetVar(PRED_MAX_CHAIN); nice := r.GetVar(258); lazy := r.GetVar(258); good := r.GetVar(258);
       hbits := r.Get; maxDist := r.GetVar(32768); flags := r.Get; symEnd := r.GetVar(PRED_MAX_SYMEND);
+      tree := r.Get;
     end;
     if not r.ok then Exit;
     if not PredValid(recipe.pred) then Exit(rrBadParams);
@@ -958,7 +997,7 @@ begin
   if not RecipeValid(recipe) then Exit(rrBadParams);
   if recipe.kind = RECIPE_ZLIB_FLOW then begin
     recipe.flow.variant := r.Get;
-    if not r.ok or (recipe.flow.variant > ZV_LAST) or (plainLen < 0) then Exit;
+    if not r.ok or ((recipe.flow.variant and not ZV_NO_TOO_FAR) > ZV_LAST) or (plainLen < 0) then Exit;
     { the count checked before anything is kept for it }
     cnt := r.GetVar(2 * QWord(plainLen) + 2);
     { each event takes 2 bytes at least: no more than the bytes left hold }

@@ -83,7 +83,7 @@ function SamePred(const a, b: TPredParams): Boolean;
 begin
   Result := (a.predVersion = b.predVersion) and (a.chain = b.chain) and (a.nice = b.nice) and (a.lazy = b.lazy) and
     (a.good = b.good) and (a.hbits = b.hbits) and (a.maxDist = b.maxDist) and (a.flags = b.flags) and
-    (a.symEnd = b.symEnd);
+    (a.symEnd = b.symEnd) and (a.tree = b.tree);
 end;
 
 function SameRecipe(const a, b: TDeflRecipe): Boolean;
@@ -270,6 +270,44 @@ begin
   if (Length(samples) > 0) and (made = 0) then Fail('no crafted flow was made');
 end;
 
+{ zlib built with TOO_FAR = 32767 (pngcrush's): on each sample's bytes,
+  the stream deflate_slow makes when it keeps a match of 3 however far (no
+  flush), where that is not zlib's own, must come back as kind 1 with
+  ZV_NO_TOO_FAR (kind 0 cannot say it) }
+procedure TooFarFlows;
+var a, back, plain: TBytes; i, j, k: SizeInt; kind: Integer; prm: TZlibParams; f: TZlibFlow; z, e, e2: TZStream;
+  good: SizeInt; r: TDeflRecipe; st: TDeflStatus; sameToks: Boolean; made: Integer;
+begin
+  made := 0;
+  for k := 0 to High(samples) do begin
+    if not Parse(samples[k], dfAuto, MAX_PLAIN, z).Ok then Continue;
+    plain := Copy(z.plain, 0, 1 shl 16);
+    for j := 0 to 1 do begin
+      prm.level := 6 + 3 * j; prm.strategy := Z_DEFAULT_STRATEGY; prm.memLevel := 8 + j; prm.wbits := 15;
+      f := Default(TZlibFlow); f.variant := ZV_NEW or ZV_NO_TOO_FAR;
+      ZlibChoicesFlow(plain, prm, f, nil, e, good);
+      f.variant := ZV_NEW;
+      ZlibChoicesFlow(plain, prm, f, nil, e2, good);
+      sameToks := Length(e.tokLen) = Length(e2.tokLen);
+      if sameToks then for i := 0 to High(e.tokLen) do if e.tokLen[i] <> e2.tokLen[i] then sameToks := False;
+      if sameToks then Continue;
+      e.raw := z.raw; e.header := z.header; e.adlerOk := z.adlerOk and not z.raw; e.endPad := 0; e.tail := nil;
+      a := Encode(e);
+      st := CheckStream(a, dfAuto, Format('crafted: TOO_FAR 32767, level %d, sample %d', [prm.level, k]), kind);
+      if (st <> dsOk) or (kind <> RECIPE_ZLIB_FLOW) then
+        Fail(Format('crafted TOO_FAR, level %d, sample %d: not kind 1 (kind %d)', [prm.level, k, kind]))
+      else begin
+        st := Analyze(a, dfAuto, MAX_PLAIN, back, r, RECIPE_ZLIB_FLOW);
+        if (st <> dsOk) or (r.flow.variant and ZV_NO_TOO_FAR = 0) then Fail('crafted TOO_FAR: not ZV_NO_TOO_FAR');
+      end;
+      Inc(made);
+    end;
+    if made >= 4 then Break;
+  end;
+  { (samples with no match of 3 past 4096 make none: not a failure) }
+  if verbose and (made = 0) then Writeln('  no crafted TOO_FAR stream: the samples have no match of 3 past 4096');
+end;
+
 { a change of loop after a flush (deflate_fast or deflate_rle, then a
   filtered deflate_slow: it starts with prev_length 0, where zlib's
   longest_match wants the byte before each candidate the same as the byte
@@ -378,6 +416,10 @@ begin
   if not Rebuild(plain, r2, back) then Fail('a level change of the same loop not rebuilt');
   r2 := r; r2.flow.variant := ZV_LAST + 1;
   if Rebuild(plain, r2, back) then Fail('an unknown zlib version rebuilt');
+  r2 := r; r2.flow.variant := 8;
+  if Rebuild(plain, r2, back) then Fail('an unknown variant flag rebuilt');
+  r2 := r; r2.flow.variant := ZV_LAST or ZV_NO_TOO_FAR;
+  if not Rebuild(plain, r2, back) then Fail('zlib built with TOO_FAR 32767 not rebuilt');
   r2 := r; r2.flow.events := Copy(r.flow.events, 0, Length(r.flow.events)); r2.flow.events[1].level := 0;
   if Rebuild(plain, r2, back) then Fail('a level 0 change rebuilt');
   r2 := r; r2.flow.events := Copy(r.flow.events, 0, Length(r.flow.events)); r2.flow.events[0].kind := 6;
@@ -443,12 +485,49 @@ begin
     r2.pred.chain := 1 + (k * 37) mod PRED_MAX_CHAIN;
     r2.pred.symEnd := (k mod 5) * 100;
     r2.pred.hbits := 8 + k mod 9;
+    r2.pred.tree := k mod (PRED_TREE_LAST + 1);
+    r2.pred.flags := k mod (PF_ALL + 1);
     try
       Rebuild(big, r2, back);
     except
       on e: Exception do Fail('kind-3 random corrections raised ' + e.ClassName);
     end;
   end;
+end;
+
+{ a distance past the rank walk's 4096 candidates: 4200 positions with the
+  same 3 bytes, then a match (5 bytes) of the oldest; kind 3 must give it
+  back, through the escape (its bits are counted) }
+procedure RankEscape;
+var e: TZStream; a, plain: TBytes; k, q, nT: SizeInt; kind: Integer; prm: TPredParams; corr: TBytes;
+begin
+  e := Default(TZStream);
+  e.raw := True;
+  plain := nil; SetLength(plain, 4200 * 5 + 5);
+  q := 0;
+  for k := 0 to 4200 do begin
+    plain[q] := Ord('a'); plain[q + 1] := Ord('b'); plain[q + 2] := Ord('c');
+    if k < 4200 then begin plain[q + 3] := k and 255; plain[q + 4] := k shr 8; end
+    else begin plain[q + 3] := 0; plain[q + 4] := 0; end;
+    Inc(q, 5);
+  end;
+  e.plain := plain;
+  nT := 4200 * 5 + 1;
+  SetLength(e.tokLen, nT); SetLength(e.tokVal, nT);
+  for k := 0 to 4200 * 5 - 1 do begin e.tokLen[k] := 0; e.tokVal[k] := plain[k]; end;
+  e.tokLen[nT - 1] := 5; e.tokVal[nT - 1] := 4200 * 5;
+  SetLength(e.blocks, 1);
+  e.blocks[0] := Default(TDeflateBlock);
+  e.blocks[0].btype := btFixed; e.blocks[0].final := True; e.blocks[0].nTokens := nT;
+  a := Encode(e);
+  if (CheckStream(a, dfRaw, 'crafted: rank escape', kind) <> dsOk) or (kind <> RECIPE_CORR) then begin
+    Fail('rank escape: no kind-3 recipe'); Exit;
+  end;
+  CorrChooseParams(e, prm);
+  FillChar(CorrStat, SizeOf(CorrStat), 0);
+  CorrStatOn := True;
+  try corr := CorrEncode(e, prm); finally CorrStatOn := False; end;
+  if CorrStat[6] < 15 then Fail(Format('rank escape: the distance cost %.1f bits, not escaped', [CorrStat[6]]));
 end;
 
 function LenSymOf(l: Integer): Integer;
@@ -870,9 +949,10 @@ begin
     end;
   end;
   CraftedFlows;
+  if maxKindArg >= RECIPE_ZLIB_FLOW then TooFarFlows;
   LoopSwitchFlows;
   DamagedFlows;
-  if flips and (maxKindArg >= RECIPE_CORR) then FieldFlips;
+  if flips and (maxKindArg >= RECIPE_CORR) then begin FieldFlips; RankEscape; end;
 end;
 
 var

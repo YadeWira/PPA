@@ -71,10 +71,11 @@ same_recipes "$OUT/pf_c.txt" "$OUT/pf_pas.txt"
 PF_CORPUS=${PREFLATE_CORPUS-/mnt/IA_LAB/agentes/ppa/preflate/corpus}
 if [ -d "$PF_CORPUS/png-zlib" ]; then
   # the regression set: all 392 streams kind 0; zlib alone does not write the
-  # 24 others (ipad.png is zlib with a full flush: kind 1; the 23 others
-  # kind 3, the same from the C and the Pascal code)
+  # 24 others (ipad.png is zlib with a full flush, the 6 spider images zlib
+  # built with TOO_FAR 32767: kind 1; the 17 others kind 3, the same from
+  # the C and the Pascal code)
   "$OUT/test_preflate" "$PF_CORPUS/png-zlib" 392 -all0 | tail -1
-  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 1 -all013 -min3 23 -diffc | tail -1
+  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 7 -all013 -min3 17 -diffc | tail -1
 fi
 if [ -d "$PF_CORPUS/hostile" ]; then
   # kind 3 (M3a): every stream that inflates has a recipe; the others are

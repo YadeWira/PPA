@@ -29,7 +29,7 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
 | 0 | `RECIPE_ZLIB` | zlib's parameters: level, strategy, memLevel, windowBits | 0.1.0 (codec v2) |
 | 1 | `RECIPE_ZLIB_FLOW` | kind 0's parameters at the start, and a **flow**: the flushes and parameter changes zlib made along the stream, and which zlib made them | M2 (not written by PPA yet) |
 | 2 | | reserved: a known non-zlib encoder (design §(a) 7) | |
-| 3 | `RECIPE_CORR` | a zlib-like predictor (`ppacorr`) and the **corrections** that make what it predicts the stream: any stream `ppadeflate` reads | M3a (not written by PPA yet) |
+| 3 | `RECIPE_CORR` | a zlib-like predictor (`ppacorr`) and the **corrections** that make what it predicts the stream: any stream `ppadeflate` reads | M3a, M3b (not written by PPA yet) |
 | 4 | | reserved: cost-guided predictor plus corrections | |
 
 Every kind also carries the **framing**, as layer 2a records it: bare
@@ -47,6 +47,7 @@ In memory (`ppazlib.TZlibFlow`):
 | `variant` | 0 `ZV_NEW` | zlib 1.2.5.3 to 1.3.x |
 | | 1 `ZV_125` | zlib 1.2.3.4 to 1.2.5.2 |
 | | 2 `ZV_123` | zlib up to 1.2.3.3 |
+| | + 4 `ZV_NO_TOO_FAR` | (M3b) that zlib built with `TOO_FAR` = 32767: `deflate_slow` keeps a match of 3 bytes however far (pngcrush builds its zlib so; so did whatever wrote the corpus's spider images) |
 | `events[]` | in order of `pos`, then as made | each: `pos`, `kind`, and for `ZE_PARAMS` the new `level` and `strategy` |
 
 An event at `pos` is what deflate was asked for once it had been given the
@@ -81,6 +82,15 @@ before it (zlib changes the level, or an old zlib the strategy, of the same
 loop) takes effect at the first top of the loop at or after `pos`; zlib's
 is the first past its input less `MIN_LOOKAHEAD`.
 
+**Finding the variant flag.** zlib's `deflate_slow` drops a match of 3
+bytes more than `TOO_FAR` (4096) back. pngcrush 1.8.13 compiles its zlib
+1.2.11 with `-DTOO_FAR=32767` (its Makefile), so its `-m 1` and `-m 7`
+streams part from zlib's at the first such match: that was M2's open
+question. When a candidate of the slow loop parts from the stream at a
+match of 3 further than 4096, the search tries it again with the flag
+(and mending may toggle it too). Kind 0 cannot say this (codec stream
+version 2's layout has no field for it), so those streams are kind 1.
+
 Not emulated: level 0 (`deflate_stored`), the Huffman-only and RLE
 strategies of zlib before 1.2.5 (they ran inside `deflate_fast` and
 `deflate_slow`), and the stored-block choice of `Z_FIXED` before 1.2.12.
@@ -91,77 +101,140 @@ takes each stretch's input at once.
 ### Kind 3: a predictor and its corrections
 
 `pas/ppacorr.pas` (and its hot loops in `pas/ppacorrc.c`). `FindRecipe`
-tries it after kinds 0 and 1, so it never replaces them; it takes every
-stream `ppadeflate.Decode` reads, and `Analyze` verifies its rebuild like
-the others'.
+tries it after kinds 0 and 1, so it never replaces them (a zlib stream is
+never larger as kind 3 than as kind 0 or 1: it is not kind 3); it takes
+every stream `ppadeflate.Decode` reads, and `Analyze` verifies its rebuild
+like the others'.
 
-**The predictor** (`TPredParams`, frozen by `PRED_VERSION` = 1): hash
-chains of zlib's hash over 3 bytes (`hbits` 8..16 bits) on every position;
-zlib's `longest_match` on them (`chain` 1..4096 candidates, `nice`, `good`:
+**The predictor** (`TPredParams`, frozen by `PRED_VERSION` = 2). Three
+chains over every position: zlib's hash over 3 bytes (`hbits` 8..16 bits,
+the predictor's own search), and two of the corrections' own, a 16-bit
+multiplicative hash of 3 bytes (`Hash3x`) and one of 4 bytes (`Hash4`),
+each defined on the bytes' values, the first lowest, the same on every
+machine. With `flags` bit 4 (`PF_LONGEST`) clear, the search is zlib's
+`longest_match` on its chain (`chain` 1..4096 candidates, `nice`, `good`:
 the chain / 4 when the match to beat is that long; candidates up to
-`maxDist` back, position 0 never one); with `lazy` > 0 deflate_slow's lazy
-match one position ahead (up to `lazy`) and its filters (`flags`: 1 a match
-of 5 or fewer dropped, `Z_FILTERED`; 2 a match of 3 further than 4096
-dropped, `TOO_FAR`); with `lazy` = 0 deflate_fast's greedy match. `symEnd`
-(0: none) is the symbol count that ends a block. It runs on the stream's
-own parse (a *forced parse*): each token is predicted from the bytes and
-the position alone, then the real one is taken and the next is predicted
-where it ends; a lazy match looked up for the next position is used there
-only if the real token was the literal the predictor expected.
+`maxDist` back, position 0 never one). With `PF_LONGEST`, the search is
+the **longest match** (below), the guess for an optimal parser. With
+`lazy` > 0, deflate_slow's lazy match one position ahead (up to `lazy`)
+and its filters (`flags` 1: a match of 5 or fewer dropped, `Z_FILTERED`;
+2: a match of 3 further than 4096 dropped, `TOO_FAR`); with `lazy` = 0,
+deflate_fast's greedy match. `symEnd` (0: none) is the symbol count that
+ends a block. `tree` (0..4) names the code lengths' builder (below). The
+predictor runs on the stream's own parse (a *forced parse*): each token
+is predicted from the bytes and the position alone, then the real one is
+taken and the next is predicted where it ends; a lazy match looked up for
+the next position is used there only if the real token was the literal
+the predictor expected.
+
+**The longest match** at q (`LongestPas`, `pc_longest`): the nearest
+position whose 3 bytes are q's, on the `Hash3x` chain (256 positions at
+most); if q has 4 bytes left, longer matches on the `Hash4` chain (below
+that one when it matched 4 or more), up to 4096 positions (256 for a
+context, below); up to 32768 back, position 0 included; at most 258 and
+the bytes left. Its distance is the nearest of that length. **Runs of one
+byte are skipped** where they cannot hold a better candidate (each skip
+one hop): when q starts with rq bytes of one byte (4 <= rq < 258), a
+position of a run of that byte with rc <> rq of them left matches min(rc,
+rq) bytes, so the walk goes to that run's position with rq left (rc < rq)
+or below the run (rc > rq), noting what the run gave.
+
+**The rank walk** (`RankPas`, `pc_rank`): the candidates at least len
+long, newest first, on the `Hash3x` chain, up to 32768 back, position 0
+included, 4096 positions at most, with the same skips (3 <= rq < len): the
+skipped positions match fewer than len bytes, so a rank is the same with
+or without them. Without the skips, an image's runs used up the 4096
+positions and most distances of zopfli and oxipng were escaped; with them,
+nearly every distance in the corpus has rank 0.
 
 **The corrections**, in the order the driver (`Drive`, one routine for
-both directions) codes them, each a binary decision or a small number with
-its own adaptive model (P(1) in 22 bits, rate 1/(n+1.5) down to 1/256.5,
-starting at 1/2; ppaarith's arithmetic coder), against a guess:
+both directions) codes them, each a binary decision or a small number
+against a guess. Every bit is coded with ppaarith's arithmetic coder by
+an adaptive model (P(1) in 22 bits, rate 1/(n+1.5) down to 1/128.5,
+starting at 1/2); a token's main decisions **mix** several such models,
+each by its own context: their stretched probabilities summed with
+weights of their own (16.16, starting at 30000/65536, and a bias) and
+squashed back, the weights moved by stretch x error >> 14 after each bit.
+All integer, the same on every machine.
 
 | field (`TDeflateBlock`, tokens) | guess | coded |
 |---|---|---|
 | stored or not | | a bit (context: the previous block's type) |
 | stored `storedLen` | what is left, at most 65535 | a bit, or 16 bits (at most what is left) |
 | stored `pad` | 0 | a bit, or 7 bits (must fit the pad's bits where it is written) |
-| where a block ends | `symEnd`; the previous block's count | a bit before each token (contexts: first token, at `symEnd`, at the previous count, else); none once the bytes are used up |
-| a token | the predictor's | a bit (context: the predicted length's bucket, the last token missed) |
-| a missed token | | literal or not (when a match was predicted); the length: as predicted, or 8 bits; the distance: its **rank** among the candidates at least that long, newest first, on the whole chain (up to 32768 back, position 0 included, 4096 candidates at most), as a bucket (unary) and its low bits, or the escape and 15 bits (the decoder checks the match against the bytes) |
+| where a block ends | `symEnd`; the previous block's count | a bit before each token (contexts: first token, at `symEnd`, at the previous count, else; and the count's bit length); none once the bytes are used up |
+| a token | the predictor's | a bit, **mixed** from: the predicted length's bucket and whether the last token missed; the last 4 tokens' hits; the longest match's bucket, the lazy one's (or the longest match one position on, 256 positions, when no lazy one was looked for) and whether a match was predicted; the last token's length; the byte; the longest match's cost against its bytes as literals in the previous block's code lengths |
+| a missed token, literal or match | (when a match was predicted) | a bit, mixed from the same kind of contexts |
+| a missed match's length | the longest match there (or the predicted length if longer) | a bit "the longest", mixed (case: predicted the longest, shorter, a literal, nothing; the bucket; hits; lazy; the cost); else "the predicted" (when shorter); else shorter or longer (mixed); shorter: the length symbol, steps down from the reference's (unary), then its top length (a bit: optimal parsers take the length with the fewest extra bits) or how far below (adaptive bits); longer or no reference: an exponent (unary) and its low bits, adaptive |
+| a match's distance | rank 0 | its rank among the candidates at least that long (the rank walk) as a bucket (unary, by length) and its low bits (adaptive); or the escape and the distance as an exponent and low bits (the decoder checks the match against the bytes) |
 | 258 written as symbol 284 (`LEN_258_AS_284`) | not | a bit after every match of 258 |
 | fixed or dynamic | zlib's choice (fixed when no bigger) | a bit |
-| `litLen`, `distLen` | zlib's trees (`ppazlib.ZlibTrees`) over the block's own symbol counts | a bit for all; else each symbol: as guessed, or 4 bits (context: the guess, whether the symbol is used) |
+| `litLen`, `distLen` | the builder's lengths over the block's own symbol counts | a bit for all; else each symbol: as guessed, or 4 bits (context: the guess, whether the symbol is used) |
 | `hlit`, `hdist` | the least the lengths need | a bit, or 5 bits (at least that, at most 286 / 30) |
-| `clenSeq` (16, 17, 18) | zlib's `send_tree` on each tree; on both at once | which (2 bits at most), or each step: literal or which run, and its count (the longest it can be, or its extra bits); every choice checked against the lengths |
-| `clen[19]` | zlib's `build_bl_tree` over the symbols used | a bit for all; else each: as guessed, or 3 bits |
+| `clenSeq` (16, 17, 18) | zlib's `send_tree` on each tree; on both at once; libdeflate's; miniz's; zopfli's (the smallest of its 8) | which (a bit each, context: the previous block's; a guess the same as an earlier one is skipped), or each step: literal or which run, and its count (the longest it can be, or its extra bits); every choice checked against the lengths |
+| `clen[19]` | the builder's code-length code over the symbols used | a bit for all; else each: as guessed, or 3 bits |
 | `hclen` | the least `clen` needs (at least 4) | a bit, or 4 bits (at least that) |
 | `final` | | a bit, only where the bytes are used up |
 
+**The code lengths' builders** (`tree`), each over the block's symbol
+counts (end of block counted once), and its code-length code by the same:
+
+| `tree` | builder | exact on |
+|---:|---|---|
+| 0 | zlib's `build_tree` (`ppazlib.ZlibTrees`, `ZlibBlTree`) | zlib, zlib-ng, GNU gzip |
+| 1 | libdeflate's: symbols by count then value, two-queue Huffman, a too deep node takes the deepest length still free (14 bits for literals and lengths, 15 for distances, 7 for the code-length code), the lengths in sorted order; fewer than 2 used: symbol 0 and the other get 1 | libdeflate, oxipng (libdeflate), miniz (the same lengths) |
+| 2 | miniz's: Moffat and Katajainen's in-place lengths (16-bit sums), `tdefl_huffman_enforce_max_code_size`; one used: it gets 1 | miniz 1.x and 3.x |
+| 3 | optimal lengths of at most 15 (7) bits by package-merge (of equal weights, a package first), given in sorted order; two distance codes at least (zopfli's patch) | |
+| 4 | zopfli's: 3, and the same over the counts evened out for runs (`OptimizeHuffmanForRle`), the one whose tree and symbols take fewer bits (its 8 run-length codings, the smallest) | zopfli, zopflipng, oxipng `-Z` |
+
+7-Zip's trees are none of these (about one length in ten differs from
+libdeflate's, the nearest; open).
+
 Caps, checked as values are decoded: a length or a stored block no longer
-than the bytes left, a distance back into the bytes, at most 2 x plain +
-4096 blocks, rank walks of 4096 candidates, header fields as above, the
-pad bits and `endPad` within the bits they have. The rebuild writes each
-block as it comes (`ppadeflate.TDeflWriter`), holding one block's tokens.
+than the bytes left, a distance back into the bytes and within 32768, at
+most 2 x plain + 4096 blocks, rank walks of 4096 positions, the longest
+match's walks of 256 and 4096, run lengths of 259 at most, exponents of 9
+(lengths) and 14 (distances), header fields as above, the pad bits and
+`endPad` within the bits they have. The rebuild writes each block as it
+comes (`ppadeflate.TDeflWriter`), holding one block's tokens.
 
 **The parameters** are chosen by coded size, never from the header
-(FLEVEL): every zlib level's (deflate_fast for 1-3, the filtered strategy
-for 4-9) and two of no limits (chain 4096, nice and lazy 258, window
-32768, lazy and greedy), on the first 8192 tokens (or 128 KB of bytes);
-then the best one's hash bits (12..16), window and `TOO_FAR`. `symEnd` is
-the commonest token count of the blocks before the last (if two have it).
+(FLEVEL). First what the stream shows of its encoder, on its first 64K
+tokens (`Estimate`): the hops each match's distance is down zlib's chain
+(hash of 15 bits), the 99th percentile + 1 as a chain; whether literals
+stand where a match of 4 or more was there with a longer one next (a lazy
+encoder) and how long those were (lazy must be longer). The tree builder
+is the one whose lengths (and code-length codes) differ the least from the
+stream's on its first 256 dynamic blocks (`ChooseTree`, zlib's of as
+few). Then the candidates: every zlib level's (deflate_fast for 1-3, the
+filtered strategy for 4-9); the chain the stream shows, lazy or greedy as
+it shows; two of no limits (chain 4096, nice and lazy 258, window 32768,
+lazy and greedy); the longest match, greedy and lazy. All are measured on
+the first 8192 tokens (or 128 KB of bytes), then the best one's variants
+(`TOO_FAR`; for zlib's search, the hash bits 12..16, the window, nice; lazy
+16 and 258); the 3 cheapest of all on the first 64K tokens (or 1 MB) when
+the stream is longer. `symEnd` is the commonest token count of the blocks
+before the last (if two have it).
 
-### RecipeBytes (format 1, provisional)
+### RecipeBytes (format 2, provisional)
 
 All integers are bytes or varints (7 bits a byte, low first, the high bit
 set on all but the last).
 
 ```
-byte    format              RECIPE_FORMAT = 1
+byte    format              RECIPE_FORMAT = 2
 byte    kind                0, 1 or 3
 kind 3: everything below it instead:
-  byte    version           PRED_VERSION = 1
+  byte    version           PRED_VERSION = 2
   varint  chain             1..4096
   varint  nice              3..258
   varint  lazy              0, 3..258
   varint  good              3..258
   byte    hbits             8..16
   varint  maxDist           1..32768
-  byte    flags             0..3
+  byte    flags             0..7
   varint  symEnd            0..2^20
+  byte    tree              0..4
   framing (below)
   varint  corrections' length   at most the bytes left
   bytes   corrections
@@ -171,7 +244,7 @@ byte    strategy            0..4
 byte    memLevel            1..9
 byte    windowBits          8..15
 kind 1:
-  byte    variant           0..2
+  byte    variant           0..2, or 4..6 (+ ZV_NO_TOO_FAR)
   varint  events            at most 2 x plain + 2, and (bytes left) / 2;
                             at most 4 at one position
   per event:
@@ -216,14 +289,17 @@ flush, the old versions' second block. So:
   variant number or a new format byte. The old code path is kept, and
   every stream already written still reads.
 - New variants and new event kinds only add values a reader refuses today
-  (`ReadRecipe` refuses a variant above `ZV_LAST` and an event kind above
-  5), so an old PPA stops cleanly on a newer recipe.
+  (`ReadRecipe` refuses a variant whose version is above `ZV_LAST` or with
+  a flag other than `ZV_NO_TOO_FAR`, and an event kind above 5), so an old
+  PPA stops cleanly on a newer recipe.
 - Golden vectors (recipes and the streams they give) are committed per
   version and checked by the suite, C and Pascal, 32 and 64 bits, before
   M4 freezes format 1.
 
-Before M4 nothing is published, and format 1 may still change; when it
-does, its byte goes up.
+Before M4 nothing is published, and the format may still change; when it
+does, its byte goes up. M3b did so: format 2 (kind 3's `tree` byte; the
+predictor and its models are `PRED_VERSION` 2, and kind 1's variant may
+carry `ZV_NO_TOO_FAR`). A format 1 recipe is refused.
 
 ## Finding a flow (`FindZlibFlow`)
 
@@ -340,6 +416,65 @@ parameters, framing and length besides the corrections).
   on non-zlib streams).
 - Memory: the rebuild holds the bytes, the stream being written and one
   block's tokens; peak RSS of a whole `png-synth` slice run under 110 MB.
+
+## Status (M3b, 14/11/2026): kind 3 made small
+
+Measured as M3a (`test_preflate -all013 -diffc -tsv`, release build;
+`-diffc` makes each kind-3 recipe again with the other code, C or Pascal,
+and requires the same recipe and rebuild: all the same), against preflate
+0.3.4's diff (M0). Recipe bytes are whole `RecipeBytes` (kind 3: about 20
+bytes besides the corrections). Every stream with a recipe rebuilds; peak
+RSS of a whole `png-synth` slice under 103 MB.
+
+| set | streams | kind 0 / 1 / 3 | recipes, % of deflate | M3a | preflate | kind-3 streams only: ours / preflate |
+|---|---:|---:|---:|---:|---:|---:|
+| `png-nonzlib` | 24 | 0 / 7 / 17 | 6.89% | 13.86% | 11.23% | 7.96% / 12.68% |
+| `png-synth` (all 878) | 878 | 136 / 336 / 406 | 2.17% | 4.02% | 9.43% | 4.66% / 11.17% |
+| `raw` | 101 | 10 / 7 / 84 | 1.50% | 2.03% | 3.22% | 1.88% / 4.03% |
+| `pda` | 742 | 335 / 260 / 147 | 0.20% | 0.23% | 0.50% | 1.88% / 3.40% |
+| `hostile` (15 inflate, 3 do not) | 18 | 7 / 1 / 7 | 0.06% | 0.06% | 0.10% | |
+
+**Every encoder group is at or below preflate's diff**, in every set:
+`png-synth` (e.g. oxipng 4.6-5.6% against 8.2-11.9%, zopflipng 5.4% /
+8.3%, zopfli-15 9.1% / 12.2%, 7-Zip mx9 4.7% / 9.1%, libdeflate 12 5.6% /
+9.8%, zlib-ng 9 0.46% / 2.46%, zlib-ng 1 14.6% / 33.4%, miniz 0.8-1.7%),
+`raw` (7-Zip mx9 5.2% / 10.8%, zopfli 2.45% / 3.9%, every libdeflate level,
+GNU gzip 9 390 B / 393 B), `png-nonzlib` (oxipng 8.2% / 13.2%, miniz 6.4% /
+9.7%, spider 78 B / 2,616 B), `pda` (zlib 0.04% / 0.23%, not zlib 1.73% /
+3.17%). In `hostile` the total is below (440 B / 678 B); its 1 to 30 byte
+streams cost a recipe's fixed ~20 bytes each. Per group: `compare_recipes.py`
+on the TSVs in `/mnt/IA_LAB/agentes/ppa/preflate/m3/m3b/res/`.
+
+- **zlib streams** are never kind 3 (kind 3 is tried only when kinds 0 and 1
+  fail), so never larger than kinds 0 and 1.
+- **pngcrush `-m1` / `-m7`** (M2's open question): zlib 1.2.11 built with
+  `TOO_FAR` = 32767; all 32 and 31 now kind 0 or 1 (23 each kind 1 with
+  `ZV_NO_TOO_FAR`), 398 B and 387 B in all. The 6 spider images of
+  `png-nonzlib` are the same (kind 1, 13 bytes each).
+- **MS Office 2013+** in `pda` (creators version 15, 16, 2013 on, 365): 108
+  streams, all rebuild (19 kind 0, 35 kind 1, 54 kind 3), 7,520 B of
+  recipes against preflate's 10,262 B.
+- What it took, on a dev set of 39 streams (corrections only; preflate
+  325,772 B): M3a 405,652 B; the rank walk's skips over runs and context
+  mixing 280,419 B (most escapes had been the 4096-position cap in runs);
+  the longest match as the length's reference, a shorter length by its
+  symbol, the cost and one-on contexts, parameters by coded size with the
+  longest-match predictor 189,223 B; the tree builders 180,673 B (code
+  lengths' corrections from 9.1 KB to 1.2 KB: exact on libdeflate, oxipng,
+  miniz and zopfli streams); then the mixer's rate and the counters' limit
+  tuned (-3.7% on a subset).
+- Speed, release build, one thread, kind 3 alone (parameter search /
+  corrections / rebuild), C and Pascal: oxipng `s00` (6.9 MB of plain) 1.3 /
+  3.4 / 3.3 s and 1.9 / 4.2 / 4.2 s (rebuild 2.1 MB/s in C); libdeflate 6
+  `s00` 0.77 / 0.84 / 0.79 s (8.7 MB/s) and 1.1 / 1.1 / 1.0 s; zopflipng
+  `s00` 1.3 / 2.5 / 2.5 s and 1.9 / 3.2 / 3.2 s; `raw` text by libdeflate 12
+  (0.78 MB) 0.25 / 0.11 / 0.10 s. The whole of `png-synth` runs at 1.5 MB/s
+  of analysis (kinds 0, 1, 3, both codes) and 9.5 MB/s of rebuild.
+- Open: 7-Zip's trees (about one length in ten differs from the nearest
+  builder); the parameter search's cost on small images with long runs
+  (zlib's longest_match emulation walks its chain through them: 2 s on a
+  256 KB miniz image) and no `maxWork` yet; the slow walks are bounded but
+  not cheap; golden vectors per format before M4.
 
 ## Credits
 

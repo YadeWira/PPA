@@ -82,6 +82,11 @@ const
   ZV_125 = 1;        { 1.2.3.4 to 1.2.5.2: empty blocks at flushes, no insert after them, Z_PARTIAL_FLUSH's second block }
   ZV_123 = 2;        { up to 1.2.3.3: as ZV_125, and Z_FULL_FLUSH keeps the positions }
   ZV_LAST = ZV_123;
+  { a flag of the variant: zlib built with TOO_FAR = 32767 (deflate_slow
+    keeps a match of 3 bytes however far), as pngcrush builds it; the
+    version is the variant's low bits (ZV_VERSION) }
+  ZV_NO_TOO_FAR = 4;
+  ZV_VERSION = 3;
   { the loops deflate picks from the level and strategy }
   FN_HUFF = 0; FN_RLE = 1; FN_FAST = 2; FN_SLOW = 3;
 
@@ -94,7 +99,7 @@ type
 
   { the flushes and parameter changes zlib made along the stream }
   TZlibFlow = record
-    variant: Byte;                    { ZV_NEW..ZV_LAST }
+    variant: Byte;                    { ZV_NEW..ZV_LAST, or one of them + ZV_NO_TOO_FAR }
     events: array of TZlibEvent;      { by pos, in the order they were made }
   end;
 
@@ -204,6 +209,7 @@ type
     key1: SizeInt;    { d4's key: 4 bytes, or 6 for deflate_slow's filtered strategy }
     lim: SizeInt;     { the lookahead ends here (a flush's position, or n) }
     lo: SizeInt;      { no match starts at or before it (Z_FULL_FLUSH: the hash forgot it) }
+    tooFar: SizeInt;  { deflate_slow drops a match of 3 further than this (TOO_FAR) }
   end;
 
 const
@@ -482,7 +488,7 @@ function ZlibFlowValid(const flow: TZlibFlow; const prm: TZlibParams; plainLen: 
 var k, same: SizeInt; lv, st: Integer; e: TZlibEvent;
 begin
   Result := False;
-  if (flow.variant > ZV_LAST) or (plainLen < 0) then Exit;
+  if ((flow.variant and not ZV_NO_TOO_FAR) > ZV_LAST) or (plainLen < 0) then Exit;
   if Length(flow.events) > 2 * Int64(plainLen) + 2 then Exit;
   lv := prm.level; st := prm.strategy;
   same := 0;
@@ -588,6 +594,7 @@ var
   lim, stopAt, org, lo, insert: SizeInt;
   needFill: Boolean;
   variant: Integer;
+  tooFar: SizeInt;
   trackBits: Boolean;
   bitPos: Int64;
   lastEob: Integer;
@@ -900,7 +907,7 @@ var
       if (hashHead > lo) and (prevLength < maxLazy) and (strstart - hashHead <= maxDist) then begin
         matchLength := LongestMatch(hashHead);
         if (matchLength <= 5) and ((cur.strategy = Z_FILTERED) or
-           ((matchLength = MIN_MATCH) and (strstart - matchStart > TOO_FAR))) then
+           ((matchLength = MIN_MATCH) and (strstart - matchStart > tooFar))) then
           matchLength := MIN_MATCH - 1;
       end;
       if (prevLength >= MIN_MATCH) and (matchLength <= prevLength) then begin
@@ -989,7 +996,7 @@ var
     st.insH := insH; st.nTok := nTok; st.symNext := symNext;
     st.goodMatch := goodMatch; st.maxLazy := maxLazy; st.niceMatch := niceMatch; st.maxChain := maxChain;
     st.filtered := Ord(cur.strategy = Z_FILTERED); st.fast := Ord(fast);
-    st.lim := lim; st.lo := lo; st.stopAt := stopAt; st.pending := 0;
+    st.lim := lim; st.lo := lo; st.stopAt := stopAt; st.pending := 0; st.tooFar := tooFar;
     repeat
       st.checkNow := Ord(checkNow); st.stop := Ord(stop);
       r := ppaz_deflate(st);
@@ -1088,7 +1095,7 @@ var
     st.lengthCode := @LengthCode[0]; st.distCode := @DistCode[0];
     st.skipBits := skipBits;
     st.key1 := key;
-    st.lim := n;
+    st.lim := n; st.tooFar := tooFar;
     cReady := True;
   end;
 
@@ -1158,7 +1165,7 @@ var
         st.symNext := 0; st.symEnd := High(SizeInt);
         st.lengthCode := @LengthCode[0]; st.distCode := @DistCode[0];
         st.stopAt := stopAt;
-        st.lim := n; st.lo := 0;
+        st.lim := n; st.lo := 0; st.tooFar := tooFar;
         { its start is where it meets the segment before it }
         syncPos[0] := a; syncTok[0] := 0;
         st.syncPos := @syncPos[1]; st.syncTok := @syncTok[1]; st.maxSync := maxSync - 1;
@@ -1395,7 +1402,8 @@ begin
   hashSize := 1 shl hashBits; hashMask := hashSize - 1;
   hashShift := (hashBits + MIN_MATCH - 1) div MIN_MATCH;
   cur := prm;
-  variant := flow.variant;
+  variant := flow.variant and ZV_VERSION;
+  if (flow.variant and ZV_NO_TOO_FAR) <> 0 then tooFar := 32767 else tooFar := TOO_FAR;
   trackBits := (Length(flow.events) > 0) and (variant <> ZV_NEW);
   bitPos := 0; lastEob := 8;
   lim := n; stopAt := 0; org := 0; lo := 0; insert := 0; needFill := False;

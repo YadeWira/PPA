@@ -199,7 +199,6 @@ static inline __attribute__((always_inline)) intptr_t longest_skip(const uint8_t
    TZDeflate is this struct, field for field. */
 enum { ZD_DONE = 0, ZD_FLUSH = 1, ZD_STOP = 2, ZD_SEGEND = 3 };
 #define MIN_MATCH 3
-#define TOO_FAR 4096
 #define FILTERED_MIN 5   /* deflate_slow's filtered strategy drops a match this long or shorter */
 
 typedef struct {
@@ -236,6 +235,7 @@ typedef struct {
      cut to it); no match starts at or before lo (Z_FULL_FLUSH forgot
      them; 0: NIL) */
   intptr_t lim, lo;
+  intptr_t tooFar;               /* deflate_slow drops a match of 3 further than this (TOO_FAR, or pngcrush's 32767) */
 } zdeflate_t;
 
 static inline uint64_t zd_load8(const uint8_t *p) { uint64_t v; __builtin_memcpy(&v, p, 8); return v; }
@@ -395,7 +395,7 @@ static inline __attribute__((always_inline)) intptr_t zd_run(zdeflate_t *s, cons
     s->matchLength = MIN_MATCH - 1;
     if (hashHead > s->lo && s->prevLength < s->maxLazy && s->strstart - hashHead <= s->maxDist) {
       s->matchLength = zd_longest(s, hashHead, fast, k1, h16);
-      if (s->matchLength <= FILTERED_MIN && (s->filtered || (s->matchLength == MIN_MATCH && s->strstart - s->matchStart > TOO_FAR)))
+      if (s->matchLength <= FILTERED_MIN && (s->filtered || (s->matchLength == MIN_MATCH && s->strstart - s->matchStart > s->tooFar)))
         s->matchLength = MIN_MATCH - 1;
     }
     if (s->prevLength >= MIN_MATCH && s->matchLength <= s->prevLength) {

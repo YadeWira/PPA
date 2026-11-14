@@ -47,6 +47,22 @@ Steinke (Apache-2.0; studied as 0.3.4, from precomp 0.4.7's
 contrib/preflate). No code of preflate is in PPA; tools/preflate uses a
 preflate binary built outside the repository only as a yardstick.
 
+Kind 3's guesses of a block's code lengths and of their run-length coding
+(pas/ppacorr.pas, "tree builders") reproduce what other encoders do, each
+written in our own code from how that encoder works, to give the same
+lengths:
+  - libdeflate (Eric Biggers, MIT): deflate_make_huffman_code (its sort, its
+    two-queue tree, its length limit) and deflate_compute_precode_items;
+  - miniz (Rich Geldreich and contributors, MIT / Unlicense):
+    tdefl_optimize_huffman_table (with Alistair Moffat and Jyrki
+    Katajainen's in-place code lengths) and tdefl_start_dynamic_block's
+    run-length coding;
+  - zopfli (Copyright 2011 Google Inc., Apache License 2.0): length-limited
+    lengths by package-merge (our own, classic, package-merge), its
+    PatchDistanceCodesForBuggyDecoders, its 8 run-length codings of
+    EncodeTree, and OptimizeHuffmanForRle, whose steps EvenForRle follows
+    one by one (Apache License 2.0: http://www.apache.org/licenses/LICENSE-2.0).
+
 tools/zpaql/zpaqlc.py, zpaqlvm.py and test_zpaqlc.py are PJA's
 (https://github.com/YadeWira/PJA, MIT, the same author) at its commit
 114c395, unmodified and pinned: the zpaq-std codec's ZPAQL decoder

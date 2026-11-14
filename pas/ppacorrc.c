@@ -21,6 +21,10 @@ typedef struct {
      counts each hash's insertions) and the chains of the same 4 bytes'
      hash (head4: 2^16, link4: by position and PREV_MASK) */
   int32_t *ord; int32_t *hcnt; int32_t *head4; int32_t *link4;
+  /* where each position's run of one byte starts (by position and PREV_MASK) */
+  int32_t *runs;
+  /* the rank walk's and the longest match's own chains of 3 bytes (hash3x) */
+  int32_t *head3; int32_t *link3;
 } pcstate_t;
 
 #define MIN_MATCH 3
@@ -33,8 +37,18 @@ static inline sz hash3(const pcstate_t *s, sz q) {
   return (((((sz)p[0] << s->hshift) ^ p[1]) << s->hshift) ^ p[2]) & s->hmask;
 }
 
+/* ppacorr.pas's Hash4: the 4 bytes' value, the first lowest (whatever
+   the machine's order), times 2654435761, the top 16 of the low 32 bits */
 static inline sz hash4(const pcstate_t *s, sz q) {
-  uint32_t v; __builtin_memcpy(&v, s->plain + q, 4);
+  const uint8_t *p = s->plain + q;
+  uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+  return (sz)((v * 2654435761u) >> 16);
+}
+
+/* ppacorr.pas's Hash3x */
+static inline sz hash3x(const pcstate_t *s, sz q) {
+  const uint8_t *p = s->plain + q;
+  uint32_t v = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
   return (sz)((v * 2654435761u) >> 16);
 }
 
@@ -45,6 +59,10 @@ static void insert_up_to(pcstate_t *s, sz k) {
     s->prev[i & PREV_MASK] = s->head[h];
     s->head[h] = (int32_t)i;
     s->ord[i & PREV_MASK] = s->hcnt[h]++;
+    h = hash3x(s, i);
+    s->link3[i & PREV_MASK] = s->head3[h];
+    s->head3[h] = (int32_t)i;
+    s->runs[i & PREV_MASK] = (i > 0 && s->plain[i] == s->plain[i - 1]) ? s->runs[(i - 1) & PREV_MASK] : (int32_t)i;
     if (i + 3 < s->n) {
       sz h4 = hash4(s, i);
       s->link4[i & PREV_MASK] = s->head4[h4];
@@ -52,6 +70,12 @@ static void insert_up_to(pcstate_t *s, sz k) {
     }
     s->ins++;
   }
+}
+
+static sz chain3_start(pcstate_t *s, sz q) {
+  if (q < s->ins) return s->link3[q & PREV_MASK];
+  insert_up_to(s, q - 1);
+  return s->head3[hash3x(s, q)];
 }
 
 static sz chain_start(pcstate_t *s, sz q) {
@@ -145,19 +169,112 @@ done:
   return 0;
 }
 
+static inline sz run_from(const uint8_t *pl, sz c, sz cap) {
+  sz r = 1; uint8_t b = pl[c];
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+  uint64_t pat = (uint64_t)b * 0x0101010101010101ull;
+  while (r + 8 <= cap) {
+    uint64_t x; __builtin_memcpy(&x, pl + c + r, 8);
+    if (x != pat) return r + (__builtin_ctzll(x ^ pat) >> 3);
+    r += 8;
+  }
+#endif
+  while (r < cap && pl[c + r] == b) r++;
+  return r;
+}
+
+/* ppacorr.pas's RankPas, with its skips over runs of one byte */
 sz pc_rank(pcstate_t *s, sz q, sz len, sz target, sz wantRank) {
   const uint8_t *pl = s->plain;
-  sz cur, hops = 0, rank = 0;
+  sz cur, hops = 0, rank = 0, rq, rc, rs;
   if (len < MIN_MATCH || q + len > s->n) return -1;
-  cur = chain_start(s, q);
+  cur = chain3_start(s, q);
+  rq = run_from(pl, q, len);
   while (cur >= 0 && q - cur <= WINDOW && hops < s->hops) {
+    if (rq >= MIN_MATCH && rq < len && pl[cur] == pl[q]) {
+      rc = run_from(pl, cur, rq + 1);
+      if (rc >= MIN_MATCH && rc != rq) {
+        hops++;
+        rs = s->runs[cur & PREV_MASK];
+        if (rc < rq && cur - (rq - rc) >= rs) { cur -= rq - rc; continue; }
+        if (q - rs > WINDOW) break;
+        cur = s->link3[rs & PREV_MASK];
+        continue;
+      }
+    }
     if (pl[cur + len - 1] == pl[q + len - 1] && common(pl + cur, pl + q, 0, len) == len) {
       if (wantRank) { if (rank == target) return q - cur; }
       else if (q - cur == target) return rank;
       rank++;
     }
-    cur = s->prev[cur & PREV_MASK];
+    cur = s->link3[cur & PREV_MASK];
     hops++;
   }
   return -1;
+}
+
+/* ppacorr.pas's LongestPas: the nearest 3 bytes the same on the 3-byte
+   chain, then longer matches on the 4-byte chain, with the rank walk's
+   skips over runs */
+#define HOPS3 256
+sz pc_longest(pcstate_t *s, sz q, sz maxHops, sz *dist) {
+  const uint8_t *pl = s->plain;
+  sz cur, hops, best = 0, maxLen, k, rq, rc, rs, lo;
+  *dist = 0;
+  maxLen = s->n - q; if (maxLen > MAX_MATCH) maxLen = MAX_MATCH;
+  if (maxLen < MIN_MATCH) return 0;
+  cur = chain3_start(s, q);
+  hops = 0;
+  while (cur >= 0 && q - cur <= WINDOW && hops < HOPS3) {
+    if (pl[cur] == pl[q] && pl[cur + 1] == pl[q + 1] && pl[cur + 2] == pl[q + 2]) {
+      best = common(pl + cur, pl + q, MIN_MATCH, maxLen);
+      *dist = q - cur;
+      break;
+    }
+    cur = s->link3[cur & PREV_MASK];
+    hops++;
+  }
+  if (maxLen < 4 || best >= maxLen) {
+    if (best >= MIN_MATCH) return best;
+    *dist = 0;
+    return 0;
+  }
+  cur = q < s->ins ? s->link4[q & PREV_MASK] : s->head4[hash4(s, q)];
+  if (best >= 4)
+    while (cur >= q - *dist) cur = s->link4[cur & PREV_MASK];
+  hops = 0;
+  rq = run_from(pl, q, maxLen);
+  while (cur >= 0 && q - cur <= WINDOW && hops < maxHops) {
+    if (rq >= 4 && rq < maxLen && pl[cur] == pl[q]) {
+      rc = run_from(pl, cur, rq + 1);
+      if (rc >= 4 && rc != rq) {
+        hops++;
+        rs = s->runs[cur & PREV_MASK];
+        if (rc > rq) {
+          if (rq > best) { best = rq; *dist = q - cur; }
+        } else if (cur - (rq - rc) >= rs) {
+          cur -= rq - rc; continue;
+        } else {
+          lo = q - WINDOW; if (lo < rs) lo = rs;
+          k = rc + cur - lo;
+          if (k > best) { best = k; *dist = q - lo; }
+        }
+        if (q - rs > WINDOW) break;
+        cur = s->link4[rs & PREV_MASK];
+        continue;
+      }
+    }
+    if (pl[cur + best] == pl[q + best]) {
+      k = common(pl + cur, pl + q, 0, maxLen);
+      if (k > best) {
+        best = k; *dist = q - cur;
+        if (best >= maxLen) break;
+      }
+    }
+    cur = s->link4[cur & PREV_MASK];
+    hops++;
+  }
+  if (best >= MIN_MATCH) return best;
+  *dist = 0;
+  return 0;
 }
