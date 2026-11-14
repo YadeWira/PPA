@@ -84,6 +84,14 @@ static sz chain_start(pcstate_t *s, sz q) {
   return s->head[hash3(s, q)];
 }
 
+/* the trailing zero bits of a nonzero 64-bit value, through 32-bit ctz:
+   __builtin_ctzll calls libgcc's __ctzdi2 on 32-bit x86, and the C objects
+   call no library (.github/test.sh checks it with nm) */
+static inline int ctz64(uint64_t v) {
+  const uint32_t lo = (uint32_t)v;
+  return lo ? __builtin_ctz(lo) : 32 + __builtin_ctz((uint32_t)(v >> 32));
+}
+
 /* the length of the common prefix of a and b, at most max (max >= start) */
 static inline sz common(const uint8_t *a, const uint8_t *b, sz start, sz max) {
   sz len = start;
@@ -94,7 +102,7 @@ static inline sz common(const uint8_t *a, const uint8_t *b, sz start, sz max) {
       /* little-endian: the first differing byte is the lowest; elsewhere
          the bytes one by one below */
 #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-      return len + (__builtin_ctzll(x ^ y) >> 3);
+      return len + (ctz64(x ^ y) >> 3);
 #else
       break;
 #endif
@@ -175,7 +183,7 @@ static inline sz run_from(const uint8_t *pl, sz c, sz cap) {
   uint64_t pat = (uint64_t)b * 0x0101010101010101ull;
   while (r + 8 <= cap) {
     uint64_t x; __builtin_memcpy(&x, pl + c + r, 8);
-    if (x != pat) return r + (__builtin_ctzll(x ^ pat) >> 3);
+    if (x != pat) return r + (ctz64(x ^ pat) >> 3);
     r += 8;
   }
 #endif
