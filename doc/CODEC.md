@@ -22,7 +22,7 @@ over a large corpus, is the oracle for the whole project.
 | 1 | `ppapng` | file ↔ chunks + one data stream per image (IDAT, fdAT, JDAT, JDAA) + what is needed to cut them into the same chunks | done |
 | 2a | `ppadeflate` | zlib stream ↔ the bytes it holds + every choice its encoder made (blocks, codes, tokens, pad bits): the same bits back | done |
 | 2b | `ppazlib` | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | in progress: zlib's choices exact |
-| 2 | `ppapreflate` | one deflate stream's API, independent of PNG (for PDA too): stream ↔ its bytes + a recipe (the framing, and how the deflate data is made: kind 0, zlib's parameters), checked bit for bit; the codec keeps each image stream's recipe | kind 0 (zlib's parameters exact), written as stream version 2 writes it |
+| 2 | `ppapreflate` | one deflate stream's API, independent of PNG (for PDA too): stream ↔ its bytes + a recipe (the framing, and how the deflate data is made: kind 0, zlib's parameters; kind 1, and zlib's flushes and parameter changes; `PREFLATE.md`), checked bit for bit; the codec keeps each image stream's recipe | kind 0 (zlib's parameters exact), written as stream version 2 writes it; kind 1 found and rebuilt, not written yet (codec v3) |
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
 | 4 | `ppaarith` | binary arithmetic coder, adaptive bit counters, stretch and squash | done |
 | 5 | `ppastatic`, `ppafast`, `ppamodel` | modelling the pixels (three models, chosen by image; the slow one for all with `--max`), the deflate corrections and the raw bytes | static and fast models; slow one, second version |
@@ -108,6 +108,17 @@ pieces, as libpng feeds it a row at a time, since it decides only with
 zlib's sliding window forgets is always further back than `MAX_DIST`. The
 slide does decide whether a block may still be stored (its start must be in
 the window), which is followed. Level 0 is not there yet.
+
+With flushes and parameter changes in between (`ZlibChoicesFlow`, recipe
+kind 1), it does what deflate does at each: it drains the input it was given
+up to the flush, ends the block, writes the flush's empty block, and inserts
+into the hash the two positions the lookahead did not reach once the next
+input comes (`s->insert`); `Z_FULL_FLUSH` forgets the past; `deflateParams`
+changes the level and strategy, after its own `Z_BLOCK` when the loop
+changes. zlib before 1.2.5.3 flushed differently (an empty block even with
+nothing to end, no insertion, `_tr_align`'s second empty block), and is
+followed too. PREFLATE.md has the details, the recipe's fields and how a
+flow is found.
 
 `test_zlib` looks for the parameters: levels from the header's FLEVEL, the
 window from its CINFO up to 15 (libpng may write a smaller CINFO than it

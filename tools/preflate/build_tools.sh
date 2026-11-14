@@ -38,6 +38,18 @@ fi
 
 echo "== zfl (zlib with flushes and deflateParams), ppastreams, ppa"
 gcc -O2 -o "$B/zfl" "$REPO/tools/preflate/zfl.c" -lz
+# and with old zlibs, whose flushes differ (M2's zflow subset): 1.2.5 and 1.2.3
+for v in 1.2.5:6064e52e513facb0fbb7998c6413406cf253cfb986063d68f4771c2bf7a3f958 \
+         1.2.3:1795c7d067a43174113fdf03447532f373e1c6c57c08d61d9e4e9be5e244b05e; do
+  zv=${v%%:*}
+  if [ ! -x "$B/zfl-$zv" ]; then
+    fetch https://zlib.net/fossils/zlib-$zv.tar.gz zlib-$zv.tar.gz "${v#*:}"
+    rm -rf "$S/zlib-$zv"; tar xzf "$T/dl/zlib-$zv.tar.gz" -C "$S"
+    (cd "$S/zlib-$zv" && gcc -O2 -w -c adler32.c compress.c crc32.c deflate.c trees.c zutil.c inffast.c inflate.c inftrees.c \
+       && ar rcs libzold.a ./*.o)
+    gcc -O2 -I"$S/zlib-$zv" -o "$B/zfl-$zv" "$REPO/tools/preflate/zfl.c" "$S/zlib-$zv/libzold.a"
+  fi
+done
 mkdir -p "$T/fpc/c" "$T/fpc/u"
 sh "$REPO/pas/build_c.sh" "$T/fpc/c" > /dev/null
 for prog in "$REPO/pas/ppacli.pas:ppa" "$REPO/tools/preflate/ppastreams.pas:ppastreams"; do
@@ -88,6 +100,8 @@ echo "== versions"
   printf 'tool\tversion\tsource\n'
   printf 'preflate\t%s\t%s\n' "$("$B/preflate" 2>&1 | head -1)" "$PRECOMP/contrib/preflate"
   printf 'zfl\tzlib %s\tsystem libz\n' "$(python3 -c 'import zlib;print(zlib.ZLIB_RUNTIME_VERSION)')"
+  printf 'zfl-1.2.5\tzlib 1.2.5\tzlib-1.2.5.tar.gz (zlib.net/fossils)\n'
+  printf 'zfl-1.2.3\tzlib 1.2.3\tzlib-1.2.3.tar.gz (zlib.net/fossils)\n'
   printf 'ppa\t%s\t%s\n' "$("$B/ppa" --version | head -1)" "$(git -C "$REPO" rev-parse --short HEAD)"
   printf 'advpng\t%s\tadvancecomp-2.6.tar.gz\n' "$("$B/advpng" --version | head -1)"
   printf 'pngcrush\t%s\tpngcrush-1.8.13.tar.xz\n' "$("$B/pngcrush" -version 2>&1 | grep -m1 pngcrush | sed 's/^ *//')"

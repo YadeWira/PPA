@@ -3,7 +3,7 @@
 subset, each with a MANIFEST.tsv (file, kind, origin, encoder, version,
 settings, bytes, sha256, note).
 
-    python3 tools/preflate/mkcorpus.py png|synth|raw|pda|hostile|all [-j N]
+    python3 tools/preflate/mkcorpus.py png|synth|raw|pda|hostile|zflow|all [-j N]
 
 Needs the tools build_tools.sh makes. Everything is copied: nothing is ever
 written to /mnt/OSR_D3 or to the study folders. Running it again rebuilds a
@@ -566,6 +566,58 @@ def do_hostile():
     print('hostile', write_manifest(out, rows))
 
 
+# ---------------------------------------------------------------- zflow (M2)
+
+ZFLOW_ZLIBS = [('new', 'zfl'), ('1.2.5', 'zfl-1.2.5'), ('1.2.3', 'zfl-1.2.3')]
+
+
+def zflow_scripts(n):
+    """flush and deflateParams scripts on n bytes: (name, level, memLevel, strategy, events)"""
+    ev = lambda upto, step, what: ['%d:%s' % (i, what) for i in range(step, upto, step)]
+    return [
+        ('partial20', 6, 8, 0, ev(2000, 20, 'partial')),        # tiny blocks: _tr_align's second block in old zlibs
+        ('partial97-L1', 1, 8, 0, ev(n, 97, 'partial')),
+        ('partial4k', 6, 8, 0, ev(n, 4096, 'partial')),
+        ('sync8k-L9', 9, 8, 0, ev(n, 8192, 'sync')),
+        ('sync333-L3-ml5', 3, 5, 0, ev(20000, 333, 'sync')),
+        ('full-third', 6, 8, 0, ['%d:full' % (n // 3), '%d:full' % (2 * n // 3)]),
+        ('full-L1-many', 1, 7, 0, ev(n, 10000, 'full')),
+        ('mixed', 6, 8, 0, ['0:sync', '%d:sync' % (n // 5), '%d:partial' % (2 * n // 5), '%d:full' % (3 * n // 5),
+                            '%d:block' % (4 * n // 5)]),
+        ('params6to1', 6, 8, 0, ['%d:params=1,0' % (n // 2)]),
+        ('params9tofilt', 9, 8, 0, ['%d:params=9,1' % (n // 2)]),
+        ('params6to9', 6, 8, 0, ['%d:params=9,0' % (n // 2)]),  # the same loop: no flush
+        ('params1torle', 1, 8, 0, ['%d:params=1,3' % (n // 3)]),
+        ('rle-sync', 6, 8, 3, ev(n, 5000, 'sync')),
+        ('huff-partial', 6, 8, 2, ev(n, 3000, 'partial')),
+        ('block-many', 6, 8, 0, ev(n, 7000, 'block')),
+    ]
+
+
+def do_zflow():
+    """zlib 1.3.1 (zfl), 1.2.5 and 1.2.3 (zfl-1.2.5, zfl-1.2.3: built by build_tools.sh) with flushes and
+    deflateParams on the first 120000 bytes of the raw samples: M2's flows, each zlib's flushes"""
+    out = fresh('zflow'); rows = []
+    src = os.path.join(CORPUS, 'raw', 'plain')
+    for f in ['text', 'exe', 'bmp']:
+        plain = open(os.path.join(src, f + '.bin'), 'rb').read()[:120000]
+        p = os.path.join(out, '.in.' + f); open(p, 'wb').write(plain)
+        for name, lv, ml, st, ev in zflow_scripts(len(plain)):
+            for zv, exe in ZFLOW_ZLIBS:
+                # zlib 1.2.3 has no Z_BLOCK for deflate
+                if zv == '1.2.3' and any(e.endswith(':block') for e in ev): continue
+                raw = subprocess.run([BIN + '/' + exe, p, str(lv), str(ml), '-15', str(st)] + ev,
+                                     check=True, capture_output=True).stdout
+                fn = '%s.%s.%s.raw' % (f, name, zv)
+                open(os.path.join(out, fn), 'wb').write(raw)
+                rows.append(dict(file=fn, kind='raw', origin='plain/%s.bin[:120000]' % f, encoder='zlib (zfl)',
+                                 version='zlib 1.3.1' if zv == 'new' else 'zlib ' + zv,
+                                 settings='L%d ml%d s%d w15 events %s' % (lv, ml, st, ' '.join(ev) if len(ev) <= 4
+                                          else '%s .. (%d)' % (' '.join(ev[:3]), len(ev))), note=''))
+        os.remove(p)
+    print('zflow', write_manifest(out, rows))
+
+
 def main():
     global JOBS
     args = sys.argv[1:]
@@ -573,7 +625,8 @@ def main():
         i = args.index('-j'); JOBS = int(args[i + 1]); del args[i:i + 2]
     versions()
     what = args[0] if args else 'all'
-    for name, f in [('png', do_png), ('synth', do_synth), ('raw', do_raw), ('pda', do_pda), ('hostile', do_hostile)]:
+    for name, f in [('png', do_png), ('synth', do_synth), ('raw', do_raw), ('pda', do_pda), ('hostile', do_hostile),
+                    ('zflow', do_zflow)]:
         if what in (name, 'all'):
             f()
 

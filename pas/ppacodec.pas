@@ -391,7 +391,7 @@ begin
   if not Unfilter(plan.z.plain, info, plan.px) then Exit;
   { a recipe whose rebuild is the stream, bit for bit (checked); one the
     stream version the caller allows can hold }
-  if FindRecipe(a, plan.z, plan.recipe) <> dsOk then Exit;
+  if FindRecipe(a, plan.z, plan.recipe, RECIPE_ZLIB) <> dsOk then Exit;
   if RecipeVersion(plan.recipe) > maxVersion then Exit;
   { a model given takes every image it can (ChooseModel's trials skipped) }
   if (model = MODE_IMAGE) or ((model in [MODE_FAST, MODE_STATIC]) and FastEligible(info)) then
