@@ -328,9 +328,15 @@ static inline __attribute__((always_inline)) intptr_t zd_longest(zdeflate_t *s, 
      it had one of 5. Where the longest is 6 or more it is the same match,
      the first of its length on the chain (a candidate improves on the best
      only with more bytes, wherever the best started); where it is not, the
-     caller drops what it gets, as it dropped zlib's */
+     caller drops what it gets, as it dropped zlib's. Not from a best of 0:
+     zlib's longest_match then also wants the byte before each candidate
+     the same as the byte before the scan (scan_end1 is scan[-1]), and
+     skips a candidate without it however long. deflate_slow starts with a
+     prev_length of 0 right after deflate_fast ended on a match or
+     deflate_rle ran (a flow's change of loop, recipe kind 1); kind 0 never
+     has it */
   intptr_t best0 = s->prevLength;
-  if (s->filtered && !fast && best0 < FILTERED_MIN) best0 = FILTERED_MIN;
+  if (s->filtered && !fast && best0 > 0 && best0 < FILTERED_MIN) best0 = FILTERED_MIN;
   const intptr_t best = longest_skip(s->plain, s->n, s->pos, h16 ? s->d16 : 0, s->wmask, s->strstart,
                                      cur, limit, chain, best0, nice, &s->matchStart, k1);
   return best <= look ? best : look;

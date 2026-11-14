@@ -207,6 +207,52 @@ begin
   if (Length(samples) > 0) and (made = 0) then Fail('no crafted flow was made');
 end;
 
+{ a change of loop after a flush (deflate_fast or deflate_rle, then a
+  filtered deflate_slow: it starts with prev_length 0, where zlib's
+  longest_match wants the byte before each candidate the same as the byte
+  before the scan): the C loop and the Pascal reference must make the
+  same choices, at many places in each sample }
+procedure LoopSwitchFlows;
+var k, v, j, i: Integer; z, ec, ep: TZStream; plain: TBytes; prm: TZlibParams; f: TZlibFlow; n, q, good: SizeInt;
+  was: Boolean; made: Integer;
+begin
+  made := 0;
+  was := UseZlibC;
+  for k := 0 to High(samples) do begin
+    if k >= 4 then Break;
+    if not Parse(samples[k], dfAuto, MAX_PLAIN, z).Ok then Continue;
+    plain := Copy(z.plain, 0, 1 shl 16); n := Length(plain);
+    if n < 2000 then Continue;
+    for v := ZV_NEW to ZV_LAST do
+      for j := 0 to 3 do
+        for i := 1 to 8 do begin
+          q := n * i div 9;
+          prm.memLevel := 8; prm.wbits := 15;
+          f := Default(TZlibFlow); f.variant := v;
+          case j of
+            0: begin prm.level := 1; prm.strategy := Z_DEFAULT_STRATEGY; Ev(f, q, ZE_BLOCK); Ev(f, q, ZE_PARAMS, 9, Z_FILTERED); end;
+            1: begin prm.level := 6; prm.strategy := Z_RLE; Ev(f, q, ZE_SYNC); Ev(f, q, ZE_PARAMS, 6, Z_FILTERED); end;
+            2: begin prm.level := 2; prm.strategy := Z_DEFAULT_STRATEGY; Ev(f, q, ZE_FULL); Ev(f, q, ZE_PARAMS, 8, Z_FILTERED); end;
+            3: begin prm.level := 3; prm.strategy := Z_HUFFMAN_ONLY; Ev(f, q div 2, ZE_PARTIAL); Ev(f, q div 2, ZE_PARAMS, 3, 0);
+                 Ev(f, q, ZE_SYNC); Ev(f, q, ZE_PARAMS, 9, Z_FILTERED); end;
+          end;
+          if not ZlibFlowValid(f, prm, n) then begin Fail(Format('loop switch flow %d not valid', [j])); Continue; end;
+          try
+            UseZlibC := True; ZlibChoicesFlow(plain, prm, f, nil, ec, good);
+            UseZlibC := False; ZlibChoicesFlow(plain, prm, f, nil, ep, good);
+          finally
+            UseZlibC := was;
+          end;
+          if (Length(ec.tokLen) <> Length(ep.tokLen)) or (Length(ec.blocks) <> Length(ep.blocks)) or
+             ((Length(ec.tokLen) > 0) and (not CompareMem(@ec.tokLen[0], @ep.tokLen[0], Length(ec.tokLen) * 2) or
+              not CompareMem(@ec.tokVal[0], @ep.tokVal[0], Length(ec.tokVal) * 2))) then
+            Fail(Format('loop switch flow %d (zlib flushes %d) at %d of sample %d: C and Pascal differ', [j, v, q, k]));
+          Inc(made);
+        end;
+  end;
+  if (Length(samples) > 0) and (made = 0) then Fail('no loop switch flow was made');
+end;
+
 { kind-1 recipes damaged: each cut, each value of the first bytes;
   flows out of order, past the bytes, a loop changed without a flush, too
   many events: refused, or read and rebuilt without raising }
@@ -366,6 +412,7 @@ begin
     end;
   end;
   CraftedFlows;
+  LoopSwitchFlows;
   DamagedFlows;
 end;
 
