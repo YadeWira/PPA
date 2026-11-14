@@ -339,7 +339,9 @@ Then:
    compared.
 
 What `Analyze` returns is always verified: the recipe's rebuild, written,
-is the stream.
+is the stream (kinds 1 and 3: `Rebuild` of the recipe itself, as a reader
+has it; kind 0: zlib's choices with its parameters, what `Rebuild` makes,
+as codec stream version 2 has always checked them).
 
 ## Status (M2, 13/11/2026)
 

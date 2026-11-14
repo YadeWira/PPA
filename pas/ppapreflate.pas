@@ -751,10 +751,12 @@ begin
   end;
   if maxKind < RECIPE_ZLIB_FLOW then Exit;
   recipe.kind := RECIPE_ZLIB_FLOW;
+  { the recipe itself rebuilt (its parameters, flow and variant: what a
+    reader has), not only the search's choices, must be the stream }
   if FindZlibFlow(z, recipe.prm, recipe.flow, e) then begin
     PutFraming(recipe, e);
     back := Encode(e);
-    if SameBytes(back, a) then Exit(dsOk);
+    if SameBytes(back, a) and Rebuild(z.plain, recipe, back) and SameBytes(back, a) then Exit(dsOk);
   end;
   if maxKind < RECIPE_CORR then Exit;
   { kind 3: any stream ppadeflate reads, rebuilt and compared }
