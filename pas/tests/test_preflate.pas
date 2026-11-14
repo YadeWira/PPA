@@ -436,6 +436,16 @@ end;
 
 { ---------------------------------------------------------------- kind 3 }
 
+{ whether stream (bare deflate, or after its 2 header bytes when not raw)
+  is one ppadeflate reads and holds plain: what a rebuild gives, whatever
+  the recipe, must be }
+function HoldsPlain(const stream, plain: TBytes; raw: Boolean): Boolean;
+var z: TZStream;
+begin
+  if raw then Result := Parse(stream, dfRaw, MAX_PLAIN, z).Ok and Same(z.plain, plain)
+  else Result := (Length(stream) > 2) and Parse(Copy(stream, 2, Length(stream)), dfRaw, MAX_PLAIN, z).Ok and Same(z.plain, plain);
+end;
+
 { a kind-3 recipe damaged: every cut refused; every value of each byte
   (all of them for the first 24, a few for the rest) read and rebuilt, or
   refused, never raised on; corrections of random bytes on 64 KB of
@@ -462,7 +472,10 @@ begin
       try
         rr := ReadRecipe(x, pos, Length(plain), 100, r2);
         if (rr = rrOk) and not RecipeValid(r2) then Fail('a kind-3 recipe read out of range');
-        if (rr = rrOk) and Rebuild(plain, r2, back) then Inc(nOk);
+        if (rr = rrOk) and Rebuild(plain, r2, back) then begin
+          Inc(nOk);
+          if not HoldsPlain(back, plain, r2.raw) then Fail('a damaged kind-3 recipe rebuilt a stream of other bytes at ' + IntToStr(i));
+        end;
       except
         on e: Exception do Fail('damaged kind-3 recipe raised ' + e.ClassName + ' at ' + IntToStr(i));
       end;
@@ -488,7 +501,8 @@ begin
     r2.pred.tree := k mod (PRED_TREE_LAST + 1);
     r2.pred.flags := k mod (PF_ALL + 1);
     try
-      Rebuild(big, r2, back);
+      if Rebuild(big, r2, back) and not HoldsPlain(back, big, r2.raw) then
+        Fail('kind-3 random corrections rebuilt a stream of other bytes');
     except
       on e: Exception do Fail('kind-3 random corrections raised ' + e.ClassName);
     end;

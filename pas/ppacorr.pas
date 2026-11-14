@@ -1126,6 +1126,25 @@ begin
   end;
 end;
 
+{ whether lens[0..n-1] is a code no symbol of which is longer than 15
+  bits and that is not over-subscribed (what ppadeflate's decoder takes) }
+function KraftOk(const lens: array of Byte; n: Integer): Boolean;
+var count: array[0..15] of Integer; i, left: Integer;
+begin
+  Result := False;
+  FillChar(count, SizeOf(count), 0);
+  for i := 0 to n - 1 do begin
+    if lens[i] > 15 then Exit;
+    Inc(count[lens[i]]);
+  end;
+  left := 1;
+  for i := 1 to 15 do begin
+    left := left * 2 - count[i];
+    if left < 0 then Exit;
+  end;
+  Result := True;
+end;
+
 function PredValid(const p: TPredParams): Boolean;
 begin
   Result := (p.predVersion = PRED_VERSION) and (p.chain >= 1) and (p.chain <= PRED_MAX_CHAIN) and
@@ -1635,6 +1654,14 @@ var
     for i := 0 to hdist - 1 do b.distLen[i] := A[286 + i];
     SetLength(b.clenSeq, nSeq);
     for i := 0 to nSeq - 1 do b.clenSeq[i] := seq[i];
+    { codes ppadeflate.Decode reads, and every symbol written has a code:
+      the code-length code and the two trees not over-subscribed, the
+      code-length symbols used, the block's literals, lengths, distances
+      and its end (a decoder's corrections can give any lengths) }
+    if not KraftOk(b.clen, 19) or not KraftOk(b.litLen, hlit) or not KraftOk(b.distLen, hdist) then Exit;
+    for i := 0 to 18 do if (sfreq[i] > 0) and (b.clen[i] = 0) then Exit;
+    for i := 0 to 285 do if (lfreq[i] > 0) and (b.litLen[i] = 0) then Exit;
+    for i := 0 to 29 do if (dfreq[i] > 0) and (b.distLen[i] = 0) then Exit;
     Result := True;
   end;
 

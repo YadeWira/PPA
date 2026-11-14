@@ -195,7 +195,11 @@ than the bytes left, a distance back into the bytes and within 32768, at
 most 2 x plain + 4096 blocks, rank walks of 4096 positions, the longest
 match's walks of 256 and 4096, run lengths of 259 at most, exponents of 9
 (lengths) and 15 (distances: 32768 included), header fields as above, the pad bits and
-`endPad` within the bits they have. The rebuild writes each block as it
+`endPad` within the bits they have, and a dynamic block's code lengths,
+whatever corrections give them: codes `ppadeflate` reads (none over-subscribed:
+the code-length code, the literal/length and the distance trees), a code for
+every symbol the block writes (its literals, lengths, distances, its end, and
+the code-length symbols of its header); else the recipe is refused. The rebuild writes each block as it
 comes (`ppadeflate.TDeflWriter`), holding one block's tokens.
 
 **The parameters** are chosen by coded size, never from the header
