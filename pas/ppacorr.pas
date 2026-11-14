@@ -585,7 +585,7 @@ begin
   if pr < 1 then pr := 1 else if pr > 65535 then pr := 65535;
   if enc then begin
     ae.Encode(b, pr); Result := b;
-    if CorrStatOn then if b <> 0 then CorrStat[cat] += -Ln(pr / 65536) / Ln(2) else CorrStat[cat] += -Ln(1 - pr / 65536) / Ln(2);
+    if CorrStatOn then if b <> 0 then CorrStat[cat] := CorrStat[cat] - Ln(pr / 65536) / Ln(2) else CorrStat[cat] := CorrStat[cat] - Ln(1 - pr / 65536) / Ln(2);
   end else
     Result := ad.Decode(pr);
   Update(m, Result);
@@ -606,7 +606,7 @@ begin
   pr := SQUASH_TAB[t + 2048];
   if enc then begin
     ae.Encode(b, pr); Result := b;
-    if CorrStatOn then if b <> 0 then CorrStat[cat] += -Ln(pr / 65536) / Ln(2) else CorrStat[cat] += -Ln(1 - pr / 65536) / Ln(2);
+    if CorrStatOn then if b <> 0 then CorrStat[cat] := CorrStat[cat] - Ln(pr / 65536) / Ln(2) else CorrStat[cat] := CorrStat[cat] - Ln(1 - pr / 65536) / Ln(2);
   end else
     Result := ad.Decode(pr);
   err := (Result shl 16) - pr;
@@ -617,7 +617,7 @@ end;
 function TCoder.Direct(v: SizeInt; bits: Integer): SizeInt;
 begin
   if bits = 0 then Exit(0);
-  if enc then begin ae.Direct(Cardinal(v), bits); Result := v; if CorrStatOn then CorrStat[cat] += bits; end
+  if enc then begin ae.Direct(Cardinal(v), bits); Result := v; if CorrStatOn then CorrStat[cat] := CorrStat[cat] + bits; end
   else Result := SizeInt(ad.Direct(bits));
 end;
 
