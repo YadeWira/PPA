@@ -39,6 +39,16 @@ writes and exit statuses, so that a script for one works for the other.
 
 All warnings and errors go to stderr.
 
+**What `ppa` prints is UTF-8, and every character shows on a Windows
+console** (before, a name outside the console's code page came out as
+`?`). To a console it writes UTF-16 (`WriteConsoleW`), without changing
+the console's code page; to a file or a pipe, UTF-8, so `--json`, `list`
+and `report` read the same on every system. Standard output and error are
+decided apart: `2> err.txt` with the output on the console works. The
+arguments are read in UTF-16 and kept in UTF-8, so a name such as
+`señal 動画.png` is opened and written as given. (From PJA's
+`pjaconsole`, 0.9.11, itself from PAIA's fix: `pas/ppaconsole.pas`.)
+
 | exit status | when |
 |---|---|
 | 0 | every file went through (`t`: every `.ppa` verified; `selftest`: every check passed) |

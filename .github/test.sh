@@ -57,6 +57,26 @@ sh pas/tests/cli.sh "$OUT/ppa$EXE" "$OUT/cli"
 # tools print other separators on Windows ("hash *name")
 ( cd "$OUT/cli/in" && for f in *.ppa; do [ "$f" = README.ppa ] || echo "$($SHA "$f" | cut -c1-64) $f"; done ) | tr -d '\r' | sort > "$OUT/ppa.txt"
 
+echo "== a name in UTF-8, in what the command writes to a file"
+# --json, list, report and stderr, to a file, carry the name as UTF-8 on
+# every system (on Windows the console's code page would turn it into "?":
+# ppaconsole)
+U="$OUT/u8"; rm -rf "$U"; mkdir -p "$U"
+name='señal 動画.png'
+cp tests/png/rgb8.png "$U/$name"
+"$OUT/ppa$EXE" a -q --json --output-dir="$U" "$U/$name" > "$U/a.json" || { echo "FAIL: a on a UTF-8 name"; exit 1; }
+"$OUT/ppa$EXE" list "$U/señal 動画.ppa" > "$U/list.txt" || { echo "FAIL: list on a UTF-8 name"; exit 1; }
+"$OUT/ppa$EXE" report "$U/$name" > "$U/report.txt" || { echo "FAIL: report on a UTF-8 name"; exit 1; }
+# an error names the file on stderr: the output there is UTF-8 too
+if "$OUT/ppa$EXE" a --output-dir="$U" "$U/$name" > /dev/null 2> "$U/err.txt"; then echo "FAIL: a over an existing .ppa without -f"; exit 1; fi
+for f in a.json list.txt report.txt err.txt; do
+  LC_ALL=C grep -q "$(printf 'se\303\261al \345\213\225\347\224\273')" "$U/$f" \
+    || { echo "FAIL: $f does not carry the name in UTF-8"; cat "$U/$f"; exit 1; }
+done
+"$OUT/ppa$EXE" x -q -f -o "$U/back.png" "$U/señal 動画.ppa" && cmp -s tests/png/rgb8.png "$U/back.png" \
+  || { echo "FAIL: the UTF-8 name does not come back"; exit 1; }
+echo "a.json, list, report and stderr: the name in UTF-8"
+
 echo "== libppa"
 sh pas/lib/build.sh "$OUT/lib" > "$OUT/lib.log" 2>&1 || { cat "$OUT/lib.log"; echo "FAIL: libppa did not build"; exit 1; }
 LIBF=$(tail -1 "$OUT/lib.log")

@@ -29,7 +29,8 @@ uses
   {$ifdef MSWINDOWS} Windows, {$endif}
   SysUtils, Classes, ppablake3, ppaformat, ppacodec, ppafs, ppathreads, ppajoin,
   { the commands for reporting and checking (doc/CLI.md) }
-  ppastage, ppainfo, ppasysinfo, ppareport, ppabench, ppaselftest, ppamodel;
+  ppastage, ppainfo, ppasysinfo, ppareport, ppabench, ppaselftest, ppamodel,
+  ppaconsole;
 
 const
   DEFAULT_MAX_OUTPUT = 256 * 1024 * 1024;
@@ -112,6 +113,8 @@ var w: PPWideChar; n, i: Integer;
 begin
   DefaultSystemCodePage := CP_UTF8;
   DefaultFileSystemCodePage := CP_UTF8;
+  { and what the RTL gives back (ExpandFileName, the names in its errors) }
+  DefaultRTLFileSystemCodePage := CP_UTF8;
   w := CommandLineToArgvW(GetCommandLineW, n);
   args := nil;
   SetLength(args, n);
@@ -327,6 +330,7 @@ begin
   threads := DefaultThreads;
   maxOutput := DEFAULT_MAX_OUTPUT;
   ReadArgs;
+  SetupStdText;   { UTF-8 out, every character on a Windows console (ppaconsole) }
   if ArgCount = 0 then Usage(2);
   { --path may come before the command too }
   i := 1;
@@ -719,6 +723,7 @@ end;
 procedure TCommitter.Execute;
 var p: TPending; have: Boolean;
 begin
+  SetupStdText;   { this thread's own Output and StdErr (ppaconsole) }
   repeat
     EnterCriticalSection(pendLock);
     have := pendCount > 0;
@@ -1113,6 +1118,7 @@ type
 
 procedure TWorker.Execute;
 begin
+  SetupStdText;
   Work;
   { PJA's codec (a JNG's JPEG) keeps its models in threadvars }
   if Assigned(OnThreadEnd) then OnThreadEnd;
