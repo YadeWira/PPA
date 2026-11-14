@@ -476,9 +476,12 @@ begin
     e := flow.events[k];
     if (e.pos < 0) or (e.pos > plainLen) then Exit;
     if (k > 0) and (e.pos < flow.events[k - 1].pos) then Exit;
-    { at one position zlib makes at most a partial, a sync and a full flush
-      (each stronger than the one before: a weaker or the same one again
-      does nothing) and a parameter change }
+    { at one position: a partial, a sync and a full flush (each stronger
+      than the one before: a weaker or the same one again does nothing in
+      zlib) and a parameter change. zlib may also make deflateParams' own
+      Z_BLOCK, the weakest, before them: from 1.2.5.3 on it then adds
+      nothing, before it an empty block such a flow cannot hold
+      (doc/PREFLATE.md) }
     if (k > 0) and (e.pos = flow.events[k - 1].pos) then Inc(same) else same := 1;
     if same > ZE_MAX_AT then Exit;
     case e.kind of

@@ -110,8 +110,9 @@ function ReadRecipeV2(const b: TBytes; var pos: SizeInt; maxTail: QWord; out rec
 { Any recipe in RecipeBytes' format (RECIPE_FORMAT, doc/PREFLATE.md), and
   read back: plainLen is the length of the bytes it is for (a flow's
   events are checked against it before anything is kept), maxTail caps the
-  tail. ReadRecipe never raises. Provisional: no stream format holds it
-  yet (codec stream version 3 will). }
+  tail. ReadRecipe never raises; RecipeBytes raises on a recipe
+  RecipeValid refuses or a flow out of order. Provisional: no stream format
+  holds it yet (codec stream version 3 will). }
 function RecipeBytes(const recipe: TDeflRecipe): TBytes;
 function ReadRecipe(const b: TBytes; var pos: SizeInt; plainLen: SizeInt; maxTail: QWord;
   out recipe: TDeflRecipe): TRecipeRead;
@@ -859,6 +860,12 @@ end;
 function RecipeBytes(const recipe: TDeflRecipe): TBytes;
 var o: TOut; k, last: SizeInt;
 begin
+  { a recipe Analyze made always passes; another is a caller's bug, said
+    as such rather than as a range check deep in the writer }
+  if not RecipeValid(recipe) then raise Exception.Create('ppapreflate: RecipeBytes of a recipe RecipeValid refuses');
+  for k := 1 to High(recipe.flow.events) do
+    if recipe.flow.events[k].pos < recipe.flow.events[k - 1].pos then
+      raise Exception.Create('ppapreflate: RecipeBytes of a flow out of order');
   o.b := nil; o.n := 0;
   Put(o, RECIPE_FORMAT);
   Put(o, recipe.kind);

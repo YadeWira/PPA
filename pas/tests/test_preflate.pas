@@ -300,6 +300,10 @@ begin
   r2 := r; r2.flow.events := Copy(r.flow.events, 0, Length(r.flow.events));
   r2.flow.events[0].pos := n div 2 + 1;
   if Rebuild(plain, r2, back) then Fail('events out of order rebuilt');
+  { the writer says so, never writes it (a caller's bug) }
+  try RecipeBytes(r2); Fail('RecipeBytes wrote a flow out of order'); except on e: Exception do ; end;
+  r2.flow.events[0].pos := n div 3; r2.flow.variant := ZV_LAST + 1;
+  try RecipeBytes(r2); Fail('RecipeBytes wrote an unknown variant'); except on e: Exception do ; end;
   r2 := r; r2.flow.events := Copy(r.flow.events, 0, Length(r.flow.events));
   r2.flow.events[High(r2.flow.events)].pos := n + 1;
   if Rebuild(plain, r2, back) then Fail('an event past the bytes rebuilt');

@@ -118,10 +118,16 @@ framing (as codec stream version 2's):
 for. Every value is checked as it is read, before anything is allocated for
 it: the event count against `2 x plainLen + 2` and against the bytes left,
 each position against `plainLen`. The flow as a whole must then pass
-`ZlibFlowValid` (positions in order, at most 4 events at one position: zlib
-makes at most a partial, a sync and a full flush there, each stronger than
-the one before, and a parameter change; parameters in range; a change of
-loop only right after a flush). `Rebuild` checks the same again and refuses what
+`ZlibFlowValid` (positions in order, at most 4 events at one position;
+parameters in range; a change of loop only right after a flush). Four is
+not all zlib can make at one position: a flush weaker than or the same as
+the one before it there does nothing, but `Z_BLOCK` is the weakest, so
+`deflateParams`' own `Z_BLOCK`, the change, then a partial, a sync and a
+full flush are five. From 1.2.5.3 on the `Z_BLOCK` before another flush
+adds no block (nothing is pending) and the flow without it gives the same
+stream; before 1.2.5.3 it adds an empty block, and such a stream has no
+recipe (none seen in the corpus). Several parameter changes with no byte
+between them act as the last one. `Rebuild` checks the same again and refuses what
 does not pass; it never raises on a recipe.
 
 ### The versioning rule
