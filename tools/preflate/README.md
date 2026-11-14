@@ -124,3 +124,8 @@ Every child process runs under `ulimit -v 6000000`, with at most 4 at a time.
   `zflow` subset is new (above).
 - M3: the preflate columns per group are the "total diff ≤ preflate's per
   encoder group" gate.
+- M3a (13/11/2026) added recipe kind 3 (`pas/ppacorr.pas`): every stream
+  that inflates has a recipe. `test_preflate DIR 1 -all013 -tsv FILE`
+  writes a line per stream; `compare_recipes.py SUBSET FILE...` makes the
+  per-group table against M0's preflate figures (doc/PREFLATE.md, "Status
+  (M3a)"). Scratch and results: `$PF/m3/`.

@@ -58,9 +58,11 @@ echo "== layer 2: one deflate stream <-> its bytes and its recipe (ppapreflate)"
 # every stream kind 0 and back the same (on 1 and 4 threads), Compress's
 # maxVersion, and the crafted streams (zlib's flows in each version
 # included: kind 1) and damaged recipes; the C and Pascal code give the same
-# recipes (the digest of their bytes)
-"$OUT/test_preflate" "$PPA/tests/png" 16 -all0 -codec | tee "$OUT/pf_c.txt" | tail -1
-PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/png" 16 -all0 | tee "$OUT/pf_pas.txt" | tail -1
+# recipes (the digest of their bytes). -flips: every field of a stream's
+# blocks changed in turn, each still rebuilt (kind 3), and damaged kind-3
+# recipes; -diffc: each kind-3 recipe made and rebuilt by the other code too
+"$OUT/test_preflate" "$PPA/tests/png" 16 -all0 -codec -flips -diffc | tee "$OUT/pf_c.txt" | tail -1
+PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/png" 16 -all0 -flips -diffc | tee "$OUT/pf_pas.txt" | tail -1
 same_recipes() {
   [ "$(grep '^recipes ' "$1")" = "$(grep '^recipes ' "$2")" ] \
     || { echo "FAIL: the C and Pascal code give different recipes ($1, $2)"; exit 1; }
@@ -69,22 +71,33 @@ same_recipes "$OUT/pf_c.txt" "$OUT/pf_pas.txt"
 PF_CORPUS=${PREFLATE_CORPUS-/mnt/IA_LAB/agentes/ppa/preflate/corpus}
 if [ -d "$PF_CORPUS/png-zlib" ]; then
   # the regression set: all 392 streams kind 0; zlib alone does not write the
-  # 24 others (ipad.png is zlib with a full flush: kind 1)
+  # 24 others (ipad.png is zlib with a full flush: kind 1; the 23 others
+  # kind 3, the same from the C and the Pascal code)
   "$OUT/test_preflate" "$PF_CORPUS/png-zlib" 392 -all0 | tail -1
-  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 1 | tail -1
+  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 1 -all013 -min3 23 -diffc | tail -1
+fi
+if [ -d "$PF_CORPUS/hostile" ]; then
+  # kind 3 (M3a): every stream that inflates has a recipe; the others are
+  # refused cleanly
+  "$OUT/test_preflate" "$PF_CORPUS/hostile" 18 -all013 -min3 7 -diffc | tail -1
 fi
 if [ -d "$PF_CORPUS/zflow" ]; then
   # kind 1 (M2): zlib's flushes and deflateParams. zlib 1.3.1, 1.2.5 and 1.2.3,
-  # all but the 3 streams of 1.2.3's own RLE (not emulated); the text ones
+  # all but the 3 streams of 1.2.3's own RLE (not emulated: kind 3); the text ones
   # through the Pascal code too, the same recipes
-  "$OUT/test_preflate" "$PF_CORPUS/zflow" 129 -minok 126 | tail -1
+  "$OUT/test_preflate" "$PF_CORPUS/zflow" 129 -minok 129 -all013 | tail -1
   "$OUT/test_preflate" "$PF_CORPUS/zflow" 43 -minok 42 -only text. > "$OUT/pfz_c.txt"; tail -1 "$OUT/pfz_c.txt"
   PPA_NOC=1 "$OUT/test_preflate" "$PF_CORPUS/zflow" 43 -minok 42 -only text. > "$OUT/pfz_pas.txt"; tail -1 "$OUT/pfz_pas.txt"
   same_recipes "$OUT/pfz_c.txt" "$OUT/pfz_pas.txt"
   # every PNG zlib wrote with flushes or parameter changes (zfl): kind 1
   "$OUT/test_preflate" "$PF_CORPUS/png-synth" 288 -all01 -min1 288 -only .zfl- | tail -1
-  # the PDA sample: at least the 568 streams the census's zlib with flushes rebuilt
-  "$OUT/test_preflate" "$PF_CORPUS/pda" 742 -minok 591 | tail -1
+  # the PDA sample: at least the 568 streams the census's zlib with flushes
+  # rebuilt kind 0 or 1 (595), all 742 with a recipe (kind 3 the rest)
+  "$OUT/test_preflate" "$PF_CORPUS/pda" 742 -minok 742 -all013 -min3 147 -diffc | tail -1
+fi
+if [ -d "$PF_CORPUS/raw" ]; then
+  # bare deflate of the study's samples by 33 encoder settings: all with a recipe
+  "$OUT/test_preflate" "$PF_CORPUS/raw" 101 -all013 -min3 84 | tail -1
 fi
 
 echo "== layer 3: filtered lines <-> each line's filter and the image's bytes"

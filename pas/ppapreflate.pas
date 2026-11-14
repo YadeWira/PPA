@@ -16,7 +16,10 @@
         flushes (sync, full, partial, Z_BLOCK) and parameter changes
         (deflateParams) zlib made along the stream, at positions of the
         bytes, and which zlib's flushes they were (since 1.2.5.3, up to
-        1.2.5.2, up to 1.2.3.3).
+        1.2.5.2, up to 1.2.3.3);
+      3 (RECIPE_CORR): a zlib-like predictor's parameters and the
+        corrections (ppacorr) that make its choices the stream's: every
+        stream ppadeflate reads has one.
   doc/PREFLATE.md has the kinds, the fields, a recipe's bytes (RecipeBytes,
   provisional, versioned) and the rule that freezes them. A kind-0 recipe
   is written exactly as codec stream version 2 writes an image stream's
@@ -34,14 +37,17 @@ unit ppapreflate;
 
 interface
 
-uses SysUtils, ppadeflate, ppazlib;
+uses SysUtils, ppadeflate, ppazlib, ppacorr;
 
 const
   { the recipe kinds: 0, zlib's parameters give the stream exactly; 1,
-    zlib's parameters and its flushes and parameter changes }
+    zlib's parameters and its flushes and parameter changes; 3, a zlib-like
+    predictor and the corrections that make it the stream (ppacorr: any
+    stream). 2 is reserved (a known encoder) }
   RECIPE_ZLIB = 0;
   RECIPE_ZLIB_FLOW = 1;
-  RECIPE_KIND_LAST = RECIPE_ZLIB_FLOW;
+  RECIPE_CORR = 3;
+  RECIPE_KIND_LAST = RECIPE_CORR;
   { the version of RecipeBytes' format (doc/PREFLATE.md) }
   RECIPE_FORMAT = 1;
 
@@ -56,9 +62,11 @@ type
   TDeflStatus = (dsOk, dsNotDeflate, dsNotTaken);
 
   TDeflRecipe = record
-    kind: Integer;                   { RECIPE_ZLIB, RECIPE_ZLIB_FLOW }
-    prm: TZlibParams;                { zlib's parameters (kind 1: at the start) }
+    kind: Integer;                   { RECIPE_ZLIB, RECIPE_ZLIB_FLOW, RECIPE_CORR }
+    prm: TZlibParams;                { zlib's parameters (kind 1: at the start; kind 3: none) }
     flow: TZlibFlow;                 { kind 1: its flushes and parameter changes }
+    pred: TPredParams;               { kind 3: the predictor's parameters }
+    corr: TBytes;                    { kind 3: the corrections (ppacorr), coded }
     { the framing, as ppadeflate.TZStream has it }
     raw: Boolean;
     adlerOk: Boolean;
@@ -705,10 +713,19 @@ begin
   end;
   if maxKind < RECIPE_ZLIB_FLOW then Exit;
   recipe.kind := RECIPE_ZLIB_FLOW;
-  if not FindZlibFlow(z, recipe.prm, recipe.flow, e) then Exit;
-  PutFraming(recipe, e);
-  back := Encode(e);
-  if SameBytes(back, a) then Result := dsOk;
+  if FindZlibFlow(z, recipe.prm, recipe.flow, e) then begin
+    PutFraming(recipe, e);
+    back := Encode(e);
+    if SameBytes(back, a) then Exit(dsOk);
+  end;
+  if maxKind < RECIPE_CORR then Exit;
+  { kind 3: any stream ppadeflate reads, rebuilt and compared }
+  recipe.kind := RECIPE_CORR;
+  recipe.prm := Default(TZlibParams);
+  recipe.flow := Default(TZlibFlow);
+  CorrChooseParams(z, recipe.pred);
+  recipe.corr := CorrEncode(z, recipe.pred);
+  if Rebuild(z.plain, recipe, back) and SameBytes(back, a) then Result := dsOk;
 end;
 
 function Analyze(const a: TBytes; framing: TDeflFraming; maxPlain: SizeInt; out plain: TBytes;
@@ -725,6 +742,8 @@ end;
 function RecipeValid(const recipe: TDeflRecipe): Boolean;
 var k: SizeInt;
 begin
+  if recipe.kind = RECIPE_CORR then Exit(PredValid(recipe.pred) and (Length(recipe.flow.events) = 0));
+  if recipe.kind > RECIPE_ZLIB_FLOW then Exit(False);
   with recipe.prm do
     Result := (recipe.kind >= RECIPE_ZLIB) and (recipe.kind <= RECIPE_KIND_LAST) and (level >= 1) and (level <= 9) and
       (strategy >= Z_DEFAULT_STRATEGY) and (strategy <= Z_FIXED) and
@@ -743,6 +762,11 @@ var e: TZStream; good: SizeInt;
 begin
   stream := nil;
   if not RecipeValid(recipe) then Exit(False);
+  if recipe.kind = RECIPE_CORR then begin
+    e := Default(TZStream);
+    PutFraming(recipe, e);
+    Exit(CorrRebuild(plain, recipe.pred, recipe.corr, e, stream));
+  end;
   if recipe.kind = RECIPE_ZLIB then
     ZlibChoices(plain, recipe.prm, nil, e, threads)
   else begin
@@ -869,6 +893,18 @@ begin
   o.b := nil; o.n := 0;
   Put(o, RECIPE_FORMAT);
   Put(o, recipe.kind);
+  if recipe.kind = RECIPE_CORR then begin
+    with recipe.pred do begin
+      Put(o, predVersion);
+      PutVar(o, chain); PutVar(o, nice); PutVar(o, lazy); PutVar(o, good);
+      Put(o, hbits); PutVar(o, maxDist); Put(o, flags); PutVar(o, symEnd);
+    end;
+    PutFramingBytes(o, recipe);
+    PutVar(o, Length(recipe.corr));
+    for k := 0 to High(recipe.corr) do Put(o, recipe.corr[k]);
+    SetLength(o.b, o.n);
+    Exit(o.b);
+  end;
   with recipe do begin
     Put(o, prm.level); Put(o, prm.strategy); Put(o, prm.memLevel); Put(o, prm.wbits);
   end;
@@ -897,9 +933,28 @@ begin
   Result := rrBad;
   if (r.Get <> RECIPE_FORMAT) or not r.ok then Exit;
   recipe.kind := r.Get;
+  if recipe.kind = RECIPE_CORR then begin
+    with recipe.pred do begin
+      predVersion := r.Get;
+      if not r.ok or (predVersion <> PRED_VERSION) then Exit;
+      chain := r.GetVar(PRED_MAX_CHAIN); nice := r.GetVar(258); lazy := r.GetVar(258); good := r.GetVar(258);
+      hbits := r.Get; maxDist := r.GetVar(32768); flags := r.Get; symEnd := r.GetVar(PRED_MAX_SYMEND);
+    end;
+    if not r.ok then Exit;
+    if not PredValid(recipe.pred) then Exit(rrBadParams);
+    Result := ReadFramingBytes(r, maxTail, recipe);
+    if Result <> rrOk then Exit;
+    Result := rrBad;
+    cnt := r.GetVar(QWord(Length(r.b) - r.pos));
+    if not r.ok or (cnt > QWord(Length(r.b) - r.pos)) then Exit;
+    recipe.corr := Copy(r.b, r.pos, cnt);
+    Inc(r.pos, cnt);
+    pos := r.pos;
+    Exit(rrOk);
+  end;
   recipe.prm.level := r.Get; recipe.prm.strategy := r.Get; recipe.prm.memLevel := r.Get; recipe.prm.wbits := r.Get;
   if not r.ok then Exit;
-  if (recipe.kind < RECIPE_ZLIB) or (recipe.kind > RECIPE_KIND_LAST) then Exit;
+  if (recipe.kind < RECIPE_ZLIB) or (recipe.kind > RECIPE_ZLIB_FLOW) then Exit;
   if not RecipeValid(recipe) then Exit(rrBadParams);
   if recipe.kind = RECIPE_ZLIB_FLOW then begin
     recipe.flow.variant := r.Get;

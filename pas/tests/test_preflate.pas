@@ -6,15 +6,22 @@
   gives its image streams (IDAT, fdAT); any other file is one stream (.raw:
   bare deflate; else zlib if its header says so, bare otherwise).
 
-    test_preflate <directory> [minimum streams] [-all0 | -none0 | -all01] [-min1 N] [-minok N] [-only TEXT] [-codec] [-v]
+    test_preflate <directory> [minimum streams] [-all0 | -none0 | -all01 | -all013] [-min1 N] [-min3 N] [-minok N]
+                  [-max01] [-only TEXT] [-codec] [-diffc] [-flips] [-tsv FILE] [-v]
 
   -all0: every stream must have a kind-0 recipe (zlib's parameters: the
   regression set); -none0: none may (streams zlib does not write alone:
   each must be reported as kind 1, not taken or not deflate, cleanly);
   -all01: every stream must have a kind-0 or kind-1 recipe (zlib with its
-  flushes and parameter changes); -min1 N: at least N of kind 1; -minok
-  N: at least N with a recipe (kind 0 or 1); -only
-  TEXT: only the files whose name holds TEXT. -codec:
+  flushes and parameter changes); -all013: every deflate stream must have
+  a recipe (kind 3, a zlib-like predictor and corrections, takes any);
+  -min1 N, -min3 N: at least N of kind 1, of kind 3; -minok N: at least N
+  with a recipe; -max01: recipes of kinds 0 and 1 only (as before kind 3);
+  -only TEXT: only the files whose name holds TEXT. -diffc: each kind-3
+  recipe also made and rebuilt with the other code (C or Pascal: ppacorr's
+  hot loops), which must give the same. -tsv FILE: a line per stream
+  (file, stream, bytes, plain, kind, recipe bytes, analyse and rebuild
+  milliseconds). -flips: the kind-3 crafted cases too (below). -codec:
   also, per file, ppacodec.Compress with maxVersion 2 must give the very
   stream it gives by default (and ppa1's MODE_STATIC call the same), and
   versions it does not write must be refused. The last line has a digest
@@ -26,21 +33,30 @@
   recipes (each cut, each value of each byte), streams zlib's emulation
   makes with flushes and parameter changes in each zlib version (Analyze
   must find a kind-1 recipe that gives them back), and damaged kind-1
-  recipes and flows: refused, never raised on. }
+  recipes and flows: refused, never raised on. With -flips: every field of a
+  stream's blocks changed in turn (ppadeflate.TDeflateBlock: the last
+  block, types, stored lengths and pad bits, HLIT, HDIST, HCLEN, the
+  code-length code, the run-length coding, code lengths, 258 as 284, empty
+  blocks, tokens): each must still have a recipe (kind 3) that gives it
+  back; and damaged kind-3 recipes: refused or rebuilt, never raised on. }
 program test_preflate;
 {$I ../ppa.inc}
 uses {$ifdef UNIX} cthreads, {$endif} SysUtils, Classes, DateUtils, ppapng, ppadeflate, ppazlib, ppapreflate,
-  ppacodec;
+  ppacodec, ppacorr;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);
   if s.Size > 0 then s.ReadBuffer(Result[0], s.Size); finally s.Free; end; end;
 
 const MAX_PLAIN = 1 shl 30;
+  CLEN_ORDER_T: array[0..18] of Byte = (16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15);
 
 var
   failures, nStreams, nKind0, nKind1, nNotDeflate, nNotTaken, bytesKind0, bytesKind1: Int64;
-  verbose: Boolean;
+  nKind3, bytesKind3, recipeKind3: Int64;
+  verbose, diffc, tsvOn, flips: Boolean;
+  maxKindArg: Integer = RECIPE_KIND_LAST;
+  tsv: TextFile;
   recipeHash: QWord;   { FNV-1a of every recipe's bytes, in order }
 
 procedure Fail(const s: string);
@@ -63,6 +79,13 @@ begin
   end;
 end;
 
+function SamePred(const a, b: TPredParams): Boolean;
+begin
+  Result := (a.predVersion = b.predVersion) and (a.chain = b.chain) and (a.nice = b.nice) and (a.lazy = b.lazy) and
+    (a.good = b.good) and (a.hbits = b.hbits) and (a.maxDist = b.maxDist) and (a.flags = b.flags) and
+    (a.symEnd = b.symEnd);
+end;
+
 function SameRecipe(const a, b: TDeflRecipe): Boolean;
 var k: SizeInt;
 begin
@@ -70,7 +93,7 @@ begin
     (a.prm.memLevel = b.prm.memLevel) and (a.prm.wbits = b.prm.wbits) and (a.raw = b.raw) and
     (a.adlerOk = b.adlerOk) and (a.header[0] = b.header[0]) and (a.header[1] = b.header[1]) and
     (a.endPad = b.endPad) and Same(a.tail, b.tail) and (a.flow.variant = b.flow.variant) and
-    (Length(a.flow.events) = Length(b.flow.events));
+    (Length(a.flow.events) = Length(b.flow.events)) and SamePred(a.pred, b.pred) and Same(a.corr, b.corr);
   if Result then
     for k := 0 to High(a.flow.events) do
       if (a.flow.events[k].pos <> b.flow.events[k].pos) or (a.flow.events[k].kind <> b.flow.events[k].kind) or
@@ -93,22 +116,56 @@ end;
 
 { one stream: analysed; a recipe written, read back, rebuilt. Returns its
   status; kind, the recipe's kind (-1 without one) }
+procedure TsvLine(const name: string; a, plain: SizeInt; kind: Integer; recipe: SizeInt; msA, msR: Int64);
+begin
+  if tsvOn then Writeln(tsv, Format('%s'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d'#9'%d', [name, a, plain, kind, recipe, msA, msR]));
+end;
+
+{ a kind-3 recipe made again, and rebuilt, with the other code (ppacorr's
+  hot loops in C or in Pascal): the same parameters, corrections, stream }
+procedure CheckOtherCode(const a: TBytes; framing: TDeflFraming; const r: TDeflRecipe; const name: string);
+var z: TZStream; was: Boolean; p2: TPredParams; c2, back: TBytes; r2: TDeflRecipe;
+begin
+  if not Parse(a, framing, MAX_PLAIN, z).Ok then begin Fail('diffc: does not parse: ' + name); Exit; end;
+  was := UseCorrC;
+  try
+    UseCorrC := not was;
+    CorrChooseParams(z, p2);
+    if not SamePred(p2, r.pred) then begin Fail('C and Pascal choose other kind-3 parameters: ' + name); Exit; end;
+    c2 := CorrEncode(z, p2);
+    if not Same(c2, r.corr) then begin Fail('C and Pascal make other kind-3 corrections: ' + name); Exit; end;
+    r2 := r;
+    if not Rebuild(z.plain, r2, back) or not Same(back, a) then Fail('kind 3 rebuilt by the other code differs: ' + name);
+  finally
+    UseCorrC := was;
+  end;
+end;
+
 function CheckStream(const a: TBytes; framing: TDeflFraming; const name: string; out kind: Integer): TDeflStatus;
-var plain, rb, back: TBytes; r, r2: TDeflRecipe; pos: SizeInt; saveMin, saveSeg: SizeInt;
+var plain, rb, back: TBytes; r, r2: TDeflRecipe; pos: SizeInt; saveMin, saveSeg: SizeInt; t0: TDateTime;
+  msA, msR: Int64;
 begin
   Inc(nStreams);
   kind := -1;
-  Result := Analyze(a, framing, MAX_PLAIN, plain, r);
+  t0 := Now;
+  Result := Analyze(a, framing, MAX_PLAIN, plain, r, maxKindArg);
+  msA := MilliSecondsBetween(Now, t0);
   case Result of
-    dsNotDeflate: begin Inc(nNotDeflate); if verbose then Writeln('  not deflate  ', name); Exit; end;
-    dsNotTaken: begin Inc(nNotTaken); if verbose then Writeln('  not taken    ', name); Exit; end;
+    dsNotDeflate: begin Inc(nNotDeflate); if verbose then Writeln('  not deflate  ', name); TsvLine(name, Length(a), 0, -2, 0, msA, 0); Exit; end;
+    dsNotTaken: begin Inc(nNotTaken); if verbose then Writeln('  not taken    ', name); TsvLine(name, Length(a), Length(plain), -1, 0, msA, 0); Exit; end;
   end;
   kind := r.kind;
   if r.kind = RECIPE_ZLIB then begin Inc(nKind0); Inc(bytesKind0, Length(a)); end
-  else begin Inc(nKind1); Inc(bytesKind1, Length(a)); end;
+  else if r.kind = RECIPE_ZLIB_FLOW then begin Inc(nKind1); Inc(bytesKind1, Length(a)); end
+  else begin Inc(nKind3); Inc(bytesKind3, Length(a)); end;
   if verbose then begin
-    Write(Format('  kind %d: level %d strategy %d memLevel %d wbits %d%s  %d bytes',
-      [r.kind, r.prm.level, r.prm.strategy, r.prm.memLevel, r.prm.wbits, BoolToStr(r.raw, ' raw', ''), Length(a)]));
+    if r.kind = RECIPE_CORR then
+      Write(Format('  kind 3: chain %d nice %d lazy %d good %d hbits %d maxDist %d flags %d symEnd %d%s  %d bytes, corrections %d',
+        [r.pred.chain, r.pred.nice, r.pred.lazy, r.pred.good, r.pred.hbits, r.pred.maxDist, r.pred.flags, r.pred.symEnd,
+         BoolToStr(r.raw, ' raw', ''), Length(a), Length(r.corr)]))
+    else
+      Write(Format('  kind %d: level %d strategy %d memLevel %d wbits %d%s  %d bytes',
+        [r.kind, r.prm.level, r.prm.strategy, r.prm.memLevel, r.prm.wbits, BoolToStr(r.raw, ' raw', ''), Length(a)]));
     if r.kind = RECIPE_ZLIB_FLOW then Write(FlowText(r));
     Writeln('  ', name);
   end;
@@ -128,7 +185,13 @@ begin
   if (ReadRecipe(rb, pos, Length(plain), Length(a), r2) <> rrOk) or (pos <> Length(rb)) or not SameRecipe(r, r2) then begin
     Fail('recipe not read back: ' + name); Exit;
   end;
+  t0 := Now;
   if not Rebuild(plain, r2, back, 1) or not Same(back, a) then begin Fail('rebuild differs: ' + name); Exit; end;
+  msR := MilliSecondsBetween(Now, t0);
+  if r.kind = RECIPE_CORR then Inc(recipeKind3, Length(rb));
+  TsvLine(name, Length(a), Length(plain), r.kind, Length(rb), msA, msR);
+  if diffc and (r.kind = RECIPE_CORR) then CheckOtherCode(a, framing, r, name);
+  if r.kind = RECIPE_CORR then Exit;   { (one thread: segments are kind 0's) }
   { cut into segments (ppazlib's parallel rebuild) on 4 threads: the same }
   saveMin := ppazlib.PAR_MIN_BYTES; saveSeg := ppazlib.PAR_SEG_MIN;
   ppazlib.PAR_MIN_BYTES := 512; ppazlib.PAR_SEG_MIN := 128;
@@ -329,6 +392,391 @@ begin
   if Rebuild(plain, r2, back) then Fail('five events at one position rebuilt');
 end;
 
+{ ---------------------------------------------------------------- kind 3 }
+
+{ a kind-3 recipe damaged: every cut refused; every value of each byte
+  (all of them for the first 24, a few for the rest) read and rebuilt, or
+  refused, never raised on; corrections of random bytes on 64 KB of
+  bytes, with each predictor: rebuilt or refused, never raised on }
+procedure DamagedCorr(const a: TBytes);
+var plain, rb, x, back, big: TBytes; r, r2: TDeflRecipe; i, v, k, nOk: Integer; pos: SizeInt; rr: TRecipeRead;
+  z: TZStream; seed: LongWord;
+begin
+  if Analyze(a, dfRaw, MAX_PLAIN, plain, r) <> dsOk then begin Fail('damaged kind 3: no recipe'); Exit; end;
+  if r.kind <> RECIPE_CORR then begin Fail('damaged kind 3: not kind 3'); Exit; end;
+  rb := RecipeBytes(r);
+  for i := 0 to Length(rb) - 1 do begin
+    pos := 0;
+    if ReadRecipe(Copy(rb, 0, i), pos, Length(plain), 100, r2) = rrOk then
+      Fail(Format('a cut kind-3 recipe was read: %d of %d, corrections %d', [i, Length(rb), Length(r.corr)]));
+  end;
+  nOk := 0;
+  for i := 0 to Length(rb) - 1 do
+    for v := 0 to 255 do begin
+      if (i >= 24) and (v mod 37 <> 0) then Continue;
+      x := Copy(rb, 0, Length(rb));
+      x[i] := v;
+      pos := 0;
+      try
+        rr := ReadRecipe(x, pos, Length(plain), 100, r2);
+        if (rr = rrOk) and not RecipeValid(r2) then Fail('a kind-3 recipe read out of range');
+        if (rr = rrOk) and Rebuild(plain, r2, back) then Inc(nOk);
+      except
+        on e: Exception do Fail('damaged kind-3 recipe raised ' + e.ClassName + ' at ' + IntToStr(i));
+      end;
+    end;
+  if nOk = 0 then Fail('no damaged kind-3 recipe was rebuilt');
+  { random corrections: on the first sample's bytes, or the stored stream's }
+  big := plain;
+  if (Length(samples) > 0) and Parse(samples[0], dfAuto, MAX_PLAIN, z).Ok then big := Copy(z.plain, 0, 1 shl 16);
+  seed := 12345;
+  for k := 0 to 199 do begin
+    r2 := r;
+    r2.corr := nil; SetLength(r2.corr, 1 + k mod 64);
+    for i := 0 to High(r2.corr) do begin
+      {$push}{$Q-}{$R-}
+      seed := seed * 1103515245 + 12345;
+      {$pop}
+      r2.corr[i] := Byte(seed shr 16);
+    end;
+    r2.pred.lazy := (k mod 3) * 32;
+    r2.pred.chain := 1 + (k * 37) mod PRED_MAX_CHAIN;
+    r2.pred.symEnd := (k mod 5) * 100;
+    r2.pred.hbits := 8 + k mod 9;
+    try
+      Rebuild(big, r2, back);
+    except
+      on e: Exception do Fail('kind-3 random corrections raised ' + e.ClassName);
+    end;
+  end;
+end;
+
+function LenSymOf(l: Integer): Integer;
+const BASE: array[257..285] of Word = (3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+  35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258);
+begin
+  if l = LEN_258_AS_284 then Exit(284);
+  if l = 258 then Exit(285);
+  Result := 284;
+  while BASE[Result] > l do Dec(Result);
+end;
+
+function DistSymOf(d: Integer): Integer;
+const BASE: array[0..29] of Word = (1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+  257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577);
+begin
+  Result := 29;
+  while BASE[Result] > d do Dec(Result);
+end;
+
+{ block b of e made dynamic with zlib's trees over its tokens }
+procedure MakeDynamic(const e: TZStream; var b: TDeflateBlock);
+var lf: array[0..285] of Integer; df: array[0..29] of Integer; t: SizeInt; fixedNoBigger: Boolean;
+begin
+  FillChar(lf, SizeOf(lf), 0); FillChar(df, SizeOf(df), 0);
+  lf[256] := 1;
+  for t := b.firstToken to b.firstToken + b.nTokens - 1 do
+    if e.tokLen[t] = 0 then Inc(lf[e.tokVal[t]])
+    else begin Inc(lf[LenSymOf(e.tokLen[t])]); Inc(df[DistSymOf(e.tokVal[t])]); end;
+  ZlibTrees(lf, df, b, fixedNoBigger);
+  b.btype := btDynamic;
+end;
+
+{ b's code lengths written again: hlit, hdist given; the run-length coding
+  zlib's (rle 0), none (1), or zlib's on both trees at once (2); the
+  code-length code zlib's, or flat (every symbol used 5 bits) }
+procedure RewriteHeader(var b: TDeflateBlock; hlit, hdist, rle: Integer; flat: Boolean; hclen19: Boolean);
+var lens: array[0..315] of Byte; dl: array[0..29] of Byte; seq, s2: array[0..316] of Word; n, n2, i, hc: Integer;
+  f: array[0..18] of Integer; cl: array[0..18] of Byte;
+begin
+  for i := 0 to hlit - 1 do lens[i] := b.litLen[i];
+  for i := 0 to hdist - 1 do begin lens[hlit + i] := b.distLen[i]; dl[i] := b.distLen[i]; end;
+  n := 0;
+  case rle of
+    0: begin
+      ZlibSendTree(lens, hlit, seq, n);
+      n2 := 0; ZlibSendTree(dl, hdist, s2, n2);
+      for i := 0 to n2 - 1 do seq[n + i] := s2[i];
+      Inc(n, n2);
+    end;
+    1: for i := 0 to hlit + hdist - 1 do begin seq[n] := lens[i]; Inc(n); end;
+  else ZlibSendTree(lens, hlit + hdist, seq, n);
+  end;
+  FillChar(f, SizeOf(f), 0);
+  for i := 0 to n - 1 do Inc(f[seq[i] and $1F]);
+  ZlibBlTree(f, cl, hc);
+  if flat then begin
+    for i := 0 to 18 do if f[i] > 0 then cl[i] := 5 else cl[i] := 0;
+    hc := 19;
+    while (hc > 4) and (cl[CLEN_ORDER_T[hc - 1]] = 0) do Dec(hc);
+  end;
+  if hclen19 then hc := 19;
+  b.hlit := hlit; b.hdist := hdist; b.hclen := hc;
+  for i := 0 to 18 do b.clen[i] := cl[i];
+  SetLength(b.clenSeq, n);
+  for i := 0 to n - 1 do b.clenSeq[i] := seq[i];
+end;
+
+{ Every field of a stream's blocks changed in turn, on a stream zlib makes
+  of a sample's first 40 KB with runs and a period of 32768 added: each
+  stream, written and decoded back to the same bytes, must have a recipe
+  (kind 3 where kinds 0 and 1 cannot) that gives it back. }
+procedure FieldFlips;
+var
+  z, e0, e, d: TZStream; plain, a: TBytes; prm: TZlibParams; i, j, k, kind, made, n3: Integer;
+  t, n, q: SizeInt; b: TDeflateBlock; st: TDeflStatus; w: TDeflWriter; res: TZResult;
+
+  procedure Check(const what: string);
+  begin
+    a := Encode(e);
+    res := Decode(a, e.raw, MAX_PLAIN, d);
+    if not res.Ok or not Same(d.plain, plain) then begin Fail('field flip ' + what + ': not the same bytes (' + res.Text + ')'); Exit; end;
+    st := CheckStream(a, dfRaw, 'flip: ' + what, kind);
+    if st <> dsOk then Fail('field flip ' + what + ': no recipe')
+    else if kind = RECIPE_CORR then Inc(n3);
+    Inc(made);
+  end;
+
+  procedure Fresh;
+  var k: Integer;
+  begin
+    e := e0;
+    e.blocks := Copy(e0.blocks, 0, Length(e0.blocks));
+    for k := 0 to High(e.blocks) do e.blocks[k].clenSeq := Copy(e0.blocks[k].clenSeq, 0, Length(e0.blocks[k].clenSeq));
+    e.tokLen := Copy(e0.tokLen, 0, Length(e0.tokLen));
+    e.tokVal := Copy(e0.tokVal, 0, Length(e0.tokVal));
+  end;
+
+  { e with block i's tokens cut at token t (relative): two blocks, each dynamic }
+  procedure SplitAt(i: Integer; t: SizeInt);
+  var b1, b2: TDeflateBlock; k: Integer;
+  begin
+    b1 := e.blocks[i]; b2 := b1;
+    b1.nTokens := t; b1.final := False;
+    b2.firstToken := b1.firstToken + t; b2.nTokens := e.blocks[i].nTokens - t;
+    b1.clenSeq := nil; b2.clenSeq := nil;
+    MakeDynamic(e, b1); MakeDynamic(e, b2);
+    SetLength(e.blocks, Length(e.blocks) + 1);
+    for k := High(e.blocks) downto i + 2 do e.blocks[k] := e.blocks[k - 1];
+    e.blocks[i] := b1; e.blocks[i + 1] := b2;
+  end;
+
+  procedure Insert(i: Integer; const nb: TDeflateBlock);
+  var k: Integer;
+  begin
+    SetLength(e.blocks, Length(e.blocks) + 1);
+    for k := High(e.blocks) downto i + 1 do e.blocks[k] := e.blocks[k - 1];
+    e.blocks[i] := nb;
+  end;
+
+  { the plain position where block i starts }
+  function PlainAt(i: Integer): SizeInt;
+  var bb: Integer; tt: SizeInt;
+  begin
+    Result := 0;
+    for bb := 0 to i - 1 do
+      if e.blocks[bb].btype = btStored then Inc(Result, e.blocks[bb].storedLen)
+      else for tt := e.blocks[bb].firstToken to e.blocks[bb].firstToken + e.blocks[bb].nTokens - 1 do
+        if e.tokLen[tt] = 0 then Inc(Result) else if e.tokLen[tt] = LEN_258_AS_284 then Inc(Result, 258) else Inc(Result, e.tokLen[tt]);
+  end;
+
+  { the pad bits a stored block written as block i has }
+  function PadBits(i: Integer): Integer;
+  var bb: Integer;
+  begin
+    WriterBegin(w, e);
+    for bb := 0 to i - 1 do WriterBlock(w, e, e.blocks[bb]);
+    Result := WriterStoredPadBits(w);
+  end;
+
+  { block i (holding plain from pos q, len bytes) made stored blocks of the
+    given sizes, pads all ones }
+  procedure MakeStored(i: Integer; q: SizeInt; const sizes: array of SizeInt);
+  var fin: Boolean; nb: TDeflateBlock; ss, k: Integer;
+  begin
+    fin := e.blocks[i].final;
+    for k := i to High(e.blocks) - 1 do e.blocks[k] := e.blocks[k + 1];
+    SetLength(e.blocks, Length(e.blocks) - 1);
+    for ss := 0 to High(sizes) do begin
+      nb := Default(TDeflateBlock);
+      nb.btype := btStored; nb.plainPos := q; nb.storedLen := sizes[ss];
+      nb.final := fin and (ss = High(sizes));
+      nb.firstToken := 0;
+      Insert(i + ss, nb);
+      e.blocks[i + ss].pad := (1 shl PadBits(i + ss)) - 1;
+      Inc(q, sizes[ss]);
+    end;
+  end;
+
+var sz: array of SizeInt; total, far: SizeInt; kk: Integer;
+begin
+  if Length(samples) = 0 then Exit;
+  { the sample with the most bytes }
+  plain := nil;
+  for i := 0 to High(samples) do
+    if Parse(samples[i], dfAuto, MAX_PLAIN, z).Ok and (Length(z.plain) > Length(plain)) then plain := z.plain;
+  { 36 KB: the sample's first 20 (repeated if it has fewer), 3000 zeros
+    (matches of 258), and the first 13 KB again 32768 after they began
+    (distance 32768) }
+  if Length(plain) = 0 then Exit;
+  n := Length(plain);
+  SetLength(plain, 20000);
+  for q := n to High(plain) do plain[q] := Byte(plain[q - n] + q div n);
+  plain := Copy(plain, 0, 20000);
+  n := Length(plain);
+  SetLength(plain, n + 3000 + 13000);
+  FillChar(plain[n], 3000, 0);
+  for q := n + 3000 to High(plain) do if q >= 32768 then plain[q] := plain[q - 32768] else plain[q] := Byte(q * 7);
+  prm.level := 6; prm.strategy := Z_DEFAULT_STRATEGY; prm.memLevel := 3; prm.wbits := 15;
+  ZlibChoices(plain, prm, nil, e0);
+  e0.raw := True; e0.adlerOk := False; e0.endPad := 0; e0.tail := nil; e0.header[0] := 0; e0.header[1] := 0;
+  made := 0; n3 := 0;
+  Fresh; Check('none');
+  { the last block: an empty one after it, fixed, stored, dynamic }
+  for j := 0 to 2 do begin
+    Fresh;
+    e.blocks[High(e.blocks)].final := False;
+    b := Default(TDeflateBlock); b.final := True; b.firstToken := Length(e.tokLen);
+    b.btype := TBlockType(j);
+    if b.btype = btStored then b.plainPos := Length(plain);
+    if b.btype = btDynamic then MakeDynamic(e, b);
+    Insert(Length(e.blocks), b);
+    Check('empty last block ' + IntToStr(j));
+  end;
+  { empty blocks in between, each type }
+  for j := 0 to 2 do begin
+    Fresh;
+    b := Default(TDeflateBlock); b.firstToken := e.blocks[1].firstToken;
+    b.btype := TBlockType(j);
+    if b.btype = btStored then b.plainPos := PlainAt(1);
+    if b.btype = btDynamic then MakeDynamic(e, b);
+    Insert(1, b);
+    if b.btype = btStored then e.blocks[1].pad := (1 shl PadBits(1)) - 1;
+    Check('empty block ' + IntToStr(j));
+  end;
+  { types: one block fixed; all fixed; a fixed one made dynamic again with
+    every header field changed }
+  Fresh; e.blocks[0].btype := btFixed; Check('block 0 fixed');
+  Fresh; for i := 0 to High(e.blocks) do e.blocks[i].btype := btFixed; Check('all fixed');
+  for j := 0 to 7 do begin
+    Fresh;
+    i := Length(e.blocks) div 2;
+    b := e.blocks[i];
+    case j of
+      0: RewriteHeader(b, 286, b.hdist, 0, False, False);
+      1: RewriteHeader(b, b.hlit, 30, 0, False, False);
+      2: RewriteHeader(b, b.hlit, b.hdist, 0, False, True);
+      3: RewriteHeader(b, b.hlit, b.hdist, 0, True, False);
+      4: RewriteHeader(b, b.hlit, b.hdist, 1, False, False);
+      5: RewriteHeader(b, b.hlit, b.hdist, 2, False, False);
+      6: begin   { the fixed codes' lengths as a dynamic block's }
+           for k := 0 to 285 do if k < 144 then b.litLen[k] := 8 else if k < 256 then b.litLen[k] := 9
+             else if k < 280 then b.litLen[k] := 7 else b.litLen[k] := 8;
+           for k := 0 to 29 do b.distLen[k] := 5;
+           RewriteHeader(b, 286, 30, 0, False, False);
+         end;
+      7: begin   { lengths one longer where there is room: incomplete codes }
+           for k := 0 to b.hlit - 1 do if (b.litLen[k] > 0) and (b.litLen[k] < 15) then Inc(b.litLen[k]);
+           RewriteHeader(b, b.hlit, b.hdist, 0, False, False);
+         end;
+    end;
+    e.blocks[i] := b;
+    Check('header field ' + IntToStr(j));
+  end;
+  { 258 as 284: in a fixed block (every code there), and in a dynamic one
+    made for it }
+  for j := 0 to 1 do begin
+    Fresh;
+    k := 0;
+    for i := 0 to High(e.blocks) do
+      for t := e.blocks[i].firstToken to e.blocks[i].firstToken + e.blocks[i].nTokens - 1 do
+        if e.tokLen[t] = 258 then begin
+          e.tokLen[t] := LEN_258_AS_284; Inc(k);
+          if j = 0 then e.blocks[i].btype := btFixed else MakeDynamic(e, e.blocks[i]);
+        end;
+    if k = 0 then Fail('field flip: no match of 258 to write as 284');
+    Check('258 as 284 ' + IntToStr(j));
+  end;
+  { block ends: one block cut in two, at its first token and in its middle }
+  Fresh; SplitAt(0, 1); Check('block cut at 1');
+  Fresh; SplitAt(Length(e.blocks) div 2, e.blocks[Length(e.blocks) div 2].nTokens div 3); Check('block cut in the middle');
+  { stored: a block made stored, in pieces of 1000, 7 and the rest (non-zero
+    pads), and the whole stream stored in blocks of at most 65535 }
+  Fresh;
+  i := 1; q := PlainAt(i);
+  total := PlainAt(i + 1) - q;
+  if total > 1007 then begin
+    SetLength(sz, 3); sz[0] := 1000; sz[1] := 7; sz[2] := total - 1007;
+    MakeStored(i, q, sz);
+    Check('stored pieces');
+  end;
+  Fresh;
+  e.blocks := nil; e.tokLen := nil; e.tokVal := nil;
+  q := 0; sz := nil;
+  while q < Length(plain) do begin
+    SetLength(sz, Length(sz) + 1);
+    sz[High(sz)] := Length(plain) - q; if sz[High(sz)] > 65535 then sz[High(sz)] := 65535;
+    Inc(q, sz[High(sz)]);
+  end;
+  b := Default(TDeflateBlock); b.btype := btFixed; b.final := True;
+  Insert(0, b);
+  MakeStored(0, 0, sz);
+  Check('stored only');
+  { tokens: a match cut into a literal and a shorter match; a match moved to
+    the farthest distance that holds it (32768 where it can); a run of
+    literals where there was a match }
+  for j := 0 to 2 do begin
+    Fresh;
+    i := Length(e.blocks) - 1; k := 0;
+    q := PlainAt(i);
+    SetLength(e.tokLen, Length(e.tokLen) + 300); SetLength(e.tokVal, Length(e.tokVal) + 300);
+    t := e.blocks[i].firstToken;
+    while (t < e.blocks[i].firstToken + e.blocks[i].nTokens) and (k < 40) do begin
+      if (e.tokLen[t] >= 4) and (e.tokLen[t] <= 258) then begin
+        case j of
+          0: begin  { literal + match one shorter }
+               Move(e.tokLen[t], e.tokLen[t + 1], (Length(e.tokLen) - t - 1) * 2);
+               Move(e.tokVal[t], e.tokVal[t + 1], (Length(e.tokVal) - t - 1) * 2);
+               e.tokLen[t] := 0; e.tokVal[t] := plain[q];
+               Dec(e.tokLen[t + 1]);
+               Inc(e.blocks[i].nTokens);
+               Inc(q); Inc(t); Inc(k);
+             end;
+          1: begin  { the farthest distance it can have }
+               far := 32768; if far > q then far := q;
+               while far > e.tokVal[t] do begin
+                 if CompareMem(@plain[q - far], @plain[q], e.tokLen[t]) then Break;
+                 Dec(far);
+               end;
+               if far <> e.tokVal[t] then begin e.tokVal[t] := far; Inc(k); end;
+             end;
+          2: if e.tokLen[t] <= 8 then begin  { literals }
+               n := e.tokLen[t];
+               Move(e.tokLen[t + 1], e.tokLen[t + n], (Length(e.tokLen) - t - n) * 2);
+               Move(e.tokVal[t + 1], e.tokVal[t + n], (Length(e.tokVal) - t - n) * 2);
+               for kk := 0 to n - 1 do begin e.tokLen[t + kk] := 0; e.tokVal[t + kk] := plain[q + kk]; end;
+               Inc(e.blocks[i].nTokens, n - 1);
+               Inc(t, n - 1); Inc(q, n - 1); Inc(k);
+             end;
+        end;
+      end;
+      if e.tokLen[t] = 0 then Inc(q) else Inc(q, e.tokLen[t]);
+      Inc(t);
+    end;
+    SetLength(e.tokLen, e.blocks[i].firstToken + e.blocks[i].nTokens);
+    SetLength(e.tokVal, Length(e.tokLen));
+    MakeDynamic(e, e.blocks[i]);
+    Check('tokens ' + IntToStr(j));
+  end;
+  { framing: bytes after it, a pad after the last block }
+  Fresh; e.tail := TBytes.Create(1, 2, 3); e.endPad := 0;
+  WriterBegin(w, e); for i := 0 to High(e.blocks) do WriterBlock(w, e, e.blocks[i]);
+  e.endPad := (1 shl WriterEndPadBits(w)) - 1;
+  Check('end pad and tail');
+  if made < 24 then Fail(Format('field flips: only %d made', [made]));
+  if n3 = 0 then Fail('field flips: none kind 3');
+end;
+
 procedure Crafted;
 var a, rb, back, plain: TBytes; z, zf: TZStream; r, r2: TDeflRecipe; i, k, v, n, kind: Integer; pos: SizeInt;
   st: TDeflStatus; fixedNotTaken: Integer; rr: TRecipeRead;
@@ -340,7 +788,11 @@ begin
   a[0] := 1; a[1] := n and 255; a[2] := n shr 8; a[3] := not a[1]; a[4] := not a[2];
   for i := 0 to n - 1 do a[5 + i] := i mod 7;
   st := CheckStream(a, dfRaw, 'crafted: stored', kind);
-  if st <> dsNotTaken then Fail('crafted stored stream: not reported as not taken');
+  if (maxKindArg >= RECIPE_CORR) and ((st <> dsOk) or (kind <> RECIPE_CORR)) then Fail('crafted stored stream: not kind 3');
+  { without kind 3: not taken }
+  if Analyze(a, dfRaw, MAX_PLAIN, plain, r, RECIPE_ZLIB_FLOW) <> dsNotTaken then
+    Fail('crafted stored stream: not reported as not taken by kinds 0 and 1');
+  if flips and (maxKindArg >= RECIPE_CORR) then DamagedCorr(a);
   { not deflate: block type 3; and nothing at all }
   a := nil; SetLength(a, 4); a[0] := 7;
   if CheckStream(a, dfRaw, 'crafted: block type 3', kind) <> dsNotDeflate then Fail('block type 3: not reported as not deflate');
@@ -359,8 +811,10 @@ begin
       if zf.blocks[i].btype = btDynamic then zf.blocks[i].btype := btFixed;
     a := Encode(zf);
     st := CheckStream(a, dfAuto, 'crafted: fixed codes ' + IntToStr(k), kind);
-    if st = dsNotTaken then Inc(fixedNotTaken)
+    { zlib's choices but with fixed codes: kinds 0 and 1 cannot, kind 3 can }
+    if (st = dsNotTaken) or ((st = dsOk) and (kind = RECIPE_CORR)) then Inc(fixedNotTaken)
     else if st = dsNotDeflate then Fail('fixed codes: not deflate');
+    if (maxKindArg >= RECIPE_CORR) and (st <> dsOk) then Fail('fixed codes: no recipe');
     { the same stream with bytes after it, and with a wrong Adler-32: kind 0,
       the framing kept }
     a := Copy(samples[k], 0, Length(samples[k]));
@@ -374,7 +828,7 @@ begin
         Fail('a stream with a bad Adler-32: not kind 0');
     end;
   end;
-  if (Length(samples) > 0) and (fixedNotTaken = 0) then Fail('no fixed-code stream was refused');
+  if (Length(samples) > 0) and (fixedNotTaken = 0) then Fail('no fixed-code stream was refused by kinds 0 and 1');
 
   { damaged recipes: every cut of one with a tail, every value of each of its
     first 8 bytes. Refused, or read and then rebuilt (or refused) without
@@ -418,28 +872,38 @@ begin
   CraftedFlows;
   LoopSwitchFlows;
   DamagedFlows;
+  if flips and (maxKindArg >= RECIPE_CORR) then FieldFlips;
 end;
 
 var
   files: TStringList; sr: TSearchRec; dir, name, ext, only: string; i, minimum, min1, minOk, kind: Integer;
-  all0, none0, all01, codec: Boolean;
+  all0, none0, all01, all013, codec: Boolean; min3: Integer; tsvName: string;
   d: TBytes; p: TPng; s: SizeInt; st: TDeflStatus; t0: TDateTime; framing: TDeflFraming;
   dirStreams, dirBytes0, dirBytes1, dirKind0, dirKind1, dirNotTaken, dirNotDeflate: Int64;
+  dirKind3, dirBytes3, dirRecipe3: Int64;
 
   procedure Expect(const what: string);
   begin
     if all0 and ((st <> dsOk) or (kind <> RECIPE_ZLIB)) then Fail('not kind 0: ' + what);
     if none0 and (st = dsOk) and (kind = RECIPE_ZLIB) then Fail('kind 0: ' + what);
     if all01 and (st <> dsOk) then Fail('no recipe: ' + what);
+    if all013 and (st = dsNotTaken) then Fail('no recipe (kind 3 takes every deflate stream): ' + what);
   end;
 
 begin
   dir := ParamStr(1); minimum := StrToIntDef(ParamStr(2), 1);
-  all0 := False; none0 := False; all01 := False; codec := False; verbose := False; min1 := 0; minOk := 0; only := '';
+  all0 := False; none0 := False; all01 := False; all013 := False; codec := False; verbose := False; min1 := 0; minOk := 0;
+  only := ''; min3 := 0; tsvName := ''; diffc := False; flips := False;
   for i := 2 to ParamCount do
     if ParamStr(i) = '-all0' then all0 := True
     else if ParamStr(i) = '-none0' then none0 := True
     else if ParamStr(i) = '-all01' then all01 := True
+    else if ParamStr(i) = '-all013' then all013 := True
+    else if ParamStr(i) = '-max01' then maxKindArg := RECIPE_ZLIB_FLOW
+    else if ParamStr(i) = '-diffc' then diffc := True
+    else if ParamStr(i) = '-flips' then flips := True
+    else if (ParamStr(i) = '-min3') and (i < ParamCount) then min3 := StrToInt(ParamStr(i + 1))
+    else if (ParamStr(i) = '-tsv') and (i < ParamCount) then tsvName := ParamStr(i + 1)
     else if (ParamStr(i) = '-min1') and (i < ParamCount) then min1 := StrToInt(ParamStr(i + 1))
     else if (ParamStr(i) = '-only') and (i < ParamCount) then only := ParamStr(i + 1)
     else if (ParamStr(i) = '-minok') and (i < ParamCount) then minOk := StrToInt(ParamStr(i + 1))
@@ -454,7 +918,9 @@ begin
     FindClose(sr);
   end;
   failures := 0; nStreams := 0; nKind0 := 0; nKind1 := 0; nNotDeflate := 0; nNotTaken := 0;
-  bytesKind0 := 0; bytesKind1 := 0;
+  bytesKind0 := 0; bytesKind1 := 0; nKind3 := 0; bytesKind3 := 0; recipeKind3 := 0;
+  tsvOn := tsvName <> '';
+  if tsvOn then begin AssignFile(tsv, tsvName); Rewrite(tsv); end;
   recipeHash := QWord($CBF29CE484222325);
   samples := nil;
   t0 := Now;
@@ -485,7 +951,9 @@ begin
   end;
   { the directory's own counts; then the crafted cases' }
   dirStreams := nStreams; dirBytes0 := bytesKind0; dirBytes1 := bytesKind1; dirKind0 := nKind0; dirKind1 := nKind1;
-  dirNotTaken := nNotTaken; dirNotDeflate := nNotDeflate;
+  dirNotTaken := nNotTaken; dirNotDeflate := nNotDeflate; dirKind3 := nKind3; dirBytes3 := bytesKind3; dirRecipe3 := recipeKind3;
+  if tsvOn then CloseFile(tsv);
+  tsvOn := False;
   Writeln(Format('recipes %.16x', [recipeHash]));
   try
     Crafted;
@@ -494,11 +962,13 @@ begin
   end;
   if dirStreams < minimum then Fail(Format('%d streams < minimum %d', [dirStreams, minimum]));
   if dirKind1 < min1 then Fail(Format('%d kind 1 < minimum %d', [dirKind1, min1]));
-  if dirKind0 + dirKind1 < minOk then Fail(Format('%d with a recipe < minimum %d', [dirKind0 + dirKind1, minOk]));
-  Writeln(Format('%d streams: %d kind 0 (%d bytes), %d kind 1 (%d bytes) (written, read and rebuilt the same), ' +
-    '%d not taken, %d not deflate; crafted: %d kind 0, %d kind 1, %d not taken, %d not deflate; %.1f s; %d failures',
-    [dirStreams, dirKind0, dirBytes0, dirKind1, dirBytes1, dirNotTaken, dirNotDeflate,
-     nKind0 - dirKind0, nKind1 - dirKind1, nNotTaken - dirNotTaken, nNotDeflate - dirNotDeflate,
+  if dirKind3 < min3 then Fail(Format('%d kind 3 < minimum %d', [dirKind3, min3]));
+  if dirKind0 + dirKind1 + dirKind3 < minOk then Fail(Format('%d with a recipe < minimum %d', [dirKind0 + dirKind1 + dirKind3, minOk]));
+  Writeln(Format('%d streams: %d kind 0 (%d bytes), %d kind 1 (%d bytes), %d kind 3 (%d bytes, recipes %d bytes) ' +
+    '(written, read and rebuilt the same), %d not taken, %d not deflate; crafted: %d kind 0, %d kind 1, %d kind 3, ' +
+    '%d not taken, %d not deflate; %.1f s; %d failures',
+    [dirStreams, dirKind0, dirBytes0, dirKind1, dirBytes1, dirKind3, dirBytes3, dirRecipe3, dirNotTaken, dirNotDeflate,
+     nKind0 - dirKind0, nKind1 - dirKind1, nKind3 - dirKind3, nNotTaken - dirNotTaken, nNotDeflate - dirNotDeflate,
      SecondSpan(Now, t0), failures]));
   if failures > 0 then Halt(1);
 end.

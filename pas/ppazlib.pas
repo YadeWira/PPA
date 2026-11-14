@@ -151,6 +151,20 @@ function BlockBits(const z: TZStream; const b: TDeflateBlock; bitPos: Int64): In
 { The zlib header zlib writes for these parameters }
 function ZlibHeader(const prm: TZlibParams): Word;
 
+{ zlib's trees (_tr_flush_block, build_tree, gen_bitlen, build_bl_tree,
+  scan_tree) for a block of these symbol counts (lfreq[0..285], END_BLOCK
+  included; dfreq[0..29]): its dynamic header into b (hlit, hdist, hclen,
+  clen, clenSeq, litLen, distLen; nothing else of b changed), and whether
+  zlib would write it with the fixed codes (they are no bigger) }
+procedure ZlibTrees(const lfreq, dfreq: array of Integer; var b: TDeflateBlock; out fixedNoBigger: Boolean);
+{ zlib's run-length coding (send_tree) of the code lengths lens[0..count-1]
+  (count >= 1), appended to seq at nSeq: symbol or (extra shl 5), as
+  TDeflateBlock.clenSeq. seq must have room for count more }
+procedure ZlibSendTree(const lens: array of Byte; count: Integer; var seq: array of Word; var nSeq: Integer);
+{ zlib's code-length code (build_bl_tree) for these counts of the 19
+  code-length symbols: clen by symbol, and hclen (at least 4) }
+procedure ZlibBlTree(const freq: array of Integer; out clen: array of Byte; out hclen: Integer);
+
 var
   { the parallel rebuild's thresholds: PAR_MIN_BYTES_DEFAULT and a quarter
     of it, a segment's least; PPA_TEST_PAR_BYTES makes them smaller for the
@@ -1474,6 +1488,65 @@ begin
           prm.level := lv; prm.strategy := st; prm.memLevel := order[ml]; prm.wbits := wb;
           if ZlibChoices(z.plain, prm, @z, choices) then Exit(True);
         end;
+end;
+
+procedure ZlibTrees(const lfreq, dfreq: array of Integer; var b: TDeflateBlock; out fixedNoBigger: Boolean);
+var
+  ltree, dtree, bltree: TTree; ts: TTreeState;
+  maxBlIndex, i, nSeq: Integer;
+  seq: array[0..L_CODES + D_CODES] of Word;
+begin
+  ltree := Default(TTree); dtree := Default(TTree); bltree := Default(TTree); ts := Default(TTreeState);
+  for i := 0 to L_CODES - 1 do ltree.freq[i] := lfreq[i];
+  for i := 0 to D_CODES - 1 do dtree.freq[i] := dfreq[i];
+  BuildTree(ltree, ts, L_CODES, @StaticLLen[0], EXTRA_LBITS, LITERALS + 1, 15);
+  BuildTree(dtree, ts, D_CODES, @StaticDLen[0], EXTRA_DBITS, 0, 15);
+  nSeq := 0;
+  ScanTree(ltree, ltree.maxCode, bltree, seq, nSeq, False);
+  ScanTree(dtree, dtree.maxCode, bltree, seq, nSeq, False);
+  BuildTree(bltree, ts, BL_CODES, nil, EXTRA_BLBITS, 0, 7);
+  maxBlIndex := BL_CODES - 1;
+  while maxBlIndex >= 3 do begin
+    if bltree.len[BL_ORDER[maxBlIndex]] <> 0 then Break;
+    Dec(maxBlIndex);
+  end;
+  Inc(ts.optLen, 3 * (Int64(maxBlIndex) + 1) + 5 + 5 + 4);
+  fixedNoBigger := (ts.staticLen + 3 + 7) shr 3 <= (ts.optLen + 3 + 7) shr 3;
+  b.hlit := ltree.maxCode + 1;
+  b.hdist := dtree.maxCode + 1;
+  b.hclen := maxBlIndex + 1;
+  for i := 0 to 18 do b.clen[i] := bltree.len[i];
+  FillChar(b.litLen, SizeOf(b.litLen), 0);
+  FillChar(b.distLen, SizeOf(b.distLen), 0);
+  for i := 0 to ltree.maxCode do b.litLen[i] := ltree.len[i];
+  for i := 0 to dtree.maxCode do b.distLen[i] := dtree.len[i];
+  nSeq := 0;
+  ScanTree(ltree, b.hlit - 1, bltree, seq, nSeq, True);
+  ScanTree(dtree, b.hdist - 1, bltree, seq, nSeq, True);
+  SetLength(b.clenSeq, nSeq);
+  for i := 0 to nSeq - 1 do b.clenSeq[i] := seq[i];
+end;
+
+procedure ZlibSendTree(const lens: array of Byte; count: Integer; var seq: array of Word; var nSeq: Integer);
+var t, bl: TTree; i: Integer;
+begin
+  t.len[0] := 0;   { (only len is read, up to count: the rest need no clearing) }
+  for i := 0 to count - 1 do t.len[i] := lens[i];
+  ScanTree(t, count - 1, bl, seq, nSeq, True);
+end;
+
+procedure ZlibBlTree(const freq: array of Integer; out clen: array of Byte; out hclen: Integer);
+var bltree: TTree; ts: TTreeState; i: Integer;
+begin
+  bltree := Default(TTree); ts := Default(TTreeState);
+  for i := 0 to BL_CODES - 1 do bltree.freq[i] := freq[i];
+  BuildTree(bltree, ts, BL_CODES, nil, EXTRA_BLBITS, 0, 7);
+  hclen := BL_CODES;
+  while hclen > 4 do begin
+    if bltree.len[BL_ORDER[hclen - 1]] <> 0 then Break;
+    Dec(hclen);
+  end;
+  for i := 0 to BL_CODES - 1 do clen[i] := bltree.len[i];
 end;
 
 procedure MakeTables;

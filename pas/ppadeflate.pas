@@ -97,6 +97,29 @@ function IsZlibHeader(const a: TBytes): Boolean;
 function Decode(const a: TBytes; raw: Boolean; maxPlain: SizeInt; out z: TZStream): TZResult;
 { z -> the stream }
 function Encode(const z: TZStream): TBytes;
+
+type
+  { Encode one block at a time, for a caller that makes the blocks one by
+    one and need not keep them all (the same bits as Encode: Encode is
+    WriterBegin, WriterBlock for each block, WriterFinish) }
+  TDeflWriter = record
+    out_: TBytes;
+    n: SizeInt;         { bytes written }
+    buf: QWord;
+    cnt: Integer;
+  end;
+
+{ the zlib header, unless z.raw }
+procedure WriterBegin(var w: TDeflWriter; const z: TZStream);
+{ block b, its tokens z.tokLen/tokVal[b.firstToken..], a stored block's
+  bytes z.plain[b.plainPos..] }
+procedure WriterBlock(var w: TDeflWriter; const z: TZStream; const b: TDeflateBlock);
+{ how many pad bits a stored block written now has before its LEN (what
+  its pad must fit in), and the bits after the last block if it ended now }
+function WriterStoredPadBits(const w: TDeflWriter): Integer;
+function WriterEndPadBits(const w: TDeflWriter): Integer;
+{ z.endPad, the Adler-32 of z.plain if z.adlerOk, z.tail: the stream }
+function WriterFinish(var w: TDeflWriter; const z: TZStream): TBytes;
 { Decode, Encode, and compare. }
 function VerifyRoundTrip(const a: TBytes; raw: Boolean; maxPlain: SizeInt; out z: TZStream): TZResult;
 
@@ -472,12 +495,7 @@ end;
 { ---------------------------------------------------------------- encoding }
 
 type
-  TBitWriter = record
-    out_: TBytes;
-    n: SizeInt;         { bytes written }
-    buf: QWord;
-    cnt: Integer;
-  end;
+  TBitWriter = TDeflWriter;
 
 { v's n low bits (n <= 24): kept in buf, written four bytes at a time }
 procedure PutBits(var bw: TBitWriter; v: LongWord; n: Integer); inline;
@@ -518,103 +536,128 @@ begin
   Inc(bw.n, len);
 end;
 
-function Encode(const z: TZStream): TBytes;
+procedure WriterBegin(var w: TDeflWriter; const z: TZStream);
+begin
+  w := Default(TDeflWriter);
+  if not z.raw then begin
+    PutBits(w, z.header[0], 8);
+    PutBits(w, z.header[1], 8);
+  end;
+end;
+
+function WriterStoredPadBits(const w: TDeflWriter): Integer;
+begin
+  Result := (8 - (w.cnt + 3) mod 8) mod 8;
+end;
+
+function WriterEndPadBits(const w: TDeflWriter): Integer;
+begin
+  Result := (8 - w.cnt mod 8) mod 8;
+end;
+
+procedure WriterBlock(var w: TDeflWriter; const z: TZStream; const b: TDeflateBlock);
 var
-  bw: TBitWriter;
   lit, dst, cl: THuffEnc;
-  bi, i: SizeInt;
+  i: SizeInt;
   sym, s, l, d, k: Integer;
-  ad: LongWord;
   ta: TTokensArgs;
   cs: Word;
 begin
-  bw := Default(TBitWriter);
-  if not z.raw then begin
-    PutBits(bw, z.header[0], 8);
-    PutBits(bw, z.header[1], 8);
-  end;
-  for bi := 0 to High(z.blocks) do
-    with z.blocks[bi] do begin
-      PutBits(bw, Ord(final), 1);
-      PutBits(bw, Ord(btype), 2);
-      case btype of
-        btStored: begin
-          k := (8 - bw.cnt mod 8) mod 8;
-          PutBits(bw, pad, k);
-          PutBits(bw, storedLen, 16);
-          PutBits(bw, not storedLen and $FFFF, 16);
-          PutBytes(bw, z.plain, plainPos, storedLen);
-        end;
-        btFixed, btDynamic: begin
-          if btype = btDynamic then begin
-            PutBits(bw, hlit - 257, 5);
-            PutBits(bw, hdist - 1, 5);
-            PutBits(bw, hclen - 4, 4);
-            for i := 0 to hclen - 1 do PutBits(bw, clen[CLEN_ORDER[i]], 3);
-            BuildEnc(cl, clen, 19);
-            for i := 0 to High(clenSeq) do begin
-              { the element into a Word first: `clenSeq[i] and $1F` loads 4
-                bytes on x86 and x86-64, 2 past the last element (a fault where the
-                block ends with its memory: Windows XP's heap) }
-              cs := clenSeq[i];
-              s := cs and $1F;
-              PutBits(bw, cl.code[s], cl.len[s]);
-              if s >= 16 then PutBits(bw, cs shr 5, CLEN_EXTRA[s]);
-            end;
+  with b do begin
+    PutBits(w, Ord(final), 1);
+    PutBits(w, Ord(btype), 2);
+    case btype of
+      btStored: begin
+        k := (8 - w.cnt mod 8) mod 8;
+        PutBits(w, pad, k);
+        PutBits(w, storedLen, 16);
+        PutBits(w, not storedLen and $FFFF, 16);
+        PutBytes(w, z.plain, plainPos, storedLen);
+      end;
+      btFixed, btDynamic: begin
+        if btype = btDynamic then begin
+          PutBits(w, hlit - 257, 5);
+          PutBits(w, hdist - 1, 5);
+          PutBits(w, hclen - 4, 4);
+          for i := 0 to hclen - 1 do PutBits(w, clen[CLEN_ORDER[i]], 3);
+          BuildEnc(cl, clen, 19);
+          for i := 0 to High(clenSeq) do begin
+            { the element into a Word first: `clenSeq[i] and $1F` loads 4
+              bytes on x86 and x86-64, 2 past the last element (a fault where the
+              block ends with its memory: Windows XP's heap) }
+            cs := clenSeq[i];
+            s := cs and $1F;
+            PutBits(w, cl.code[s], cl.len[s]);
+            if s >= 16 then PutBits(w, cs shr 5, CLEN_EXTRA[s]);
           end;
-          if btype = btFixed then begin
-            BuildEnc(lit, FixedLit, 288);
-            BuildEnc(dst, FixedDist, 32);
+        end;
+        if btype = btFixed then begin
+          BuildEnc(lit, FixedLit, 288);
+          BuildEnc(dst, FixedDist, 32);
+        end else begin
+          BuildEnc(lit, litLen, 288);
+          BuildEnc(dst, distLen, 32);
+        end;
+        if UseDeflateC and (nTokens > 0) then begin
+          { room for the worst: 48 bits a token }
+          if w.n + 6 * nTokens + 16 > Length(w.out_) then SetLength(w.out_, 2 * (w.n + 6 * nTokens + 16));
+          ta.out_ := @w.out_[0]; ta.n := @w.n; ta.buf := @w.buf; ta.cnt := @w.cnt;
+          ta.tokLen := @z.tokLen[0]; ta.tokVal := @z.tokVal[0]; ta.first := firstToken; ta.count := nTokens;
+          ta.lcode := @lit.code[0]; ta.llen := @lit.len[0]; ta.dcode := @dst.code[0]; ta.dlen := @dst.len[0];
+          ta.lenSym := @LenSym[3]; ta.distSym := @DistSym[1];
+          ta.lenBase := @LEN_BASE[257]; ta.lenExtra := @LEN_EXTRA[257];
+          ta.distBase := @DIST_BASE[0]; ta.distExtra := @DIST_EXTRA[0];
+          ppad_tokens(ta);
+        end else
+        for i := firstToken to firstToken + nTokens - 1 do begin
+          l := z.tokLen[i];
+          if l = 0 then begin
+            sym := z.tokVal[i];
+            PutBits(w, lit.code[sym], lit.len[sym]);
           end else begin
-            BuildEnc(lit, litLen, 288);
-            BuildEnc(dst, distLen, 32);
-          end;
-          if UseDeflateC and (nTokens > 0) then begin
-            { room for the worst: 48 bits a token }
-            if bw.n + 6 * nTokens + 16 > Length(bw.out_) then SetLength(bw.out_, 2 * (bw.n + 6 * nTokens + 16));
-            ta.out_ := @bw.out_[0]; ta.n := @bw.n; ta.buf := @bw.buf; ta.cnt := @bw.cnt;
-            ta.tokLen := @z.tokLen[0]; ta.tokVal := @z.tokVal[0]; ta.first := firstToken; ta.count := nTokens;
-            ta.lcode := @lit.code[0]; ta.llen := @lit.len[0]; ta.dcode := @dst.code[0]; ta.dlen := @dst.len[0];
-            ta.lenSym := @LenSym[3]; ta.distSym := @DistSym[1];
-            ta.lenBase := @LEN_BASE[257]; ta.lenExtra := @LEN_EXTRA[257];
-            ta.distBase := @DIST_BASE[0]; ta.distExtra := @DIST_EXTRA[0];
-            ppad_tokens(ta);
-          end else
-          for i := firstToken to firstToken + nTokens - 1 do begin
-            l := z.tokLen[i];
-            if l = 0 then begin
-              sym := z.tokVal[i];
-              PutBits(bw, lit.code[sym], lit.len[sym]);
+            if l = LEN_258_AS_284 then begin
+              PutBits(w, lit.code[284], lit.len[284]);
+              PutBits(w, 31, 5);
             end else begin
-              if l = LEN_258_AS_284 then begin
-                PutBits(bw, lit.code[284], lit.len[284]);
-                PutBits(bw, 31, 5);
-              end else begin
-                sym := LenSym[l];
-                PutBits(bw, lit.code[sym], lit.len[sym]);
-                PutBits(bw, l - LEN_BASE[sym], LEN_EXTRA[sym]);
-              end;
-              d := z.tokVal[i];
-              sym := DistSym[d];
-              PutBits(bw, dst.code[sym], dst.len[sym]);
-              PutBits(bw, d - DIST_BASE[sym], DIST_EXTRA[sym]);
+              sym := LenSym[l];
+              PutBits(w, lit.code[sym], lit.len[sym]);
+              PutBits(w, l - LEN_BASE[sym], LEN_EXTRA[sym]);
             end;
+            d := z.tokVal[i];
+            sym := DistSym[d];
+            PutBits(w, dst.code[sym], dst.len[sym]);
+            PutBits(w, d - DIST_BASE[sym], DIST_EXTRA[sym]);
           end;
-          PutBits(bw, lit.code[256], lit.len[256]);
         end;
+        PutBits(w, lit.code[256], lit.len[256]);
       end;
     end;
-  k := (8 - bw.cnt mod 8) mod 8;
-  PutBits(bw, z.endPad, k);
+  end;
+end;
+
+function WriterFinish(var w: TDeflWriter; const z: TZStream): TBytes;
+var k: Integer; ad: LongWord;
+begin
+  k := (8 - w.cnt mod 8) mod 8;
+  PutBits(w, z.endPad, k);
   if z.adlerOk then begin
     ad := Adler32(1, z.plain, 0, Length(z.plain));
-    PutBits(bw, ad shr 24, 8); PutBits(bw, (ad shr 16) and $FF, 8);
-    PutBits(bw, (ad shr 8) and $FF, 8); PutBits(bw, ad and $FF, 8);
+    PutBits(w, ad shr 24, 8); PutBits(w, (ad shr 16) and $FF, 8);
+    PutBits(w, (ad shr 8) and $FF, 8); PutBits(w, ad and $FF, 8);
   end;
-  PutBytes(bw, z.tail, 0, Length(z.tail));
-  FlushBytes(bw);
-  SetLength(bw.out_, bw.n);
-  Result := bw.out_;
+  PutBytes(w, z.tail, 0, Length(z.tail));
+  FlushBytes(w);
+  SetLength(w.out_, w.n);
+  Result := w.out_;
+  w.out_ := nil;
+end;
+
+function Encode(const z: TZStream): TBytes;
+var w: TDeflWriter; bi: SizeInt;
+begin
+  WriterBegin(w, z);
+  for bi := 0 to High(z.blocks) do WriterBlock(w, z, z.blocks[bi]);
+  Result := WriterFinish(w, z);
 end;
 
 function VerifyRoundTrip(const a: TBytes; raw: Boolean; maxPlain: SizeInt; out z: TZStream): TZResult;

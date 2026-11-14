@@ -38,9 +38,11 @@ Jean-loup Gailly and Mark Adler, under the zlib license:
      misrepresented as being the original software.
   3. This notice may not be removed or altered from any source distribution.
 
-PPA's deflate recipes (pas/ppapreflate.pas, doc/PREFLATE.md) take the idea
-of rebuilding a deflate stream from the bytes it holds and a small
-description of its encoder's work, flushes included, from preflate by Dirk
+PPA's deflate recipes (pas/ppapreflate.pas, pas/ppacorr.pas,
+doc/PREFLATE.md) take the idea of rebuilding a deflate stream from the bytes
+it holds and a small description of its encoder's work, flushes included,
+and (kind 3) of a predictor that follows the stream's own parse and of
+coding a match's distance as its rank among the candidates, from preflate by Dirk
 Steinke (Apache-2.0; studied as 0.3.4, from precomp 0.4.7's
 contrib/preflate). No code of preflate is in PPA; tools/preflate uses a
 preflate binary built outside the repository only as a yardstick.
