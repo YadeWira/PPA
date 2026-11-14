@@ -761,8 +761,15 @@ begin
   recipe.kind := RECIPE_CORR;
   recipe.prm := Default(TZlibParams);
   recipe.flow := Default(TZlibFlow);
-  CorrChooseParams(z, recipe.pred);
-  recipe.corr := CorrEncode(z, recipe.pred);
+  { (CorrEncode raises on a stream its driver cannot code: none known, but
+    Analyze never raises but for memory; no recipe then) }
+  try
+    CorrChooseParams(z, recipe.pred);
+    recipe.corr := CorrEncode(z, recipe.pred);
+  except
+    on e: EOutOfMemory do raise;
+    on e: Exception do Exit(dsNotTaken);
+  end;
   if Rebuild(z.plain, recipe, back) and SameBytes(back, a) then Result := dsOk;
 end;
 

@@ -530,6 +530,44 @@ begin
   if CorrStat[6] < 15 then Fail(Format('rank escape: the distance cost %.1f bits, not escaped', [CorrStat[6]]));
 end;
 
+{ a match of 258 at distance 32768 (and as 284) past the rank walk's 4096
+  candidates (8000 positions between with its first 3 bytes): the escape
+  must be able to say 32768 }
+procedure FarEscape;
+var e: TZStream; a, plain: TBytes; k, q, nT: SizeInt; kind, v: Integer; seed: LongWord;
+begin
+  for v := 0 to 1 do begin
+    e := Default(TZStream);
+    e.raw := True;
+    plain := nil; SetLength(plain, 32768 + 258);
+    seed := 99;
+    for k := 0 to 257 do begin
+      {$push}{$Q-}{$R-} seed := seed * 1103515245 + 12345; {$pop}
+      plain[k] := Byte(seed shr 16);
+    end;
+    q := 258;
+    while q < 32768 do begin
+      {$push}{$Q-}{$R-} seed := seed * 1103515245 + 12345; {$pop}
+      plain[q] := plain[q mod 4];
+      if q mod 4 = 3 then plain[q] := Byte(seed shr 16);
+      Inc(q);
+    end;
+    for k := 0 to 257 do plain[32768 + k] := plain[k];
+    e.plain := plain;
+    nT := 32768 + 1;
+    SetLength(e.tokLen, nT); SetLength(e.tokVal, nT);
+    for k := 0 to 32767 do begin e.tokLen[k] := 0; e.tokVal[k] := plain[k]; end;
+    if v = 0 then e.tokLen[nT - 1] := 258 else e.tokLen[nT - 1] := LEN_258_AS_284;
+    e.tokVal[nT - 1] := 32768;
+    SetLength(e.blocks, 1);
+    e.blocks[0] := Default(TDeflateBlock);
+    e.blocks[0].btype := btFixed; e.blocks[0].final := True; e.blocks[0].nTokens := nT;
+    a := Encode(e);
+    if (CheckStream(a, dfRaw, 'crafted: escape of 32768', kind) <> dsOk) or (kind <> RECIPE_CORR) then
+      Fail(Format('escape of 32768 (%d): no kind-3 recipe', [v]));
+  end;
+end;
+
 function LenSymOf(l: Integer): Integer;
 const BASE: array[257..285] of Word = (3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
   35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258);
@@ -952,7 +990,7 @@ begin
   if maxKindArg >= RECIPE_ZLIB_FLOW then TooFarFlows;
   LoopSwitchFlows;
   DamagedFlows;
-  if flips and (maxKindArg >= RECIPE_CORR) then begin FieldFlips; RankEscape; end;
+  if flips and (maxKindArg >= RECIPE_CORR) then begin FieldFlips; RankEscape; FarEscape; end;
 end;
 
 var

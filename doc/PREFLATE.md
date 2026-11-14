@@ -194,7 +194,7 @@ Caps, checked as values are decoded: a length or a stored block no longer
 than the bytes left, a distance back into the bytes and within 32768, at
 most 2 x plain + 4096 blocks, rank walks of 4096 positions, the longest
 match's walks of 256 and 4096, run lengths of 259 at most, exponents of 9
-(lengths) and 14 (distances), header fields as above, the pad bits and
+(lengths) and 15 (distances: 32768 included), header fields as above, the pad bits and
 `endPad` within the bits they have. The rebuild writes each block as it
 comes (`ppadeflate.TDeflWriter`), holding one block's tokens.
 

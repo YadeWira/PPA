@@ -520,7 +520,7 @@ type
     rankK: array[0..2, 0..RANK_ESC - 1] of TPBit;
     rankM: array[1..RANK_ESC - 1, 0..RANK_BITS - 1] of TPBit;
     escE: array[0..15] of TPBit;
-    escM: array[0..14, 0..GOLOMB_STRIDE - 1] of TPBit;
+    escM: array[0..15, 0..GOLOMB_STRIDE - 1] of TPBit;   { exponents 0..15: up to 32768 }
     { a block's header }
     treeSame: array[0..1] of TPBit;
     lenSame: array[0..31] of TPBit;        { predicted length x symbol used }
@@ -1389,7 +1389,7 @@ var
         c.cat := 6;
         if kk = RANK_ESC then begin
           v := rd;
-          if not DoGolomb(m.escE, @m.escM[0, 0], 14, v) then Exit;
+          if not DoGolomb(m.escE, @m.escM[0, 0], 15, v) then Exit;
           D := v;
           if (D > p) or (D > WINDOW) then Exit;
           for i := 0 to L - 1 do
