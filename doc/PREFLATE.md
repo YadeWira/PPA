@@ -527,10 +527,49 @@ minutes each of `lib_ppa_chk` (libFuzzer, 167,490 runs) and `afl_ppa_chk`
   bytes (noise of 2 and 4 values, near-periodic data, runs of every
   length), 2 MB each by libdeflate 6 and 12: the slowest rebuild, 2-value
   noise by libdeflate 12, 0.37 MB/s (5.7 s), its analysis 23 s.
-- Open: analysis speed. A non-zlib image costs the zlib searches (kinds 0
-  and 1) and kind 3's parameter search: 3 s for a 256 KB doodle (2.6 s of
-  it kind 3), 7 s for the 1.7 MB oxipng photo of `png-nonzlib`. Rebuild of
-  kind 3 runs on one thread (no checkpoints yet).
+- Analysis speed (15/11/2026). Measured with callgrind (perf is not
+  allowed on the machine): on a doodle, kind 3's parameter search was 65%
+  of `ppa a`, a third of it the predictor's longest-match walk
+  (`pc_longest`); on the oxipng photo, whose predictor is the longest
+  match (`PF_LONGEST`), that walk was 68% of everything; on
+  `arrowdwn.png` the kind-1 mending was 70%, spent in full on each of its
+  three candidates and found nothing. Three changes, none of which changes
+  a recipe or a `.ppa` byte (the whole suite's counts the same, the hash
+  gate's files M4's):
+  - **The longest matches kept** (`TLongMemo`): `Longest` is the plain's and
+    the position's alone (its chains are of every position before), and
+    while encoding every candidate is at the same positions, the stream's
+    tokens. The search's candidates share one, and the recipe's encoding
+    and FindRecipe's own rebuild share another (up to `CORR_MEMO_MAX`, 4 Mi
+    positions, 8 bytes each). The codec's verification rebuilds without
+    it, as a reader does. Inside `Drive`, the last few asked are kept too
+    (p + 1's is the next literal's p, a missed match's reference is the
+    prediction's): that one also speeds up every rebuild, extraction
+    included.
+  - **The candidates on threads**: the parameter search's measures run on
+    the threads `Compress` leaves to the image (all of them for a file of
+    one image), the cheapest chosen in the same order.
+  - **The mending's budget**: the candidate that came furthest keeps 16
+    times the stream (plus 8 MB) of work, the other two 4 times (plus 2
+    MB), down from 48 times plus 32 MB each. On the corpora (png-synth,
+    zflow, pda) the mended streams were nearly all the first candidate's
+    (131 to 4), none past 16 times a large stream (46 MB at most) or 2.5 MB
+    on a small one.
+
+  Tried and left out: every position's longest match found first on the
+  threads, in pieces of 64 Ki positions (each with chains built from a
+  window before it, the same matches): about 8 times the work of the
+  positions the predictor asks (inside long matches the walks are long),
+  so slower on 8 threads than one pass.
+
+  Release build: the doodle (`BIRD1`, 18 KB) 3.0 -> 2.0 s on one thread,
+  1.3 s on eight; the oxipng photo (426 KB) 8.8 -> 5.3 s (its extraction
+  2.1 -> 1.6 s); `arrowdwn.png` 8.3 -> 4.9 s (the rest is the slow model);
+  run_tests' `png-nonzlib` 223 -> 114 s, `zflow` 99 -> 42 s; the hash
+  gate's `png-nonzlib` 21.9 -> 11.5 s on eight threads, 62 -> 40 s on one,
+  `png-synth` 2405 -> 2067 s on one. All 1214 `.ppa` of the gate's seven
+  sets are M4's, byte for byte, in its three runs. Rebuild of
+  kind 3 still runs on one thread (no checkpoints yet).
 
 ## Credits
 

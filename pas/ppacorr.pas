@@ -90,13 +90,36 @@ type
     tree: Integer;        { 0..PRED_TREE_LAST: the code lengths' builder (zlib, libdeflate, miniz, package-merge, zopfli) }
   end;
 
+type
+  { The predictor's longest match at each position below n, kept: it is
+    the plain's and the position's alone (its chains are of every position
+    before, whatever the parameters), so the parameter search's candidates
+    (all at the same positions, the stream's tokens), the recipe's encoding
+    and its rebuild can share it, and the same corrections give the same
+    stream with it or without. long and lx1: by position, for the walk's
+    two lengths, the match's length in the high 16 bits and its distance
+    in the low 16, all ones where not known yet. Threads can share one:
+    each writes what any would. }
+  TLongMemo = record
+    n: SizeInt;
+    long, lx1: array of LongWord;
+  end;
+  PLongMemo = ^TLongMemo;
+
+const
+  { positions a recipe's memo covers, at most (8 bytes each) }
+  CORR_MEMO_MAX = 1 shl 22;
+
+{ m for the positions below n (none known yet) }
+procedure CorrMemoInit(out m: TLongMemo; n: SizeInt);
+
 { Whether p is one CorrRebuild can use. }
 function PredValid(const p: TPredParams): Boolean;
 
 { The corrections of z's blocks and tokens against the predictor p. With
   stopTokens >= 0, only up to token stopTokens (or plain byte stopTokens *
   16): the parameter search's measure, not a recipe. }
-function CorrEncode(const z: TZStream; const p: TPredParams; stopTokens: SizeInt = -1): TBytes;
+function CorrEncode(const z: TZStream; const p: TPredParams; stopTokens: SizeInt = -1; memo: PLongMemo = nil): TBytes;
 
 { plain and its corrections -> the stream, framed as frame says (raw,
   header, adlerOk, endPad, tail; its blocks and tokens are not read).
@@ -104,10 +127,12 @@ function CorrEncode(const z: TZStream; const p: TPredParams; stopTokens: SizeInt
   the caps (a block count, distances, lengths, pad bits); never raises but
   for memory. }
 function CorrRebuild(const plain: TBytes; const p: TPredParams; const corr: TBytes;
-  const frame: TZStream; out stream: TBytes): Boolean;
+  const frame: TZStream; out stream: TBytes; memo: PLongMemo = nil): Boolean;
 
-{ The parameters whose corrections of z's first blocks are the smallest. }
-procedure CorrChooseParams(const z: TZStream; out p: TPredParams);
+{ The parameters whose corrections of z's first blocks are the smallest;
+  the candidates measured on as many threads (the same parameters with
+  any). memo: one for z.plain to share (nil: its own). }
+procedure CorrChooseParams(const z: TZStream; out p: TPredParams; threads: Integer = 1; memo: PLongMemo = nil);
 
 var
   { the search and the rank walk in C (ppacorrc.c); False: in Pascal, the
@@ -127,7 +152,7 @@ var
 
 implementation
 
-uses ppaarith, ppazlib;
+uses ppaarith, ppazlib, ppathreads;
 
 {$L ppacorrc.o}
 
@@ -1162,12 +1187,25 @@ type
     frame: TZStream;     { the plain, the framing; tokens of the block in hand }
   end;
 
+const
+  MEMO_NONE = High(LongWord);
+  LOCAL_MEMO = 8;
+
+procedure CorrMemoInit(out m: TLongMemo; n: SizeInt);
+begin
+  m.n := n;
+  m.long := nil; m.lx1 := nil;
+  if n <= 0 then Exit;
+  SetLength(m.long, n); SetLength(m.lx1, n);
+  FillDWord(m.long[0], n, MEMO_NONE); FillDWord(m.lx1[0], n, MEMO_NONE);
+end;
+
 { The one driver of encoding and decoding. Encoding: z is the stream
   (blocks, tokens, plain), its choices coded into c.ae; stopTokens as
   CorrEncode's. Decoding: z.plain is the plain, the blocks are written
   into o.w as they come. False: corrections that give no stream. }
 function Drive(var c: TCoder; const z: TZStream; const prm: TPredParams; stopTokens: SizeInt;
-  var o: TDriveOut): Boolean;
+  var o: TDriveOut; memo: PLongMemo = nil): Boolean;
 var
   m: TModels;
   mx: TMixers;
@@ -1183,6 +1221,9 @@ var
   isStored, isEnd, isDyn, fixedNoBigger, final: Boolean;
   maxLen, len, k, lg: SizeInt;
   tokLen, tokVal: array of Word;   { decoding: the block's tokens }
+  { LongestM's last few, by position (and LX1_HOPS or not) }
+  localPos: array[0..2 * LOCAL_MEMO - 1] of SizeInt;
+  localVal: array[0..2 * LOCAL_MEMO - 1] of LongWord;
   cLit: array[0..255] of Byte;     { the previous block's code lengths (12 for none) }
   cLen: array[257..285] of Byte;
   cDist: array[0..29] of Byte;
@@ -1211,6 +1252,33 @@ var
     end;
   end;
 
+  { Longest, through the memo where it has q, else the last few asked
+    (a position is asked again: p + 1's is the next literal's p, and a
+    missed match's reference is often the prediction's own) }
+  function LongestM(q, hops: SizeInt; out dist: SizeInt): SizeInt;
+  var v: LongWord; pv: PLongWord; slot: SizeInt;
+  begin
+    if (memo <> nil) and (q < memo^.n) then begin
+      if hops = LX1_HOPS then pv := @memo^.lx1[q] else pv := @memo^.long[q];
+      v := pv^;
+      if v = MEMO_NONE then begin
+        Result := Longest(s, q, hops, dist);
+        pv^ := (LongWord(Result) shl 16) or LongWord(dist);
+      end else begin
+        Result := v shr 16; dist := v and $FFFF;
+      end;
+      Exit;
+    end;
+    slot := (q and (LOCAL_MEMO - 1)) * 2 + Ord(hops = LX1_HOPS);
+    if localPos[slot] = q then begin
+      Result := localVal[slot] shr 16; dist := localVal[slot] and $FFFF;
+      Exit;
+    end;
+    Result := Longest(s, q, hops, dist);
+    localPos[slot] := q;
+    localVal[slot] := (LongWord(Result) shl 16) or LongWord(dist);
+  end;
+
   { the predicted token at p: pl 0 a literal, else a match (pl, pd); av
     the longest match the search found at p (0: none), l2 the lazy one at
     p + 1 (-1: not looked for) }
@@ -1220,7 +1288,7 @@ var
     pl := 0; pd := 0; l2 := -1;
     if cachePos = p then begin l1 := cacheLen; d1 := cacheDist; end
     else begin
-      if (prm.flags and PF_LONGEST) <> 0 then l1 := Longest(s, p, LONG_HOPS, d1)
+      if (prm.flags and PF_LONGEST) <> 0 then l1 := LongestM(p, LONG_HOPS, d1)
       else l1 := Search(s, p, MIN_MATCH - 1, d1);
       if (prm.lazy > 0) and (l1 > 0) and (l1 <= 5) and (((prm.flags and PF_FILTERED) <> 0) or
          ((l1 = MIN_MATCH) and (d1 > TOO_FAR) and ((prm.flags and PF_TOOFAR) <> 0))) then l1 := 0;
@@ -1230,7 +1298,7 @@ var
     if l1 < MIN_MATCH then Exit;
     if (prm.lazy = 0) or (l1 >= prm.lazy) then begin pl := l1; pd := d1; Exit; end;
     if (prm.flags and PF_LONGEST) <> 0 then begin
-      l2 := Longest(s, p + 1, LONG_HOPS, d2);
+      l2 := LongestM(p + 1, LONG_HOPS, d2);
       if l2 <= l1 then l2 := 0;
     end else
       l2 := Search(s, p + 1, l1, d2);
@@ -1304,7 +1372,7 @@ var
     c.inp[5] := @m.hit5[cb * 8 + bk];
     if l2 >= 0 then lx1 := l2
     else if (p + 1 < n) and (av > 0) then begin
-      lx1 := Longest(s, p + 1, LX1_HOPS, k);
+      lx1 := LongestM(p + 1, LX1_HOPS, k);
     end else lx1 := 0;
     c.inp[6] := @m.hit6[(LenBucket(lx1) * 8 + LenBucket(av)) * 2 + Ord(pl > 0)];
     hit := c.MixBit(mx.hit[bk], 7, Ord((rl = pl) and ((pl = 0) or (rd = pd))));
@@ -1326,7 +1394,7 @@ var
         { a match: its length against a reference, the longest match
           there (the predicted length when longer), then its distance's
           rank among the candidates at least that long }
-        ref := Longest(s, p, LONG_HOPS, k);
+        ref := LongestM(p, LONG_HOPS, k);
         if ref < pl then ref := pl;
         if ref = 0 then cs := 3
         else if pl = ref then cs := 0
@@ -1691,6 +1759,7 @@ begin
     s.ord := @ordA[0]; s.hcnt := @hcnt[0];
   end;
   cachePos := -1; cacheLen := 0; cacheDist := 0;
+  for k := 0 to High(localPos) do localPos[k] := -1;
   tokLen := nil; tokVal := nil;
   p := 0; bi := 0; nBlocks := 0;
   maxBlocks := 2 * n + BLOCKS_MORE;
@@ -1783,7 +1852,7 @@ begin
   Result := True;
 end;
 
-function CorrEncode(const z: TZStream; const p: TPredParams; stopTokens: SizeInt): TBytes;
+function CorrEncode(const z: TZStream; const p: TPredParams; stopTokens: SizeInt; memo: PLongMemo): TBytes;
 var c: TCoder; o: TDriveOut;
 begin
   if not PredValid(p) then raise Exception.Create('ppacorr: CorrEncode with parameters PredValid refuses');
@@ -1791,12 +1860,12 @@ begin
   c.enc := True;
   c.ae.Init;
   o := Default(TDriveOut);
-  if not Drive(c, z, p, stopTokens, o) then raise Exception.Create('ppacorr: a stream the driver cannot code');
+  if not Drive(c, z, p, stopTokens, o, memo) then raise Exception.Create('ppacorr: a stream the driver cannot code');
   Result := c.ae.Finish;
 end;
 
 function CorrRebuild(const plain: TBytes; const p: TPredParams; const corr: TBytes;
-  const frame: TZStream; out stream: TBytes): Boolean;
+  const frame: TZStream; out stream: TBytes; memo: PLongMemo): Boolean;
 var c: TCoder; o: TDriveOut; z: TZStream;
 begin
   stream := nil;
@@ -1812,7 +1881,7 @@ begin
   WriterBegin(o.w, o.frame);
   z := Default(TZStream);
   z.plain := plain;
-  if not Drive(c, z, p, -1, o) then Exit;
+  if not Drive(c, z, p, -1, o, memo) then Exit;
   if o.frame.endPad shr WriterEndPadBits(o.w) <> 0 then Exit;
   stream := WriterFinish(o.w, o.frame);
   Result := True;
@@ -1941,7 +2010,7 @@ begin
   for tb := 1 to PRED_TREE_LAST do if score[tb] < score[Result] then Result := tb;
 end;
 
-procedure CorrChooseParams(const z: TZStream; out p: TPredParams);
+procedure CorrChooseParams(const z: TZStream; out p: TPredParams; threads: Integer; memo: PLongMemo);
 const
   { zlib's good lazy nice chain, by level }
   CONFIG: array[1..9, 0..3] of Integer = (
@@ -1954,10 +2023,11 @@ const
   SEARCH_KEEP = 3;
 var
   cands: array of TPredParams; costs: array of SizeInt;
-  best, cand: TPredParams; bestCost, cost: SizeInt;
-  lv, f, i, j, k, hb, cnt, bestCnt, nC, chainEst, lazyMin: SizeInt;
+  best, cand: TPredParams; cost: SizeInt;
+  lv, f, i, j, k, hb, cnt, bestCnt, nC, chainEst, lazyMin, from, stop: SizeInt;
   nonStored, lazyLits: Boolean;
   counts: array of SizeInt;
+  own: TLongMemo;
 
   procedure Add(const q: TPredParams);
   var i: SizeInt;
@@ -1969,11 +2039,10 @@ var
     cands[nC] := q; Inc(nC);
   end;
 
-  procedure TryParams(const q: TPredParams; stop: SizeInt);
+  { costs[from + i]: candidate from + i's, on the first stop tokens }
+  procedure Measure1(i: SizeInt);
   begin
-    if not PredValid(q) then Exit;
-    cost := Length(CorrEncode(z, q, stop));
-    if (bestCost < 0) or (cost < bestCost) then begin bestCost := cost; best := q; end;
+    costs[from + i] := Length(CorrEncode(z, cands[from + i], stop, memo));
   end;
 
 begin
@@ -2033,9 +2102,15 @@ begin
   cand.lazy := 0; Add(cand);
   cand.flags := PF_LONGEST; Add(cand);
   cand.lazy := MAX_MATCH; Add(cand);
-  { the best one's hash, window, TOO_FAR, nice and lazy, as candidates too }
+  { (the longest matches the candidates share: positions up to SEARCH2's) }
+  if memo = nil then begin
+    CorrMemoInit(own, MinI(Length(z.plain), 16 * SEARCH2 + 2 * MAX_MATCH));
+    memo := @own;
+  end;
   SetLength(costs, nC);
-  for i := 0 to nC - 1 do costs[i] := Length(CorrEncode(z, cands[i], SEARCH1));
+  from := 0; stop := SEARCH1;
+  ParallelFor(nC, threads, @Measure1);
+  { the best one's hash, window, TOO_FAR, nice and lazy, as candidates too }
   k := 0;
   for i := 1 to nC - 1 do if costs[i] < costs[k] then k := i;
   best := cands[k];
@@ -2059,9 +2134,9 @@ begin
     cand := best;
     if cand.lazy < MAX_MATCH then begin cand.lazy := MAX_MATCH; Add(cand); end;
   end;
-  j := Length(costs);
+  from := Length(costs);
   SetLength(costs, nC);
-  for i := j to nC - 1 do costs[i] := Length(CorrEncode(z, cands[i], SEARCH1));
+  ParallelFor(nC - from, threads, @Measure1);
   { the SEARCH_KEEP cheapest to the front, in order (ties: the earlier) }
   for i := 0 to MinI(SEARCH_KEEP, nC) - 1 do begin
     k := i;
@@ -2073,8 +2148,13 @@ begin
   best := cands[0];
   { on the first SEARCH2 tokens, when there are more than SEARCH1 }
   if (Length(z.tokLen) > SEARCH1) or (Length(z.plain) > 16 * SEARCH1) then begin
-    bestCost := -1;
-    for i := 0 to MinI(SEARCH_KEEP, nC) - 1 do TryParams(cands[i], SEARCH2);
+    k := MinI(SEARCH_KEEP, nC);
+    from := 0; stop := SEARCH2;
+    ParallelFor(k, threads, @Measure1);
+    { the cheapest (ties: the earlier) }
+    j := 0;
+    for i := 1 to k - 1 do if costs[i] < costs[j] then j := i;
+    best := cands[j];
   end;
   p := best;
 end;

@@ -86,9 +86,11 @@ function Parse(const a: TBytes; framing: TDeflFraming; maxPlain: SizeInt; out z:
 
 { The recipe of a stream already parsed (z, from a), of a kind up to
   maxKind: dsOk when one gives a back bit for bit (checked), dsNotTaken
-  otherwise. Kind 0 is looked for first, as codec stream version 2 does. }
+  otherwise. Kind 0 is looked for first, as codec stream version 2 does.
+  threads: kind 3's parameter search and the rebuilds' (the same recipe
+  with any). }
 function FindRecipe(const a: TBytes; const z: TZStream; out recipe: TDeflRecipe;
-  maxKind: Integer = RECIPE_KIND_LAST): TDeflStatus;
+  maxKind: Integer = RECIPE_KIND_LAST; threads: Integer = 1): TDeflStatus;
 
 { Parse and FindRecipe: a -> the bytes it holds and its recipe. }
 function Analyze(const a: TBytes; framing: TDeflFraming; maxPlain: SizeInt; out plain: TBytes;
@@ -172,10 +174,15 @@ const
     few more tokens is chance }
   MEND_GAIN = 256;
   { the mending's work, at most: runs, and bytes compared (a few times the
-    stream's) }
+    stream's): the candidate that came furthest, the others less (the
+    corpora's mended streams, 14/11/2026: nearly all the first
+    candidate's, none past 16 times a large stream (46 MB) or 2.5 MB on a
+    small one) }
   MEND_RUNS = 3000;
-  MEND_WORK_TIMES = 48;
-  MEND_WORK_MORE = 32 shl 20;
+  MEND_WORK_TIMES = 16;
+  MEND_WORK_MORE = 8 shl 20;
+  MEND_WORK_TIMES_NEXT = 4;
+  MEND_WORK_MORE_NEXT = 2 shl 20;
   SCREEN_TOKENS = 1 shl 16;   { the first pass compares this many tokens (the blocks that hold them) }
   SCREEN_PLAIN = 1 shl 20;    { or bytes }
 
@@ -394,14 +401,16 @@ var
   end;
 
   { mend candidate c where it parts from z, one change at a time }
-  function Mend(const c: TCand): Boolean;
+  function Mend(const c: TCand; first: Boolean): Boolean;
   var fx, f2, best: TFixes; p: TZlibParams; prog, pr, bestProg, last, lastS, at, g0, bestGood: SizeInt;
       it, v, lv, sg, l0, s0: Integer; f: TZlibFlow; j, g: SizeInt; found: Boolean;
       runs0, work0: Int64;
 
     function Over: Boolean;
     begin
-      Result := (runs - runs0 > MEND_RUNS) or (work - work0 > MEND_WORK_TIMES * Int64(n) + MEND_WORK_MORE);
+      Result := runs - runs0 > MEND_RUNS;
+      if first then Result := Result or (work - work0 > MEND_WORK_TIMES * Int64(n) + MEND_WORK_MORE)
+      else Result := Result or (work - work0 > MEND_WORK_TIMES_NEXT * Int64(n) + MEND_WORK_MORE_NEXT);
     end;
 
     function Further: Boolean;
@@ -722,13 +731,14 @@ begin
   end;
   { mended where they part }
   for i := 0 to nTop - 1 do
-    if Mend(top[i]) then Exit(True);
+    if Mend(top[i], i = 0) then Exit(True);
 end;
 
 { ---------------------------------------------------------------- recipes }
 
-function FindRecipe(const a: TBytes; const z: TZStream; out recipe: TDeflRecipe; maxKind: Integer): TDeflStatus;
-var e: TZStream; back: TBytes; i: SizeInt; markers: Boolean;
+function FindRecipe(const a: TBytes; const z: TZStream; out recipe: TDeflRecipe; maxKind: Integer;
+  threads: Integer): TDeflStatus;
+var e: TZStream; back: TBytes; i: SizeInt; markers: Boolean; memo: TLongMemo;
 begin
   Result := dsNotTaken;
   recipe := Default(TDeflRecipe);
@@ -756,7 +766,7 @@ begin
   if FindZlibFlow(z, recipe.prm, recipe.flow, e) then begin
     PutFraming(recipe, e);
     back := Encode(e);
-    if SameBytes(back, a) and Rebuild(z.plain, recipe, back) and SameBytes(back, a) then Exit(dsOk);
+    if SameBytes(back, a) and Rebuild(z.plain, recipe, back, threads) and SameBytes(back, a) then Exit(dsOk);
   end;
   if maxKind < RECIPE_CORR then Exit;
   { kind 3: any stream ppadeflate reads, rebuilt and compared }
@@ -765,14 +775,19 @@ begin
   recipe.flow := Default(TZlibFlow);
   { (CorrEncode raises on a stream its driver cannot code: none known, but
     Analyze never raises but for memory; no recipe then) }
+  { (the longest matches kept for all three: CorrMemoInit) }
+  if Length(z.plain) < CORR_MEMO_MAX then CorrMemoInit(memo, Length(z.plain))
+  else CorrMemoInit(memo, CORR_MEMO_MAX);
   try
-    CorrChooseParams(z, recipe.pred);
-    recipe.corr := CorrEncode(z, recipe.pred);
+    CorrChooseParams(z, recipe.pred, threads, @memo);
+    recipe.corr := CorrEncode(z, recipe.pred, -1, @memo);
   except
     on e: EOutOfMemory do raise;
     on e: Exception do Exit(dsNotTaken);
   end;
-  if Rebuild(z.plain, recipe, back) and SameBytes(back, a) then Result := dsOk;
+  e := Default(TZStream);
+  PutFraming(recipe, e);
+  if CorrRebuild(z.plain, recipe.pred, recipe.corr, e, back, @memo) and SameBytes(back, a) then Result := dsOk;
 end;
 
 function Analyze(const a: TBytes; framing: TDeflFraming; maxPlain: SizeInt; out plain: TBytes;

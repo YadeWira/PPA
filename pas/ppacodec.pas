@@ -385,8 +385,9 @@ end;
 
 { Whether stream s can be kept as an image, and its plan. model: Compress's
   (-1: TestModel's, which is -1 outside the tests); maxVersion: the newest
-  stream version Compress may write }
-function PlanImage(const p: TPng; s: SizeInt; model, maxVersion: Integer; out plan: TStreamPlan): Boolean;
+  stream version Compress may write; threads: the recipe search's (the same
+  plan with any) }
+function PlanImage(const p: TPng; s: SizeInt; model, maxVersion, threads: Integer; out plan: TStreamPlan): Boolean;
 var info: TImageInfo; a: TBytes;
 begin
   if model < 0 then model := TestModel;
@@ -402,7 +403,7 @@ begin
   { a recipe whose rebuild is the stream, bit for bit (checked); one the
     stream version the caller allows can hold (kind 0 is looked for
     first: a file of zlib's streams stays a version 2 stream) }
-  if FindRecipe(a, plan.z, plan.recipe, MaxRecipeKind(maxVersion)) <> dsOk then Exit;
+  if FindRecipe(a, plan.z, plan.recipe, MaxRecipeKind(maxVersion), threads) <> dsOk then Exit;
   if RecipeVersion(plan.recipe) > maxVersion then Exit;
   { a model given takes every image it can (ChooseModel's trials skipped) }
   if (model = MODE_IMAGE) or ((model in [MODE_FAST, MODE_STATIC]) and FastEligible(info)) then
@@ -436,11 +437,12 @@ var
   total: Int64; big: SizeInt; grew: Boolean; coded: array of Int64;
   drop: array of Boolean; anyDrop: Boolean; saved: array of TStreamPlan; meta2, sub0b: TBytes;
   jpegLens: array of SizeInt; oldLen, newLen: Int64; k: SizeInt; streamVer: Integer;
+  nDefl: SizeInt; planThreads: Integer;
 
   procedure PlanOne(k: SizeInt);
   begin
     if p.streams[k].kind in [skJdat, skJdaa] then PlanJpeg(p, k, 1, plans[k])
-    else PlanImage(p, k, model, maxVersion, plans[k]);
+    else PlanImage(p, k, model, maxVersion, planThreads, plans[k]);
   end;
 
   procedure CodeBand(k: SizeInt);
@@ -578,7 +580,15 @@ begin
   plans := nil;
   SetLength(plans, Length(p.streams));
   { each stream's plan on its own: the zlib parameter search is the slow
-    part, and the streams' are independent }
+    part, and the streams' are independent; the threads left to each, to
+    its recipe search (a large image's, alone, on all of them) }
+  nDefl := 0;
+  for s := 0 to High(p.streams) do
+    if p.streams[s].kind in [skIdat, skFdat] then Inc(nDefl);
+  planThreads := threads;
+  if nDefl > 1 then begin
+    if nDefl < threads then planThreads := threads div nDefl else planThreads := 1;
+  end;
   ParallelFor(Length(p.streams), threads, @PlanOne);
   { past MAX_TOTAL_IMAGE_BYTES of images, the rest as bytes }
   total := 0;

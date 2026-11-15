@@ -131,7 +131,9 @@ begin
 end;
 
 { a kind-3 recipe made again, and rebuilt, with the other code (ppacorr's
-  hot loops in C or in Pascal): the same parameters, corrections, stream }
+  hot loops in C or in Pascal): the same parameters, corrections, stream.
+  And the other way: the parameters searched on 4 threads, the corrections
+  and the rebuild without the longest matches FindRecipe keeps }
 procedure CheckOtherCode(const a: TBytes; framing: TDeflFraming; const r: TDeflRecipe; const name: string);
 var z: TZStream; was: Boolean; p2: TPredParams; c2, back: TBytes; r2: TDeflRecipe;
 begin
@@ -139,7 +141,7 @@ begin
   was := UseCorrC;
   try
     UseCorrC := not was;
-    CorrChooseParams(z, p2);
+    CorrChooseParams(z, p2, 4);
     if not SamePred(p2, r.pred) then begin Fail('C and Pascal choose other kind-3 parameters: ' + name); Exit; end;
     c2 := CorrEncode(z, p2);
     if not Same(c2, r.corr) then begin Fail('C and Pascal make other kind-3 corrections: ' + name); Exit; end;
