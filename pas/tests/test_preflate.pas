@@ -7,7 +7,12 @@
   bare deflate; else zlib if its header says so, bare otherwise).
 
     test_preflate <directory> [minimum streams] [-all0 | -none0 | -all01 | -all013] [-min1 N] [-min3 N] [-minok N]
-                  [-max01] [-only TEXT] [-codec] [-diffc] [-flips] [-tsv FILE] [-v]
+                  [-max01] [-only TEXT] [-codec] [-minv3 N] [-diffc] [-flips] [-tsv FILE] [-v]
+    test_preflate tests/recipes [minimum] -golden | -writegolden
+
+  -golden: the golden vectors (tests/recipes, tools/preflate/mkgolden.py):
+  each committed recipe must give its stream back (procedure Golden);
+  -writegolden makes them.
 
   -all0: every stream must have a kind-0 recipe (zlib's parameters: the
   regression set); -none0: none may (streams zlib does not write alone:
@@ -22,9 +27,12 @@
   hot loops), which must give the same. -tsv FILE: a line per stream
   (file, stream, bytes, plain, kind, recipe bytes, analyse and rebuild
   milliseconds). -flips: the kind-3 crafted cases too (below). -codec:
-  also, per file, ppacodec.Compress with maxVersion 2 must give the very
-  stream it gives by default (and ppa1's MODE_STATIC call the same), and
-  versions it does not write must be refused. The last line has a digest
+  also, per file, ppacodec.Compress by default (stream version 2, or 3 when
+  an image's recipe is of kind 1 or 3) and with maxVersion 2 (version 2,
+  the very stream of the default when that is version 2; ppa1's
+  MODE_STATIC call too), each verified and decompressed back, and
+  versions it does not write refused; -minv3 N: at least N files written
+  in version 3. The last line has a digest
   of every recipe's bytes, the same from the C and the Pascal code.
 
   Then, whatever the directory, crafted cases: streams that are deflate
@@ -58,6 +66,7 @@ var
   maxKindArg: Integer = RECIPE_KIND_LAST;
   tsv: TextFile;
   recipeHash: QWord;   { FNV-1a of every recipe's bytes, in order }
+  nCodecV: array[2..3] of Int64;   { -codec: the files Compress wrote in each stream version }
 
 procedure Fail(const s: string);
 begin
@@ -202,20 +211,150 @@ begin
   end;
 end;
 
-{ ppacodec.Compress and maxVersion: version 2 is what it writes today }
+{ ppacodec.Compress and maxVersion. By default a file is written in the
+  oldest stream version that holds its images' recipes: 2 when each is
+  kind 0, 3 when one is of kind 1 or 3. With maxVersion 2 (ppa1's) it is
+  version 2, and the very stream of the default when that is version 2.
+  Each stream, verified as it is made, decompresses to the file. }
 procedure CheckCodec(const d: TBytes; const name: string);
-var s0, s2: TBytes; why: string; stats: TCodecStats; t0, t2: Boolean;
+var s0, s2, back: TBytes; why: string; stats: TCodecStats; t0, t2: Boolean;
 begin
-  t0 := Compress(d, s0, why, stats, False, 1);
-  t2 := Compress(d, s2, why, stats, False, 1, -1, 2);
-  if (t0 <> t2) or not Same(s0, s2) then Fail('Compress with maxVersion 2 differs: ' + name);
-  if t0 and (s0[0] <> 2) then Fail('Compress wrote a version other than 2: ' + name);
-  { ppa1's call (the zpaq-std plugin) }
-  t0 := Compress(d, s0, why, stats, False, 1, MODE_STATIC);
+  t0 := Compress(d, s0, why, stats, True, 1);
+  t2 := Compress(d, s2, why, stats, True, 1, -1, 2);
+  if t0 <> t2 then Fail('Compress takes the file with one maxVersion and not the other: ' + name);
+  if t2 and (s2[0] <> 2) then Fail('Compress with maxVersion 2 wrote another version: ' + name);
+  if t0 and not (s0[0] in [2, 3]) then Fail('Compress wrote a version other than 2 or 3: ' + name);
+  if t0 and (s0[0] = 2) and not Same(s0, s2) then Fail('a version 2 stream differs with maxVersion 2: ' + name);
+  if t0 then begin
+    Inc(nCodecV[s0[0]]);
+    if not Decompress(s0, Length(d), back, why) or not Same(back, d) then Fail('the default stream does not come back: ' + name);
+    if not Decompress(s2, Length(d), back, why) or not Same(back, d) then Fail('the version 2 stream does not come back: ' + name);
+  end;
+  { ppa1's call (the zpaq-std plugin): version 2 }
   t2 := Compress(d, s2, why, stats, False, 1, MODE_STATIC, 2);
-  if (t0 <> t2) or not Same(s0, s2) then Fail('Compress (MODE_STATIC) with maxVersion 2 differs: ' + name);
+  if t2 and (s2[0] <> 2) then Fail('Compress (MODE_STATIC) with maxVersion 2 wrote another version: ' + name);
   if Compress(d, s2, why, stats, False, 1, -1, 1) or (s2 <> nil) then Fail('maxVersion 1 not refused: ' + name);
-  if Compress(d, s2, why, stats, False, 1, -1, STREAM_VERSION + 1) then Fail('maxVersion 3 not refused: ' + name);
+  if Compress(d, s2, why, stats, False, 1, -1, STREAM_VERSION + 1) then Fail('a maxVersion past STREAM_VERSION not refused: ' + name);
+end;
+
+{ ---------------------------------------------------------------- golden vectors }
+
+procedure WriteBytes(const f: string; const b: TBytes); var st: TFileStream;
+begin st := TFileStream.Create(f, fmCreate); try if Length(b) > 0 then st.WriteBuffer(b[0], Length(b)); finally st.Free; end; end;
+
+{ tests/recipes: each deflate stream (NAME.raw bare, NAME.zlib zlib-framed)
+  beside the recipe PPA's encoder made of it (NAME.recipe, RecipeBytes).
+  -golden: each recipe, read back for the bytes its stream holds, must give
+  that stream bit for bit, on 1 thread and in segments on 4, and write the
+  same bytes again: what freezes a published recipe format, on every
+  platform, C and Pascal. The encoder's own recipe is counted (it may
+  change from release to release; what a recipe gives may not).
+  -writegolden: make each stream's recipe (once per format, then committed). }
+procedure Golden(const dir: string; write: Boolean; minimum: Integer);
+var
+  files: TStringList; sr: TSearchRec; i: Integer; name, base, ext: string;
+  a, plain, rb, rb2, back: TBytes; z: TZStream; r: TDeflRecipe; pos: SizeInt;
+  st: TDeflStatus; framing: TDeflFraming; n, nSame: Integer; kinds: array[0..RECIPE_KIND_LAST] of Integer;
+  saveMin, saveSeg: SizeInt;
+
+  { recipes no encoder made: a kind-3 recipe of the set with one predictor
+    field changed (each tree builder, symEnd, the filters, the search), and
+    the stream its rebuild gives (the same bytes, other deflate data): the
+    decoder's paths the encoders here do not choose, frozen as well }
+  procedure Crafts;
+  const
+    BASES: array[0..1] of string = ('rgba8-zopfli', 'drawing-ldf9');
+    NV = 12;
+    SUF: array[0..NV - 1] of string = ('tree0', 'tree1', 'tree2', 'tree3', 'tree4', 'symend300', 'filtered', 'toofar',
+      'longest-lazy', 'greedy', 'chain1-hbits8', 'maxdist999');
+  var b, v: Integer; r0, r1: TDeflRecipe; mf: TextFile; nm: string;
+  begin
+    AssignFile(mf, dir + '/MANIFEST.tsv'); Append(mf);
+    for b := 0 to High(BASES) do begin
+      a := ReadFile(dir + '/' + BASES[b] + '.raw');
+      if not Parse(a, dfRaw, MAX_PLAIN, z).Ok then begin Fail('golden: ' + BASES[b]); Continue; end;
+      plain := z.plain;
+      if (Analyze(a, dfRaw, MAX_PLAIN, plain, r0) <> dsOk) or (r0.kind <> RECIPE_CORR) then begin
+        Fail('golden: not kind 3: ' + BASES[b]); Continue;
+      end;
+      for v := 0 to NV - 1 do begin
+        r1 := r0;
+        with r1.pred do
+          case v of
+            0..4: tree := v;
+            5: symEnd := 300;
+            6: flags := flags xor PF_FILTERED;
+            7: flags := flags xor PF_TOOFAR;
+            8: begin flags := flags or PF_LONGEST; lazy := 32; end;
+            9: begin flags := flags and not PF_LONGEST; lazy := 0; end;
+            10: begin chain := 1; hbits := 8; end;
+            11: maxDist := 999;
+          end;
+        if not RecipeValid(r1) or not Rebuild(plain, r1, back) then Continue;
+        nm := BASES[b] + '~' + SUF[v];
+        WriteBytes(dir + '/' + nm + '.raw', back);
+        WriteBytes(dir + '/' + nm + '.recipe', RecipeBytes(r1));
+        Writeln(mf, Format('%s.raw'#9'(%s.raw''s bytes)'#9'%d'#9'%d'#9'crafted: %s.raw''s recipe with %s, and its rebuild',
+          [nm, BASES[b], Length(plain), Length(back), BASES[b], SUF[v]]));
+        Inc(n); Inc(kinds[RECIPE_CORR]);
+        Writeln(Format('%-36s kind 3 (crafted), %d bytes', [nm + '.raw', Length(back)]));
+      end;
+    end;
+    CloseFile(mf);
+  end;
+
+begin
+  files := TStringList.Create; files.Sorted := True;
+  if FindFirst(dir + '/*', faAnyFile, sr) = 0 then begin
+    repeat
+      ext := ExtractFileExt(sr.Name);
+      if ((sr.Attr and faDirectory) = 0) and ((ext = '.raw') or (ext = '.zlib')) then files.Add(sr.Name);
+    until FindNext(sr) <> 0;
+    FindClose(sr);
+  end;
+  n := 0; nSame := 0; FillChar(kinds, SizeOf(kinds), 0);
+  for i := 0 to files.Count - 1 do begin
+    name := files[i]; ext := ExtractFileExt(name); base := ChangeFileExt(name, '');
+    if ext = '.raw' then framing := dfRaw else framing := dfZlib;
+    a := ReadFile(dir + '/' + name);
+    if not Parse(a, framing, MAX_PLAIN, z).Ok then begin Fail('golden: not a deflate stream: ' + name); Continue; end;
+    plain := z.plain;
+    if write then begin
+      st := Analyze(a, framing, MAX_PLAIN, plain, r);
+      if st <> dsOk then begin Fail('golden: no recipe: ' + name); Continue; end;
+      rb := RecipeBytes(r);
+      WriteBytes(dir + '/' + base + '.recipe', rb);
+      Inc(kinds[r.kind]); Inc(n);
+      Writeln(Format('%-36s kind %d, %d recipe bytes', [name, r.kind, Length(rb)]));
+      Continue;
+    end;
+    if not FileExists(dir + '/' + base + '.recipe') then begin Fail('golden: no .recipe for ' + name); Continue; end;
+    rb := ReadFile(dir + '/' + base + '.recipe');
+    pos := 0;
+    if (ReadRecipe(rb, pos, Length(plain), Length(a), r) <> rrOk) or (pos <> Length(rb)) then begin
+      Fail('golden: recipe not read: ' + base + '.recipe'); Continue;
+    end;
+    Inc(n); Inc(kinds[r.kind]);
+    if not Rebuild(plain, r, back) or not Same(back, a) then Fail('golden: the recipe does not give its stream: ' + name);
+    saveMin := ppazlib.PAR_MIN_BYTES; saveSeg := ppazlib.PAR_SEG_MIN;
+    ppazlib.PAR_MIN_BYTES := 512; ppazlib.PAR_SEG_MIN := 128;
+    try
+      if not Rebuild(plain, r, back, 4) or not Same(back, a) then Fail('golden: on 4 threads the recipe does not give its stream: ' + name);
+    finally
+      ppazlib.PAR_MIN_BYTES := saveMin; ppazlib.PAR_SEG_MIN := saveSeg;
+    end;
+    rb2 := RecipeBytes(r);
+    if not Same(rb2, rb) then Fail('golden: the recipe read back is written otherwise: ' + base + '.recipe');
+    { the encoder today }
+    if (Analyze(a, framing, MAX_PLAIN, plain, r) = dsOk) and Same(RecipeBytes(r), rb) then Inc(nSame);
+  end;
+  files.Free;
+  if write then Crafts;
+  if n < minimum then Fail(Format('golden: %d vectors < minimum %d', [n, minimum]));
+  if write then Writeln(Format('%d recipes written: %d kind 0, %d kind 1, %d kind 3; %d failures',
+    [n, kinds[0], kinds[1], kinds[3], failures]))
+  else Writeln(Format('golden: %d recipes (%d kind 0, %d kind 1, %d kind 3) give their streams back, on 1 and 4 threads, ' +
+    'and are written the same; the encoder makes %d of them again; %d failures', [n, kinds[0], kinds[1], kinds[3], nSame, failures]));
 end;
 
 { ---------------------------------------------------------------- crafted cases }
@@ -1008,7 +1147,7 @@ begin
 end;
 
 var
-  files: TStringList; sr: TSearchRec; dir, name, ext, only: string; i, minimum, min1, minOk, kind: Integer;
+  files: TStringList; sr: TSearchRec; dir, name, ext, only: string; i, minimum, min1, minOk, minV3, kind: Integer;
   all0, none0, all01, all013, codec: Boolean; min3: Integer; tsvName: string;
   d: TBytes; p: TPng; s: SizeInt; st: TDeflStatus; t0: TDateTime; framing: TDeflFraming;
   dirStreams, dirBytes0, dirBytes1, dirKind0, dirKind1, dirNotTaken, dirNotDeflate: Int64;
@@ -1024,7 +1163,18 @@ var
 
 begin
   dir := ParamStr(1); minimum := StrToIntDef(ParamStr(2), 1);
-  all0 := False; none0 := False; all01 := False; all013 := False; codec := False; verbose := False; min1 := 0; minOk := 0;
+  for i := 2 to ParamCount do
+    if (ParamStr(i) = '-golden') or (ParamStr(i) = '-writegolden') then begin
+      failures := 0;
+      try
+        Golden(dir, ParamStr(i) = '-writegolden', minimum);
+      except
+        on e: Exception do Fail('golden: ' + e.ClassName + ': ' + e.Message);
+      end;
+      if failures > 0 then Halt(1);
+      Halt(0);
+    end;
+  all0 := False; none0 := False; all01 := False; all013 := False; codec := False; verbose := False; min1 := 0; minOk := 0; minV3 := 0;
   only := ''; min3 := 0; tsvName := ''; diffc := False; flips := False;
   for i := 2 to ParamCount do
     if ParamStr(i) = '-all0' then all0 := True
@@ -1039,6 +1189,7 @@ begin
     else if (ParamStr(i) = '-min1') and (i < ParamCount) then min1 := StrToInt(ParamStr(i + 1))
     else if (ParamStr(i) = '-only') and (i < ParamCount) then only := ParamStr(i + 1)
     else if (ParamStr(i) = '-minok') and (i < ParamCount) then minOk := StrToInt(ParamStr(i + 1))
+    else if (ParamStr(i) = '-minv3') and (i < ParamCount) then minV3 := StrToInt(ParamStr(i + 1))
     else if ParamStr(i) = '-codec' then codec := True
     else if ParamStr(i) = '-v' then verbose := True;
   files := TStringList.Create; files.Sorted := True;
@@ -1095,6 +1246,9 @@ begin
   if dirStreams < minimum then Fail(Format('%d streams < minimum %d', [dirStreams, minimum]));
   if dirKind1 < min1 then Fail(Format('%d kind 1 < minimum %d', [dirKind1, min1]));
   if dirKind3 < min3 then Fail(Format('%d kind 3 < minimum %d', [dirKind3, min3]));
+  if nCodecV[3] < minV3 then Fail(Format('%d files in codec stream version 3 < minimum %d', [nCodecV[3], minV3]));
+  if codec then Writeln(Format('codec: %d files in stream version 2, %d in version 3 (each back, and in version 2 too)',
+    [nCodecV[2], nCodecV[3]]));
   if dirKind0 + dirKind1 + dirKind3 < minOk then Fail(Format('%d with a recipe < minimum %d', [dirKind0 + dirKind1 + dirKind3, minOk]));
   Writeln(Format('%d streams: %d kind 0 (%d bytes), %d kind 1 (%d bytes), %d kind 3 (%d bytes, recipes %d bytes) ' +
     '(written, read and rebuilt the same), %d not taken, %d not deflate; crafted: %d kind 0, %d kind 1, %d kind 3, ' +

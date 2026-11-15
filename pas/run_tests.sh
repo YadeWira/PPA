@@ -68,6 +68,14 @@ same_recipes() {
     || { echo "FAIL: the C and Pascal code give different recipes ($1, $2)"; exit 1; }
 }
 same_recipes "$OUT/pf_c.txt" "$OUT/pf_pas.txt"
+# the golden vectors (tests/recipes, tools/preflate/mkgolden.py): each
+# committed recipe gives its stream back, C and Pascal (.github/test.sh: on
+# every platform, 32 and 64 bits)
+"$OUT/test_preflate" "$PPA/tests/recipes" 45 -golden | tail -1
+PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/recipes" 45 -golden | tail -1
+# codec stream version 3 (tests/png3: images other encoders wrote): 3 of
+# the 5 files are written in it, each back, and in version 2 too
+"$OUT/test_preflate" "$PPA/tests/png3" 5 -none0 -all013 -codec -minv3 3 | tail -1
 PF_CORPUS=${PREFLATE_CORPUS-/mnt/IA_LAB/agentes/ppa/preflate/corpus}
 if [ -d "$PF_CORPUS/png-zlib" ]; then
   # the regression set: all 392 streams kind 0; zlib alone does not write the
@@ -75,7 +83,7 @@ if [ -d "$PF_CORPUS/png-zlib" ]; then
   # built with TOO_FAR 32767: kind 1; the 17 others kind 3, the same from
   # the C and the Pascal code)
   "$OUT/test_preflate" "$PF_CORPUS/png-zlib" 392 -all0 | tail -1
-  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 7 -all013 -min3 17 -diffc | tail -1
+  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 7 -all013 -min3 17 -diffc -codec -minv3 19 | tail -1
 fi
 if [ -d "$PF_CORPUS/hostile" ]; then
   # kind 3 (M3a): every stream that inflates has a recipe; the others are
@@ -139,6 +147,9 @@ for d in "${dirs[@]}"; do "$OUT/measure_static" "$d" | tail -1; done
 
 echo "== layer 6: the codec (every file compressed, verified, decompressed)"
 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
+# codec stream version 3: images other encoders wrote (tests/png3)
+"$OUT/test_codec" "$PPA/tests/png3" 5 | tail -1
+PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png3" 5 | tail -1
 # bands: 4 KB ones, so that the samples have several, decoded last first
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 # --max: every image with the slow model
@@ -157,6 +168,8 @@ $FPC -O3 -dPPA_FAST -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fu"$PPA/vendor/pja/pas" -Fi"
   || { cat "$OUT/fpc.log"; exit 1; }
 "$OUT/test_format_fast" "$PPA/tests/png" > "$OUT/damaged.txt" 2>&1 || { cat "$OUT/damaged.txt"; exit 1; }
 tail -1 "$OUT/damaged.txt"; grep -q ', 0 failures' "$OUT/damaged.txt"
+"$OUT/test_format_fast" "$PPA/tests/png3" > "$OUT/damaged3.txt" 2>&1 || { cat "$OUT/damaged3.txt"; exit 1; }
+tail -1 "$OUT/damaged3.txt"; grep -q ', 0 failures' "$OUT/damaged3.txt"
 $FPC -O3 -dPPA_FAST -dPJA_FAST -Fu"$PAS" -Fi"$PAS" -Fu"$PPA/vendor/pja/pas" -Fi"$PPA/vendor/pja/pas" -Fo"$OUT/c" -FU"$OUT/cli" -o"$OUT/ppa" "$PAS/ppacli.pas" > "$OUT/fpc.log" 2>&1 \
   || { cat "$OUT/fpc.log"; exit 1; }
 (cd "$PPA" && sh pas/tests/cli.sh "$OUT/ppa" "$OUT/clitest")

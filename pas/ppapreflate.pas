@@ -21,10 +21,10 @@
         corrections (ppacorr) that make its choices the stream's: every
         stream ppadeflate reads has one.
   doc/PREFLATE.md has the kinds, the fields, a recipe's bytes (RecipeBytes,
-  provisional, versioned) and the rule that freezes them. A kind-0 recipe
-  is written exactly as codec stream version 2 writes an image stream's
-  (RecipeBytesV2), so moving the codec here changed none of its streams;
-  version 2 cannot hold kind 1 (the codec asks FindRecipe for kind 0 only).
+  versioned; codec stream version 3 holds them) and the rule that freezes
+  them (tests/recipes: the golden vectors). A kind-0 recipe is written in
+  codec stream version 2 exactly as it always wrote an image stream's
+  (RecipeBytesV2); version 2 holds no other kind.
 
   Analyze verifies: it gives a recipe only when Rebuild of it gives the
   stream back, bit for bit. Rebuild checks the recipe first and is False
@@ -119,8 +119,8 @@ function ReadRecipeV2(const b: TBytes; var pos: SizeInt; maxTail: QWord; out rec
   read back: plainLen is the length of the bytes it is for (a flow's
   events are checked against it before anything is kept), maxTail caps the
   tail. ReadRecipe never raises; RecipeBytes raises on a recipe
-  RecipeValid refuses or a flow out of order. Provisional: no stream format
-  holds it yet (codec stream version 3 will). }
+  RecipeValid refuses or a flow out of order. Codec stream version 3 holds
+  it: a format a published stream holds never changes what it gives. }
 function RecipeBytes(const recipe: TDeflRecipe): TBytes;
 function ReadRecipe(const b: TBytes; var pos: SizeInt; plainLen: SizeInt; maxTail: QWord;
   out recipe: TDeflRecipe): TRecipeRead;
@@ -926,7 +926,7 @@ begin
   pos := r.pos;
 end;
 
-{ ---------------------------------------------------------------- RecipeBytes (provisional, RECIPE_FORMAT 2) }
+{ ---------------------------------------------------------------- RecipeBytes (RECIPE_FORMAT 2) }
 
 function RecipeBytes(const recipe: TDeflRecipe): TBytes;
 var o: TOut; k, last: SizeInt;

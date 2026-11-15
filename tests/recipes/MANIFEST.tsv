@@ -1,0 +1,46 @@
+file	plain	plain_bytes	bytes	made by
+rgb8-z6.zlib	rgb8	9264	6581	python zlib 1.3.1 level 6 wbits 15 mem 8 strategy 0 flushes []
+text-z9-filtered.zlib	text	14000	6489	python zlib 1.3.1 level 9 wbits 15 mem 8 strategy 1 flushes []
+bin-z1-mem1-w9-raw.raw	bin	16000	12859	python zlib 1.3.1 level 1 wbits -9 mem 1 strategy 0 flushes []
+drawing-z4-rle.zlib	drawing	16100	889	python zlib 1.3.1 level 4 wbits 15 mem 8 strategy 3 flushes []
+photo-z2-huffman.zlib	photo	18496	8096	python zlib 1.3.1 level 2 wbits 15 mem 8 strategy 2 flushes []
+rgba8-z9-fixed.zlib	rgba8	9264	8677	python zlib 1.3.1 level 9 wbits 15 mem 8 strategy 4 flushes []
+text-flows-131.zlib	text	14000	6856	zfl text 6 8 15 0 2000:sync 4000:full 6000:partial 8000:block 10000:params=9,1 12000:params=2,0
+photo-partial-125.zlib	photo	18496	9436	zfl-1.2.5 photo 9 8 15 0 4000:partial 4001:partial 9000:partial 14000:sync
+photo-full-123.zlib	photo	18496	8180	zfl-1.2.3 photo 6 9 15 1 5000:full 12000:partial
+bin-params-raw-131.raw	bin	16000	7762	zfl bin 9 8 -15 0 5000:block 5000:params=1,0 10000:full 10000:params=7,0
+drawing-pysync.zlib	drawing	16100	282	python zlib 1.3.1 level 6 wbits 15 mem 8 strategy 0 flushes [(4000, 2), (9000, 3)]
+text-full-123-w9.zlib	text	14000	7731	zfl-1.2.3 text 6 8 9 0 3000:full 7000:full 7100:full 11000:full
+textimg-pngcrush-m1.zlib	textimg	14000	6413	pngcrush 1.8.13 -m 1 of textimg as a gray PNG, its IDAT
+photo-ldf1.raw	photo	18496	9174	ldf photo 1
+photo-ldf6.raw	photo	18496	8325	ldf photo 6
+photo-ldf12.raw	photo	18496	8064	ldf photo 12
+text-ldf12.raw	text	14000	6004	ldf text 12
+drawing-ldf9.raw	drawing	16100	211	ldf drawing 9
+photo-mz114-9.raw	photo	18496	9568	mz114 photo 9
+text-mz114-10.raw	text	14000	6171	mz114 text 10
+bin-mz3-6-greedy.raw	bin	16000	7257	mz3 bin 6 1
+drawing-mz3-1.raw	drawing	16100	416	mz3 drawing 1
+zipf-mz114-1.raw	zipf	40000	21327	mz114 zipf 1
+photo-zopfli.raw	photo	18496	8821	zop photo 5
+text-zopfli.raw	text	14000	5969	zop text 5
+rgba8-zopfli.raw	rgba8	9264	5740	zop rgba8 15
+rgb8-z0-stored.zlib	rgb8	9264	9275	python zlib 1.3.1 level 0 wbits 15 mem 8 strategy 0 flushes []
+photo-ldf6-badadler-tail.zlib	photo	18496	8335	photo-ldf6.raw in a zlib frame, Adler-32 xor 1, 4 bytes after
+text-ldf12-pad.raw	text	14000	6004	text-ldf12.raw with its last byte or 0x80 (pad bits)
+rgba8-zopfli~tree0.raw	(rgba8-zopfli.raw's bytes)	9264	5749	crafted: rgba8-zopfli.raw's recipe with tree0, and its rebuild
+rgba8-zopfli~tree1.raw	(rgba8-zopfli.raw's bytes)	9264	5748	crafted: rgba8-zopfli.raw's recipe with tree1, and its rebuild
+rgba8-zopfli~tree2.raw	(rgba8-zopfli.raw's bytes)	9264	5748	crafted: rgba8-zopfli.raw's recipe with tree2, and its rebuild
+rgba8-zopfli~tree3.raw	(rgba8-zopfli.raw's bytes)	9264	5752	crafted: rgba8-zopfli.raw's recipe with tree3, and its rebuild
+rgba8-zopfli~tree4.raw	(rgba8-zopfli.raw's bytes)	9264	5740	crafted: rgba8-zopfli.raw's recipe with tree4, and its rebuild
+rgba8-zopfli~filtered.raw	(rgba8-zopfli.raw's bytes)	9264	5740	crafted: rgba8-zopfli.raw's recipe with filtered, and its rebuild
+rgba8-zopfli~toofar.raw	(rgba8-zopfli.raw's bytes)	9264	5740	crafted: rgba8-zopfli.raw's recipe with toofar, and its rebuild
+rgba8-zopfli~longest-lazy.raw	(rgba8-zopfli.raw's bytes)	9264	9347	crafted: rgba8-zopfli.raw's recipe with longest-lazy, and its rebuild
+rgba8-zopfli~greedy.raw	(rgba8-zopfli.raw's bytes)	9264	5740	crafted: rgba8-zopfli.raw's recipe with greedy, and its rebuild
+drawing-ldf9~tree0.raw	(drawing-ldf9.raw's bytes)	16100	211	crafted: drawing-ldf9.raw's recipe with tree0, and its rebuild
+drawing-ldf9~tree1.raw	(drawing-ldf9.raw's bytes)	16100	211	crafted: drawing-ldf9.raw's recipe with tree1, and its rebuild
+drawing-ldf9~tree2.raw	(drawing-ldf9.raw's bytes)	16100	211	crafted: drawing-ldf9.raw's recipe with tree2, and its rebuild
+drawing-ldf9~tree3.raw	(drawing-ldf9.raw's bytes)	16100	211	crafted: drawing-ldf9.raw's recipe with tree3, and its rebuild
+drawing-ldf9~tree4.raw	(drawing-ldf9.raw's bytes)	16100	210	crafted: drawing-ldf9.raw's recipe with tree4, and its rebuild
+drawing-ldf9~symend300.raw	(drawing-ldf9.raw's bytes)	16100	211	crafted: drawing-ldf9.raw's recipe with symend300, and its rebuild
+drawing-ldf9~toofar.raw	(drawing-ldf9.raw's bytes)	16100	211	crafted: drawing-ldf9.raw's recipe with toofar, and its rebuild

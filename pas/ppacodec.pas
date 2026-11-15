@@ -37,8 +37,10 @@ uses SysUtils;
 const
   { The first byte of every stream. A new version never stops reading the
     older ones: 1, PPA 0.1.0's; 2, the static model's 320 contexts (the
-    channel before's residual among them). }
-  STREAM_VERSION = 2;
+    channel before's residual among them); 3, each image's deflate recipe
+    in ppapreflate's RecipeBytes (kinds 0, 1 and 3: zlib with its flushes,
+    and any deflate stream through a predictor and its corrections). }
+  STREAM_VERSION = 3;
   { the oldest version Compress writes: what every file needs (version 1's
     static model is not written any more). A file writes the oldest
     version that holds everything in it, so a file the zlib parameters
@@ -367,10 +369,18 @@ begin
 end;
 
 { The stream version a deflate recipe needs: kind 0's, zlib's parameters,
-  is version 2's }
+  is version 2's; kinds 1 and 3 (RecipeBytes) version 3's }
 function RecipeVersion(const recipe: TDeflRecipe): Integer;
 begin
-  if recipe.kind = RECIPE_ZLIB then Result := 2 else Result := High(Integer);
+  if recipe.kind = RECIPE_ZLIB then Result := 2
+  else if recipe.kind in [RECIPE_ZLIB_FLOW, RECIPE_CORR] then Result := 3
+  else Result := High(Integer);
+end;
+
+{ the recipe kinds a stream version holds }
+function MaxRecipeKind(streamVer: Integer): Integer;
+begin
+  if streamVer >= 3 then Result := RECIPE_KIND_LAST else Result := RECIPE_ZLIB;
 end;
 
 { Whether stream s can be kept as an image, and its plan. model: Compress's
@@ -390,8 +400,9 @@ begin
   if not StreamImage(p, s, info) then Exit;
   if not Unfilter(plan.z.plain, info, plan.px) then Exit;
   { a recipe whose rebuild is the stream, bit for bit (checked); one the
-    stream version the caller allows can hold }
-  if FindRecipe(a, plan.z, plan.recipe, RECIPE_ZLIB) <> dsOk then Exit;
+    stream version the caller allows can hold (kind 0 is looked for
+    first: a file of zlib's streams stays a version 2 stream) }
+  if FindRecipe(a, plan.z, plan.recipe, MaxRecipeKind(maxVersion)) <> dsOk then Exit;
   if RecipeVersion(plan.recipe) > maxVersion then Exit;
   { a model given takes every image it can (ChooseModel's trials skipped) }
   if (model = MODE_IMAGE) or ((model in [MODE_FAST, MODE_STATIC]) and FastEligible(info)) then
@@ -406,7 +417,8 @@ end;
 type
   { what Compress's verification knows of an image stream already: its
     inflated bytes and its deflate stream, which zlib's parameters were
-    checked, bit for bit, to give from them (PlanImage) }
+    checked, bit for bit, to give from them (PlanImage); nothing (data nil)
+    for a stream of another recipe kind, which the verification rebuilds }
   TKnownStream = record
     plain, data: TBytes;
   end;
@@ -444,11 +456,21 @@ var
     subs[k] := e.Finish;
   end;
 
+  { the stream's version: the oldest that holds every image stream's recipe }
+  function StreamVersionOf: Integer;
+  var s: SizeInt;
+  begin
+    Result := OLDEST_WRITTEN_VERSION;
+    for s := 0 to High(p.streams) do
+      if plans[s].mode in IMAGE_MODES then Result := Max(Result, RecipeVersion(plans[s].recipe));
+  end;
+
   { the structure: the chunks (each one's own data, or its stream's
     number), the bytes after them, each stream's mode and parameters }
   function BuildMeta: TBytes;
-  var w: TWriter; i, s: SizeInt; c: TChunk; rb: TBytes;
+  var w: TWriter; i, s: SizeInt; c: TChunk; rb: TBytes; ver: Integer;
   begin
+    ver := StreamVersionOf;
     w := Default(TWriter);
     w.Put(Ord(p.kind));
     w.PutVar(Length(p.chunks));
@@ -474,9 +496,14 @@ var
       w.Put(plans[s].mode);
       if plans[s].mode in IMAGE_MODES then
         with plans[s] do begin
-          { its deflate stream's recipe (kind 0: zlib's parameters and the
-            framing), as version 2 writes it }
-          rb := RecipeBytesV2(recipe);
+          { its deflate stream's recipe: version 2, kind 0 (zlib's
+            parameters and the framing) in its own layout; version 3, any
+            kind in RecipeBytes', after its length }
+          if ver >= 3 then begin
+            rb := RecipeBytes(recipe);
+            w.PutVar(Length(rb));
+          end else
+            rb := RecipeBytesV2(recipe);
           w.PutBytes(rb, 0, Length(rb));
           w.PutVar(Length(px.tail)); w.PutBytes(px.tail, 0, Length(px.tail));
         end;
@@ -492,7 +519,9 @@ var
     known := nil;
     SetLength(known, Length(p.streams));
     for s := 0 to High(p.streams) do begin
-      if plans[s].mode in IMAGE_MODES then begin
+      { kind 0 only: a recipe of kind 1 or 3 is rebuilt by the verification
+        from what the stream holds, as a reader has it (its bytes read back) }
+      if (plans[s].mode in IMAGE_MODES) and (plans[s].recipe.kind = RECIPE_ZLIB) then begin
         known[s].plain := plans[s].z.plain;
         known[s].data := p.streams[s].data;
       end;
@@ -604,9 +633,22 @@ begin
   stats.bands := nJobs;
   StageEnter(stEncode);
   ParallelFor(nJobs, BandThreads(threads), @CodeBand);
+  coded := nil; SetLength(coded, Length(p.streams));
+  for i := 0 to nJobs - 1 do Inc(coded[jobs[i].s], Length(subs[i]));
+  { an image whose recipe is not kind 0 (version 3: zlib with flushes, or a
+    predictor's corrections) goes as bytes unless its bands and its recipe
+    come out smaller than its deflate stream: corrections can cost more
+    than the pixels save (noise). Kind 0 does not take this path: the
+    streams version 2 writes do not change. }
+  for s := 0 to High(p.streams) do
+    if (plans[s].mode in IMAGE_MODES) and (plans[s].recipe.kind <> RECIPE_ZLIB) and
+       (coded[s] + Length(RecipeBytes(plans[s].recipe)) >= Length(p.streams[s].data)) then begin
+      plans[s].mode := MODE_BYTES;
+      plans[s].px := Default(TPixels);
+      plans[s].z := Default(TZStream);
+      grew := True;
+    end;
   if model >= 0 then begin
-    coded := nil; SetLength(coded, Length(p.streams));
-    for i := 0 to nJobs - 1 do Inc(coded[jobs[i].s], Length(subs[i]));
     for s := 0 to High(p.streams) do
       if (plans[s].mode in IMAGE_MODES) and ((coded[s] > Int64(Length(p.streams[s].data)) * 5 div 4 + 4096) or
           ((Length(p.streams[s].data) >= 65536) and (coded[s] >= Length(p.streams[s].data)))) then begin
@@ -682,10 +724,9 @@ begin
     if plans[s].mode = MODE_JPEG then begin subs[i] := plans[s].jpeg; Inc(i); end;
 
   { the stream: version, the substreams' count and lengths, the substreams.
-    The version: the oldest that holds every image stream's recipe }
-  streamVer := OLDEST_WRITTEN_VERSION;
-  for s := 0 to High(p.streams) do
-    if plans[s].mode in IMAGE_MODES then streamVer := Max(streamVer, RecipeVersion(plans[s].recipe));
+    The version: the oldest that holds every image stream's recipe (the
+    one BuildMeta wrote the structure in) }
+  streamVer := StreamVersionOf;
   if streamVer > maxVersion then begin why := 'a stream version newer than allowed (a PPA bug)'; Exit; end;
   w := Default(TWriter);
   w.Put(streamVer);
@@ -722,11 +763,13 @@ begin
   try
   Result := CompressRaw(data, stream, why, stats, threads, model, maxVersion, known);
   if not Result or not verify then begin StageEnter(was); Exit; end;
-  { The stream decompressed and compared with the file, whole. Each image's
-    deflate stream is not written again: what the decoder refilters is
-    compared with the inflated bytes instead, whose deflate stream zlib's
-    parameters were checked, bit for bit, to give (PlanImage), and the same
-    code would give it here; a quarter of the compression's time. }
+  { The stream decompressed and compared with the file, whole. An image's
+    deflate stream of a kind-0 recipe is not written again: what the decoder
+    refilters is compared with the inflated bytes instead, whose deflate
+    stream zlib's parameters were checked, bit for bit, to give (PlanImage),
+    and the same code would give it here; a quarter of the compression's
+    time. One of kind 1 or 3 is rebuilt from the recipe as the stream holds
+    it (its bytes read back), as any reader will. }
   StageEnter(stVerify);
   if not DecompressSafe(stream, Length(data), back, why2, threads, False, @known, fail) or (Length(back) <> Length(data)) or
      ((Length(data) > 0) and not CompareMem(@back[0], @data[0], Length(data))) then begin
@@ -774,6 +817,7 @@ var
   p: TPng; nChunks, nStreams, total, len: Int64; i, s: SizeInt;
   flags: Byte; c: TChunk;
   modes: array of Integer; recipes: array of TDeflRecipe; pxTails: array of TBytes;
+  recipeRaw: array of TBytes; rpos: SizeInt;
   streamLen: array of Int64;
   info: TImageInfo; pxs: array of TPixels; plains: array of TBytes;
   maxSmall: Int64;
@@ -815,10 +859,10 @@ var
       Exit;
     end;
     if not (modes[k] in IMAGE_MODES) then Exit;
-    if known <> nil then begin
+    if (known <> nil) and (k <= High(known^)) and (known^[k].data <> nil) then begin
       { Compress's verification: the refiltered bytes must be the inflated
         ones, whose stream is known }
-      if (k <= High(known^)) and (Length(plains[k]) = Length(known^[k].plain)) and (Length(plains[k]) > 0) and
+      if (Length(plains[k]) = Length(known^[k].plain)) and (Length(plains[k]) > 0) and
          CompareMem(@plains[k][0], @known^[k].plain[0], Length(plains[k])) then
         p.streams[k].data := known^[k].data
       else p.streams[k].data := nil;
@@ -915,6 +959,7 @@ begin
   SetLength(p.streams, nStreams);
   modes := nil; SetLength(modes, nStreams);
   recipes := nil; SetLength(recipes, nStreams);
+  recipeRaw := nil; SetLength(recipeRaw, nStreams);
   pxTails := nil; SetLength(pxTails, nStreams);
   streamLen := nil; SetLength(streamLen, nStreams);
   for i := 0 to nChunks - 1 do
@@ -933,11 +978,19 @@ begin
     if not r.ok or (modes[s] > MODE_STATIC) then Exit(Bad('bad structure'));
     if (modes[s] = MODE_JPEG) and not (p.streams[s].kind in [skJdat, skJdaa]) then Exit(Bad('bad structure'));
     if modes[s] in IMAGE_MODES then begin
-      { its deflate stream's recipe, as version 2 writes it (ppapreflate) }
-      case ReadRecipeV2(r.b, r.pos, streamLen[s], recipes[s]) of
-        rrBadParams: Exit(Bad('bad zlib parameters'));
-        rrBad: Exit(Bad('bad structure'));
-      end;
+      if stream[0] >= 3 then begin
+        { its deflate stream's recipe in RecipeBytes' format (ppapreflate),
+          read once the image's size is known: a flow's events are checked
+          against the bytes it is for }
+        len := r.GetVar(Length(meta));
+        recipeRaw[s] := r.GetBytes(len);
+        if not r.ok then Exit(Bad('bad structure'));
+      end else
+        { its deflate stream's recipe, as version 2 writes it (ppapreflate) }
+        case ReadRecipeV2(r.b, r.pos, streamLen[s], recipes[s]) of
+          rrBadParams: Exit(Bad('bad zlib parameters'));
+          rrBad: Exit(Bad('bad structure'));
+        end;
       len := r.GetVar(MAX_IMAGE_BYTES);
       pxTails[s] := r.GetBytes(len);
       if not r.ok then Exit(Bad('bad structure'));
@@ -965,6 +1018,17 @@ begin
       Inc(allImages, imgSize + Int64(Length(pxTails[s])));
       if (allImages > MAX_TOTAL_IMAGE_BYTES) or (allImages > MAX_INFLATE_RATIO * maxOut + 1024) then
         Exit(Bad('images larger than the file can hold'));
+      if stream[0] >= 3 then begin
+        { the recipe, for the image's filtered bytes and its tail; it must
+          be all its bytes }
+        rpos := 0;
+        case ReadRecipe(recipeRaw[s], rpos, imgSize + Length(pxTails[s]), streamLen[s], recipes[s]) of
+          rrBadParams: Exit(Bad('bad zlib parameters'));
+          rrBad: Exit(Bad('bad deflate recipe'));
+        end;
+        if rpos <> Length(recipeRaw[s]) then Exit(Bad('bad deflate recipe'));
+        recipeRaw[s] := nil;
+      end;
       if not InitLayout(info, pxs[s]) then Exit(Bad('bad image header'));
       Inc(nJobs, BandCount(pxs[s]));
     end;

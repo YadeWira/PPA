@@ -95,7 +95,10 @@ Every child process runs under `ulimit -v 6000000`, with at most 4 at a time.
 
 ## For the next milestones
 
-- The hash gate (M1 and every milestone until codec v3): with the ppa to
+- The hash gate (M1 on; from M4, codec v3, a file whose `.ppa` is in stream
+  version 3 may differ from the reference: `gatecheck` reports its sizes
+  and requires it to be the same in the three runs and to extract; one in
+  version 2 must still be the reference's byte for byte): with the ppa to
   check (`PPA_BIN=...`, default `$PF/tools/bin/ppa`),
   `baseline.py gate tests-png sets-corpus sets-generated sets-photos png-zlib png-nonzlib png-synth --out DIR`,
   then `baseline.py gatecheck --out DIR`: every file `gate-v2.tsv` names
@@ -136,3 +139,7 @@ Every child process runs under `ulimit -v 6000000`, with at most 4 at a time.
   kind 1 (`ZV_NO_TOO_FAR`). Same harness (`-all013 -diffc -tsv`,
   `compare_recipes.py`); doc/PREFLATE.md, "Status (M3b)". Scratch and
   results: `$PF/m3/m3b/`.
+- M4 (14/11/2026): codec stream version 3 writes kinds 1 and 3
+  (doc/PREFLATE.md, "Status (M4)"). `mkgolden.py` made the golden vectors
+  in `tests/recipes/` (`test_preflate tests/recipes 45 -golden`), and
+  `mkpng3.py` the PNGs of `tests/png3/` (images other encoders wrote).

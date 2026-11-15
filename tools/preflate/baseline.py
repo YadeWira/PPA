@@ -230,6 +230,7 @@ def do_gate(names):
         files = sorted(os.path.join(folder, f) for f in os.listdir(folder)
                        if os.path.isfile(os.path.join(folder, f)) and f != 'MANIFEST.tsv')
         per = collections.defaultdict(dict)
+        outof = {}
         for v, args, env in VARIANTS:
             d = os.path.join(os.path.dirname(OUT), 'work', 'gate', name, v)
             if os.path.isdir(d): shutil.rmtree(d)
@@ -243,17 +244,31 @@ def do_gate(names):
                 f = os.path.basename(j['file'])
                 out = j.get('output')
                 per[f][v] = (j.get('ok'), j.get('ppa_size', ''), sha256(out) if out and os.path.exists(out) else '')
+                if out and v == 'c-th8': outof[os.path.abspath(out)] = f
                 per[f]['bytes'] = j.get('original_size', os.path.getsize(j['file']))
             print('  gate %s %s: %.1f s, exit %d' % (name, v, dt, p.returncode), flush=True)
+            if v == 'c-th8':
+                # the codec stream version of each .ppa (ppa info, which also extracts it)
+                outs = sorted(outof)
+                q = sh([PPA, 'info', '--json', '--'] + outs) if outs else None
+                for line in (q.stdout.decode().splitlines() if q else []):
+                    j = json.loads(line)
+                    f = outof.get(os.path.abspath(j.get('file', '')))
+                    if f is None: continue
+                    per[f]['stream_version'] = j.get('stream_version', '')
+                    per[f]['extracts'] = 'yes' if j.get('ppa', {}).get('ok') else 'NO'
         for f in sorted(per):
             r = dict(set=name, file=f, bytes=per[f].get('bytes', ''))
             for v, _, _ in VARIANTS:
                 ok, size, h = per[f].get(v, (False, '', ''))
                 r[v + '_size'] = size; r[v + '_sha256'] = h
+            r['stream_version'] = per[f].get('stream_version', '')
+            r['extracts'] = per[f].get('extracts', '')
             hs = {per[f].get(v, (0, 0, ''))[2] for v, _, _ in VARIANTS}
             r['identical'] = 'yes' if len(hs) == 1 and '' not in hs else 'NO'
             rows.append(r)
-    cols = ['set', 'file', 'bytes'] + [v + s for v, _, _ in VARIANTS for s in ('_size', '_sha256')] + ['identical']
+    cols = ['set', 'file', 'bytes'] + [v + s for v, _, _ in VARIANTS for s in ('_size', '_sha256')] + ['identical',
+            'stream_version', 'extracts']
     old = [r for r in (tsv_read(os.path.join(OUT, 'gate.tsv')) if os.path.exists(os.path.join(OUT, 'gate.tsv')) else [])
            if r['set'] not in {r['set'] for r in rows}]
     tsv_write(os.path.join(OUT, 'gate.tsv'), cols, old + rows)
@@ -265,20 +280,30 @@ def do_gate(names):
 
 
 def do_gatecheck(against):
+    # Every file must give the same .ppa in all three runs, and extract. One
+    # in codec stream version 2 must be the reference's .ppa byte for byte;
+    # one in version 3 (an image of recipe kind 1 or 3, M4 on) may differ:
+    # its sizes against the reference are reported.
     new = {(r['set'], r['file']): r for r in tsv_read(os.path.join(OUT, 'gate.tsv'))}
     ref = tsv_read(against)
     bad = 0
     for name in sorted({r['set'] for r in ref}):
         rs = [r for r in ref if r['set'] == name]
-        same = 0
+        same = v3 = 0; v3old = v3new = 0
         for r in rs:
             n = new.get((name, r['file']))
-            if n and n['identical'] == 'yes' and n['c-th8_sha256'] == r['ppa_sha256']:
+            if not n or n['identical'] != 'yes' or n.get('extracts', 'yes') == 'NO':
+                bad += 1
+                print('  BAD %s %s (not the same in the three runs, or does not extract)' % (name, r['file']))
+            elif n.get('stream_version') == '3':
+                v3 += 1; v3old += int(r['ppa_size']); v3new += int(n['c-th8_size'])
+            elif n['c-th8_sha256'] == r['ppa_sha256']:
                 same += 1
             else:
                 bad += 1
-                print('  DIFFERS %s %s' % (name, r['file']))
-        print('%s: %d/%d .ppa identical to %s (in all three runs)' % (name, same, len(rs), os.path.basename(against)))
+                print('  DIFFERS %s %s (stream version %s)' % (name, r['file'], n.get('stream_version', '?')))
+        print('%s: %d/%d .ppa identical to %s (in all three runs); %d in stream version 3: %d -> %d B' % (
+            name, same, len(rs), os.path.basename(against), v3, v3old, v3new))
     if bad:
         raise SystemExit('gatecheck: %d files differ' % bad)
 

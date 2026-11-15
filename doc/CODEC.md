@@ -211,7 +211,11 @@ with a prototype of each when the ZPAQL is written.
 ## Layer 6: the stream
 
 `ppacodec.Compress` takes a whole file. The stream is one version byte
-(`STREAM_VERSION`: 2 since 0.1.1, the static model's 320 contexts; 1, PPA 0.1.0's, still read; a file is written with the oldest version that holds it, never newer than `Compress`'s `maxVersion`, which ppa1 sets to 2), the count and lengths of its substreams (varints),
+(`STREAM_VERSION`: 3 since 0.3.0, each image's deflate recipe of any kind;
+2 since 0.1.1, the static model's 320 contexts; 1, PPA 0.1.0's; all still
+read; a file is written with the oldest version that holds it, never newer
+than `Compress`'s `maxVersion`, which ppa1 sets to 2), the count and
+lengths of its substreams (varints),
 and the substreams, each its own arithmetic stream. Substream 0 holds:
 
 - the file's structure, written as bytes (numbers as varints) and coded with
@@ -245,10 +249,32 @@ thread: a band that read another's bytes would fail (PJA's
 `PJA_BANDS_REVERSE`).
 
 An image stream is kept as an image when its deflate stream decodes, its
-image fits its header, zlib's parameters are found and give its very bits
-back (checked, not assumed). It keeps then: the four parameters, the zlib
-header, whether the Adler-32 is right, the pad bits, what follows the
-deflate data, and what follows the image in it. A JNG's JPEG (JDAT, JDAA) is
+image fits its header, and a **recipe** is found that gives its very bits
+back (checked, not assumed; `ppapreflate`, doc/PREFLATE.md). It keeps then
+the recipe and what follows the image in its bytes. The recipe holds the
+framing (the zlib header, whether the Adler-32 is right, the pad bits, what
+follows the deflate data) and how the deflate data is made from the bytes:
+
+- **kind 0**, zlib's four parameters: looked for first, and all a version 2
+  stream holds (in its own layout: `RecipeBytesV2`). A file whose images are
+  all kind 0 is a version 2 stream, the very one PPA 0.2 wrote.
+- **kind 1**, zlib with its flushes and parameter changes, and **kind 3**, a
+  predictor's parameters and the corrections that make any deflate stream
+  (libdeflate, oxipng, zopfli, miniz, 7-Zip, ...): version 3. Every image's
+  recipe is then written in `RecipeBytes`' format, after its length, and
+  read once the image's size is known (a flow's events are checked against
+  the bytes they are for; the recipe must use all of its bytes). Such an
+  image is kept as bytes unless its bands and its recipe come out smaller
+  than its deflate stream (corrections can cost more than the pixels save,
+  on noise).
+
+`Compress`'s verification rebuilds a kind-1 or kind-3 stream from the
+recipe as the stream holds it, as any reader does (kind 0 is checked
+against the inflated bytes, as before). Rebuilding a kind-3 stream runs on
+one thread, at 2 to 50 MB/s on the streams of the corpus (doc/PREFLATE.md);
+its work at each position is bounded by the predictor's caps, whatever the
+recipe says: the slowest stream found, noise of two byte values by
+libdeflate 12, rebuilds at 0.4 MB/s. A JNG's JPEG (JDAT, JDAA) is
 kept as **PJA's stream** (`pjacodec.Compress`, which verifies it, with
 version 7's model) when PJA takes it and makes it smaller, in a substream
 of its own after the bands; `Decompress` gives it back with

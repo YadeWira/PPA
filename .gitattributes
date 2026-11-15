@@ -1,0 +1,6 @@
+# test data read byte for byte: never a line-end conversion (Windows runners
+# check out with core.autocrlf)
+tests/recipes/*.raw binary
+tests/recipes/*.zlib binary
+tests/recipes/*.recipe binary
+tests/png3/* binary

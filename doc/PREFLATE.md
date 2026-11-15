@@ -13,14 +13,15 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
 
 ## Where recipes are written
 
-- **Codec stream version 2** (what PPA writes today) holds **kind 0 only**,
-  in its own layout (`RecipeBytesV2`, CODEC.md "Layer 6"). The codec asks
-  `FindRecipe` for kind 0 alone (`maxKind = RECIPE_ZLIB`), so an image whose
-  stream needs a flow is kept as its bytes, as before. Every `.ppa` PPA
-  writes is the same as before kind 1 existed.
-- **`RecipeBytes`** below is a provisional format for any kind. No stream
-  format holds it yet; codec stream version 3 (milestone M4) will. Until
-  then it may change, but only by the versioning rule.
+- **Codec stream version 2** holds **kind 0 only**, in its own layout
+  (`RecipeBytesV2`, CODEC.md "Layer 6"). ppa1 (the zpaq-std plugin) writes
+  it alone: it asks `FindRecipe` for kind 0 (`maxKind = RECIPE_ZLIB`), and
+  an image whose stream needs another kind is kept as its bytes.
+- **Codec stream version 3** (M4, PPA 0.3.0) holds any kind in
+  **`RecipeBytes`**' format, below. Kind 0 is looked for first, so a file
+  whose images are all zlib's alone is still written as version 2, the
+  same `.ppa` as before (M4's hash gate). Once 0.3.0 is published, format
+  2 is frozen by the versioning rule.
 
 ## Kinds
 
@@ -220,7 +221,7 @@ the first 8192 tokens (or 128 KB of bytes), then the best one's variants
 the stream is longer. `symEnd` is the commonest token count of the blocks
 before the last (if two have it).
 
-### RecipeBytes (format 2, provisional)
+### RecipeBytes (format 2)
 
 All integers are bytes or varints (7 bits a byte, low first, the high bit
 set on all but the last).
@@ -296,14 +297,24 @@ flush, the old versions' second block. So:
   (`ReadRecipe` refuses a variant whose version is above `ZV_LAST` or with
   a flag other than `ZV_NO_TOO_FAR`, and an event kind above 5), so an old
   PPA stops cleanly on a newer recipe.
-- Golden vectors (recipes and the streams they give) are committed per
-  version and checked by the suite, C and Pascal, 32 and 64 bits, before
-  M4 freezes format 1.
+- **Golden vectors**: `tests/recipes/` holds deflate streams by many
+  encoders (`tools/preflate/mkgolden.py`: zlib 1.3.1, 1.2.5 and 1.2.3 with
+  flushes, pngcrush, libdeflate, miniz 1.14 and 3, zopfli; framing with a
+  wrong Adler-32, bytes after the stream, pad bits), each beside the recipe
+  PPA made of it (`NAME.recipe`), and recipes no encoder made (a kind-3
+  recipe with one predictor field changed: each tree builder, `symEnd`,
+  the filters, the search) beside the stream they give: 45 in all, 5 kind 0,
+  9 kind 1 (each zlib variant, `ZV_NO_TOO_FAR`), 31 kind 3 (each tree
+  builder). `test_preflate tests/recipes 45 -golden` requires each recipe,
+  read back, to give its stream bit for bit (on 1 thread and in segments on
+  4) and to be written the same again; `.github/test.sh` runs it on the six
+  platforms, 32 and 64 bits, with the C and the Pascal code. A vector is
+  never made again: a new format adds its own beside them.
 
-Before M4 nothing is published, and the format may still change; when it
-does, its byte goes up. M3b did so: format 2 (kind 3's `tree` byte; the
-predictor and its models are `PRED_VERSION` 2, and kind 1's variant may
-carry `ZV_NO_TOO_FAR`). A format 1 recipe is refused.
+Format 1 was never published (M3b moved to format 2: kind 3's `tree`
+byte; the predictor and its models are `PRED_VERSION` 2, and kind 1's
+variant may carry `ZV_NO_TOO_FAR`); a format 1 recipe is refused. Format 2
+is the one codec stream version 3 holds.
 
 ## Finding a flow (`FindZlibFlow`)
 
@@ -481,6 +492,45 @@ on the TSVs in `/mnt/IA_LAB/agentes/ppa/preflate/m3/m3b/res/`.
   (zlib's longest_match emulation walks its chain through them: 2 s on a
   256 KB miniz image) and no `maxWork` yet; the slow walks are bounded but
   not cheap; golden vectors per format before M4.
+
+## Status (M4, 14/11/2026): codec stream version 3
+
+PPA writes recipes of kinds 1 and 3 (CODEC.md "Layer 6"). The hash gate
+(`tools/preflate/baseline.py gate` and `gatecheck`, the ppa command three
+ways: C on 8 threads and on 1, Pascal on 8) over the 1,214 files of
+`gate-v2.tsv`: every `.ppa` in stream version 2 is the reference's byte for
+byte; those in version 3 are the same in the three runs and extract:
+
+| set | files | version 2, identical | version 3 | their `.ppa`, before / now |
+|---|---:|---:|---:|---:|
+| `tests-png` | 14 | 14 | 0 | |
+| `sets-corpus` | 70 | 62 | 8 | 65,224 / 42,575 B |
+| `sets-generated` | 75 | 70 | 5 | 807,865 / 597,928 B |
+| `sets-photos` | 20 | 20 | 0 | |
+| `png-zlib` | 133 | 133 | 0 | |
+| `png-nonzlib` | 24 | 5 | 19 | 1,014,065 / 735,268 B |
+| `png-synth` | 878 | 189 | 689 | 180,444,794 / 108,349,683 B |
+
+The sets' totals: corpus 18,549,124 -> 18,526,475 B (design's gate:
+under 19,380,789), generated 9,216,406 -> 9,006,469 B (-2.3%). The files
+left in version 2 of `png-nonzlib` and `png-synth` are those whose images
+went as bytes (noise, small palettes: bands and recipe not smaller than
+the deflate stream). PPA 0.2.1 refuses a version 3 `.ppa` cleanly ("made
+by a newer PPA"). Fuzzing (`pas/tests/fuzz`) with 28 version-3 seeds, 30
+minutes each of `lib_ppa_chk` (libFuzzer, 167,490 runs) and `afl_ppa_chk`
+(AFL++, 49,159): nothing.
+
+- No step budget (`maxWork`): the work at each position is bounded by the
+  predictor's caps (search, rank and longest-match walks), whatever the
+  recipe; and C and Pascal search differently (the C's own links), so a
+  count of steps would not be the same in both. Measured on adversarial
+  bytes (noise of 2 and 4 values, near-periodic data, runs of every
+  length), 2 MB each by libdeflate 6 and 12: the slowest rebuild, 2-value
+  noise by libdeflate 12, 0.37 MB/s (5.7 s), its analysis 23 s.
+- Open: analysis speed. A non-zlib image costs the zlib searches (kinds 0
+  and 1) and kind 3's parameter search: 3 s for a 256 KB doodle (2.6 s of
+  it kind 3), 7 s for the 1.7 MB oxipng photo of `png-nonzlib`. Rebuild of
+  kind 3 runs on one thread (no checkpoints yet).
 
 ## Credits
 
