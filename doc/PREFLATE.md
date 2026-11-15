@@ -28,9 +28,9 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
 | kind | name | what makes the deflate data | since |
 |---|---|---|---|
 | 0 | `RECIPE_ZLIB` | zlib's parameters: level, strategy, memLevel, windowBits | 0.1.0 (codec v2) |
-| 1 | `RECIPE_ZLIB_FLOW` | kind 0's parameters at the start, and a **flow**: the flushes and parameter changes zlib made along the stream, and which zlib made them | M2 (not written by PPA yet) |
-| 2 | | reserved: a known non-zlib encoder (design §(a) 7) | |
-| 3 | `RECIPE_CORR` | a zlib-like predictor (`ppacorr`) and the **corrections** that make what it predicts the stream: any stream `ppadeflate` reads | M3a, M3b (not written by PPA yet) |
+| 1 | `RECIPE_ZLIB_FLOW` | kind 0's parameters at the start, and a **flow**: the flushes and parameter changes zlib made along the stream, and which zlib made them | M2 (codec v3, M4) |
+| 2 | `RECIPE_ENCODER` | another encoder, exactly: which (`ENC_MINIZ`, miniz's tdefl) and its parameters (miniz: its flags and build) | M5 (codec v3) |
+| 3 | `RECIPE_CORR` | a zlib-like predictor (`ppacorr`) and the **corrections** that make what it predicts the stream: any stream `ppadeflate` reads | M3a, M3b (codec v3, M4) |
 | 4 | | reserved: cost-guided predictor plus corrections | |
 
 Every kind also carries the **framing**, as layer 2a records it: bare
@@ -99,10 +99,69 @@ Input given a byte or two at a time right after a flush would insert fewer
 positions at first (zlib's `lookahead + insert < MIN_MATCH`): the emulation
 takes each stretch's input at once.
 
+### Kind 2: a known encoder (miniz)
+
+`pas/ppaminiz.pas` (the Pascal reference) and `pas/ppaminizc.c` (its parse
+in C, the same tokens and blocks): miniz's deflate, `tdefl`, as miniz
+1.14 and 3.0.2 make it, ported step for step where a step decides a choice
+(NOTICE has miniz's license). It gives miniz's choices as `ppadeflate`'s
+blocks and tokens, and `Encode` writes them: the same bits.
+
+| field | values | meaning |
+|---|---|---|
+| `encoder` | 1 `ENC_MINIZ` | miniz's tdefl, 1.x to 3.x |
+| `mz.flags` | the probes (low 12 bits) and `MZ_GREEDY` ($4000), `MZ_RLE` ($10000), `MZ_FILTER` ($20000), `MZ_STATIC` ($40000), `MZ_RAW` ($80000) | tdefl's own flags (`TDEFL_*`), as `tdefl_init` takes them; no other bit |
+| `mz.variant` | 0, 1 `MZV_FAST` | the build: level 1's own loop (`tdefl_compress_fast`) or not |
+
+What decides miniz's choices, all of it in the port:
+
+- **The parse** (`tdefl_compress_normal`): a 32 KB ring with 257 bytes
+  mirrored after it, hash heads and links of 16-bit positions (a link of
+  0 ends a chain, so a match never starts at position 0 or at a multiple
+  of 64K), probes counted 3 at a time (`1 + (probes + 2) / 3` of them, a
+  quarter of that once the match is 32 bytes long), lazy (one position)
+  or greedy, and matches dropped: 3 bytes from 8 KB or further, one whose
+  distance equals the ring position (a quirk of the code), up to 5 bytes
+  with `MZ_FILTER`. `MZ_RLE` matches only the byte before; `MZ_RAW` none.
+- **Level 1's loop** (`tdefl_compress_fast`), in builds with unaligned
+  loads (`MINIZ_USE_UNALIGNED_LOADS_AND_STORES`): miniz 1.x has it on x86
+  and x86-64, miniz 3.x builds without it by default and runs level 1
+  through the normal loop. One probe of a 4096-entry hash of 3 bytes, the
+  input taken in 4 KB pieces (no match crosses one's end: its last bytes
+  are literals). The two builds differ only there; at every other level
+  1.14 and 3.0.2 give the same stream (checked on the corpus).
+- **The blocks**: one ends when the LZ code buffer (64 KB: a byte a
+  literal, 3 a match, a flag byte every 8) is full, or (not in level 1's
+  loop) once it covers 31 KB and its codes take 115/128 of its bytes or
+  more, or always then with `MZ_RAW`. A block of fewer than 48 bytes, or
+  with `MZ_STATIC`, has the static codes; the others miniz's own
+  (`ppacorr.LensMiniz`, `SeqMiniz`). It is stored instead when that is no
+  bigger (its coded bytes + 1 >= its bytes) and all its bytes are still
+  in the window, or always with `MZ_RAW` then; and written with the
+  static codes when the coded block would overflow miniz's output buffer
+  (85,180 bytes; the zlib header counts in the first block).
+- **One call** with all the bytes and `TDEFL_FINISH`: what
+  `tdefl_compress_mem_to_heap`, miniz's PNG writer and `mz_compress` do.
+  The last block may be empty (the code buffer filled with the last
+  byte). No flushes: a stream with a flush's marker is not tried.
+
+`FindRecipe` tries kind 2 after kind 0 and before kind 1: its search is
+quick (each candidate stops at its first token, block end or block type
+unlike the stream's), kind 1's long where it fails, and no stream is both.
+The candidates (`FindMinizParams`): every level's probes (1, 6, 32, 16, 32,
+128, 256, 512, 768, 1500), greedy as the level makes it and the other way
+(the PNG writer makes no level greedy), level 1 in both builds; the same
+with `MZ_FILTER` where no match is 5 bytes or shorter, with `MZ_STATIC`
+where no block is dynamic; `MZ_RLE` where every match is at distance 1;
+Huffman only and `MZ_RAW` where there is none (`MZ_RAW` first where every
+block is stored). A stream with a match of 3 bytes from 8 KB or further,
+or 258 written as 284, is not miniz's. The first whose choices are the
+stream's is the recipe, verified as every kind is.
+
 ### Kind 3: a predictor and its corrections
 
 `pas/ppacorr.pas` (and its hot loops in `pas/ppacorrc.c`). `FindRecipe`
-tries it after kinds 0 and 1, so it never replaces them (a zlib stream is
+tries it after kinds 0, 2 and 1, so it never replaces them (a zlib stream is
 never larger as kind 3 than as kind 0 or 1: it is not kind 3); it takes
 every stream `ppadeflate.Decode` reads, and `Analyze` verifies its rebuild
 like the others'.
@@ -228,7 +287,12 @@ set on all but the last).
 
 ```
 byte    format              RECIPE_FORMAT = 2
-byte    kind                0, 1 or 3
+byte    kind                0 to 3
+kind 2: everything below it instead:
+  byte    encoder           1 (miniz)
+  byte    variant           0..1
+  varint  flags             the bits of MZ_FLAGS only
+  framing (below)
 kind 3: everything below it instead:
   byte    version           PRED_VERSION = 2
   varint  chain             1..4096
@@ -305,7 +369,11 @@ flush, the old versions' second block. So:
   recipe with one predictor field changed: each tree builder, `symEnd`,
   the filters, the search) beside the stream they give: 45 in all, 5 kind 0,
   9 kind 1 (each zlib variant, `ZV_NO_TOO_FAR`), 31 kind 3 (each tree
-  builder). `test_preflate tests/recipes 45 -golden` requires each recipe,
+  builder); and (M5, `mkgolden.py --kind2`, beside them) 14 kind 2, miniz
+  1.14 and 3.0.2 (both builds of level 1, levels 6, 9 and 10, the PNG
+  writer's, filtered, RLE, Huffman only, static, raw, and 88 KB of photo,
+  noise and text in several blocks, some stored): 59.
+  `test_preflate tests/recipes 59 -golden` requires each recipe,
   read back, to give its stream bit for bit (on 1 thread and in segments on
   4) and to be written the same again; `.github/test.sh` runs it on the six
   platforms, 32 and 64 bits, with the C and the Pascal code. A vector is
@@ -571,6 +639,48 @@ minutes each of `lib_ppa_chk` (libFuzzer, 167,490 runs) and `afl_ppa_chk`
   sets are M4's, byte for byte, in its three runs. Rebuild of
   kind 3 still runs on one thread (no checkpoints yet).
 
+## Status (M5, 15/11/2026): kind 2, miniz exact
+
+`pas/ppaminiz.pas` and `pas/ppaminizc.c` ("Kind 2" above). Checked
+against miniz itself (`pas/tests/test_miniz`, tools/preflate/README.md):
+64 files of the shared corpus and 4 made ones (zeros, noise, one byte,
+empty), each by miniz 1.14, 3.0.2 and 3.0.2 with unaligned loads, with 28
+sets of flags (level 0, levels 1 to 10 greedy and lazy, filtered at 6 and
+10, static at 1 and 6, RLE, Huffman only, raw with probes): 5,376 streams,
+every one written back bit for bit by the C and by the Pascal code, and
+every one's flags found by `FindMinizParams` (flags that give the same
+stream count as found).
+
+The corpora (`test_preflate`, C and Pascal, `-diffc`): `png-nonzlib`'s 12
+miniz 1.x images (level 9, lazy: flags $300) are kind 2, down from kind 3
+(their recipes 132 bytes in all, 11 each, from 8,521 as kind 3); `png-synth`'s 55 miniz
+outputs (1.14 at 9, 3.x at 1, 6 and 10) and `raw`'s 12 kind 2; one of
+`pda`'s 742 streams (498 bytes) is miniz's level 6; `tests/png3` has one.
+No kind-0 or kind-1 recipe changed.
+
+The hash gate (C on 8 threads and on 1, Pascal on 8), the seven sets'
+1,214 files: every `.ppa` the same in the three runs and extracted; 1,144
+are M4's byte for byte, and the 70 that changed are those with a miniz
+image, each smaller: `sets-corpus` (the same 9 as `png-nonzlib`) 63,487 ->
+59,027 B, `png-synth` 52 files 7,810,695 -> 7,605,782 B (the other 3
+miniz outputs go as bytes either way). Totals: corpus 18,526,475 ->
+18,522,015 B, `png-nonzlib` 808,447 -> 803,987 B, `png-synth`
+129,717,160 -> 129,512,247 B. `doodleAtari`'s images are found in 0.15 s
+(BIRD1 `ppa a` on one thread 3.2 -> 0.8 s).
+
+Fuzzing (`pas/tests/fuzz`) with two version-3 seeds holding kind-2 recipes
+added: 30 minutes each of `lib_ppa_chk` (libFuzzer, 104,314 runs) and
+`afl_ppa_chk` (AFL++, 27,753): nothing.
+
+- The search: each candidate stops at the first token, block end or block
+  type unlike the stream's, so a stream that is not miniz's costs 0 to 18
+  ms (png-synth's, up to 7 MB of bytes); one with a match of 3 bytes from
+  8 KB or further costs nothing (no candidate).
+- Not ported (each would be a new variant): miniz built with
+  `TDEFL_LESS_MEMORY` (a 24 KB code buffer, a 12-bit hash), flushes
+  (`mz_deflate` with `MZ_SYNC_FLUSH` or `MZ_FULL_FLUSH`), and
+  miniz_oxide (Rust's port, which has parted from miniz's choices).
+
 ## Credits
 
 The idea of rebuilding a deflate stream from its bytes and a small
@@ -579,3 +689,6 @@ preflate's (Dirk Steinke, Apache-2.0), studied in
 `/mnt/IA_LAB/agentes/ppa/preflate-study/`. No code of preflate is here: the
 flushes are zlib's own (`deflate.c`, `trees.c` of zlib 1.3.1, 1.2.5 and
 1.2.3), ported into `ppazlib` as NOTICE says.
+
+Kind 2's miniz is miniz's own tdefl (1.14 and 3.0.2; Rich Geldreich and
+contributors, MIT / public domain), ported into `ppaminiz` as NOTICE says.

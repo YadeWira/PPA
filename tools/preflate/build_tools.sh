@@ -91,6 +91,10 @@ for v in miniz114 miniz; do
 done
 gcc -O2 -w -I"$S/miniz114" -DMZ114 "$REPO/tools/preflate/enc/mz.c" -o "$B/mz114"
 gcc -O2 -w -I"$S/miniz" "$REPO/tools/preflate/enc/mz.c" "$S/miniz/miniz.c" -o "$B/mz3"
+# mzf114, mzf3, mzf3u: tdefl's own flags (kind 2's vectors); mzf3u with unaligned loads (its level-1 loop)
+gcc -O2 -w -I"$S/miniz114" -DMZ114 "$REPO/tools/preflate/enc/mzf.c" -o "$B/mzf114"
+gcc -O2 -w -I"$S/miniz" "$REPO/tools/preflate/enc/mzf.c" "$S/miniz/miniz.c" -o "$B/mzf3"
+gcc -O2 -w -I"$S/miniz" -DMINIZ_USE_UNALIGNED_LOADS_AND_STORES=1 "$REPO/tools/preflate/enc/mzf.c" "$S/miniz/miniz.c" -o "$B/mzf3u"
 
 echo "== zlib-ng 2.3.3 (python zlib_ng 1.1.0)"
 [ -d "$T/pylib/zlib_ng" ] || { mkdir -p "$T/pylib"; cp -r "$STUDY"/pda-census/pylib/zlib_ng* "$T/pylib/"; }

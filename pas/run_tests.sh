@@ -71,8 +71,8 @@ same_recipes "$OUT/pf_c.txt" "$OUT/pf_pas.txt"
 # the golden vectors (tests/recipes, tools/preflate/mkgolden.py): each
 # committed recipe gives its stream back, C and Pascal (.github/test.sh: on
 # every platform, 32 and 64 bits)
-"$OUT/test_preflate" "$PPA/tests/recipes" 45 -golden | tail -1
-PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/recipes" 45 -golden | tail -1
+"$OUT/test_preflate" "$PPA/tests/recipes" 59 -golden | tail -1
+PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/recipes" 59 -golden | tail -1
 # codec stream version 3 (tests/png3: images other encoders wrote): 3 of
 # the 5 files are written in it, each back, and in version 2 too
 "$OUT/test_preflate" "$PPA/tests/png3" 5 -none0 -all013 -codec -minv3 3 | tail -1
@@ -80,10 +80,10 @@ PF_CORPUS=${PREFLATE_CORPUS-/mnt/IA_LAB/agentes/ppa/preflate/corpus}
 if [ -d "$PF_CORPUS/png-zlib" ]; then
   # the regression set: all 392 streams kind 0; zlib alone does not write the
   # 24 others (ipad.png is zlib with a full flush, the 6 spider images zlib
-  # built with TOO_FAR 32767: kind 1; the 17 others kind 3, the same from
-  # the C and the Pascal code)
+  # built with TOO_FAR 32767: kind 1; the 12 miniz 1.x images kind 2; the 5
+  # oxipng ones kind 3, the same from the C and the Pascal code)
   "$OUT/test_preflate" "$PF_CORPUS/png-zlib" 392 -all0 | tail -1
-  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 7 -all013 -min3 17 -diffc -codec -minv3 19 | tail -1
+  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 7 -min2 12 -all013 -min3 5 -diffc -codec -minv3 19 | tail -1
 fi
 if [ -d "$PF_CORPUS/hostile" ]; then
   # kind 3 (M3a): every stream that inflates has a recipe; the others are
@@ -100,13 +100,16 @@ if [ -d "$PF_CORPUS/zflow" ]; then
   same_recipes "$OUT/pfz_c.txt" "$OUT/pfz_pas.txt"
   # every PNG zlib wrote with flushes or parameter changes (zfl): kind 1
   "$OUT/test_preflate" "$PF_CORPUS/png-synth" 288 -all01 -min1 288 -only .zfl- | tail -1
+  # every PNG miniz 1.14 and 3.x wrote (levels 1, 6, 9, 10): kind 2 (M5)
+  "$OUT/test_preflate" "$PF_CORPUS/png-synth" 55 -min2 55 -only .miniz | tail -1
   # the PDA sample: at least the 568 streams the census's zlib with flushes
-  # rebuilt kind 0 or 1 (595), all 742 with a recipe (kind 3 the rest)
-  "$OUT/test_preflate" "$PF_CORPUS/pda" 742 -minok 742 -all013 -min3 147 -diffc | tail -1
+  # rebuilt kind 0 or 1 (595), all 742 with a recipe (one miniz's, kind 3 the rest)
+  "$OUT/test_preflate" "$PF_CORPUS/pda" 742 -minok 742 -all013 -min2 1 -min3 146 -diffc | tail -1
 fi
 if [ -d "$PF_CORPUS/raw" ]; then
-  # bare deflate of the study's samples by 33 encoder settings: all with a recipe
-  "$OUT/test_preflate" "$PF_CORPUS/raw" 101 -all013 -min3 84 | tail -1
+  # bare deflate of the study's samples by 33 encoder settings: all with a
+  # recipe (miniz's 12: kind 2)
+  "$OUT/test_preflate" "$PF_CORPUS/raw" 101 -all013 -min2 12 -min3 72 | tail -1
 fi
 
 echo "== layer 3: filtered lines <-> each line's filter and the image's bytes"

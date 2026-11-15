@@ -73,8 +73,10 @@ Every child process runs under `ulimit -v 6000000`, with at most 4 at a time.
 - **`zfl.c`**: zlib's deflate driven by a script, `POS:sync|full|partial|block`
   and `POS:params=L,S` (`deflateParams` mid-stream), for the flush and
   parameter-change streams M2 must rebuild.
-- **`enc/`**: three small drivers, raw deflate of a file: `ldf` (libdeflate),
-  `mz` (miniz; `-DMZ114` for 1.14), `zop` (zopfli).
+- **`enc/`**: small drivers, raw deflate of a file: `ldf` (libdeflate),
+  `mz` (miniz by level; `-DMZ114` for 1.14), `mzf` (miniz with tdefl's own
+  flags: `mzf114`, `mzf3`, and `mzf3u` built with unaligned loads, level
+  1's own loop), `zop` (zopfli).
 - **`ppastreams.pas`**: each deflate stream of PNG-family files as PPA sees
   it: `ppapng.Decompose`, `ppadeflate.Decode`, `ppazlib.FindZlibParams` and
   `Encode` compared with the stream, as `ppacodec.PlanImage` does. `-dump DIR`
@@ -143,3 +145,10 @@ Every child process runs under `ulimit -v 6000000`, with at most 4 at a time.
   (doc/PREFLATE.md, "Status (M4)"). `mkgolden.py` made the golden vectors
   in `tests/recipes/` (`test_preflate tests/recipes 45 -golden`), and
   `mkpng3.py` the PNGs of `tests/png3/` (images other encoders wrote).
+- M5 (15/11/2026): recipe kind 2, miniz exact (`pas/ppaminiz.pas`,
+  doc/PREFLATE.md, "Kind 2" and "Status (M5)"). `pas/tests/test_miniz LIST
+  [-find]` checks the port against miniz itself: each line of LIST is
+  `PLAIN DEFL FLAGS VARIANT` (DEFL made by `mzf*`), and its choices,
+  written, must be DEFL bit for bit (and with -find, the flags found must
+  give DEFL). `mkgolden.py --kind2 tests/recipes` added kind 2's 14
+  golden vectors (59 in all). Scratch and results: `$PF/m5/`.

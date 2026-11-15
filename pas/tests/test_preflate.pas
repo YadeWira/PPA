@@ -50,7 +50,7 @@
 program test_preflate;
 {$I ../ppa.inc}
 uses {$ifdef UNIX} cthreads, {$endif} SysUtils, Classes, DateUtils, ppapng, ppadeflate, ppazlib, ppapreflate,
-  ppacodec, ppacorr;
+  ppacodec, ppacorr, ppaminiz;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);
@@ -61,7 +61,7 @@ const MAX_PLAIN = 1 shl 30;
 
 var
   failures, nStreams, nKind0, nKind1, nNotDeflate, nNotTaken, bytesKind0, bytesKind1: Int64;
-  nKind3, bytesKind3, recipeKind3: Int64;
+  nKind3, bytesKind3, recipeKind3, nKind2, bytesKind2: Int64;
   verbose, diffc, tsvOn, flips: Boolean;
   maxKindArg: Integer = RECIPE_KIND_LAST;
   tsv: TextFile;
@@ -102,7 +102,8 @@ begin
     (a.prm.memLevel = b.prm.memLevel) and (a.prm.wbits = b.prm.wbits) and (a.raw = b.raw) and
     (a.adlerOk = b.adlerOk) and (a.header[0] = b.header[0]) and (a.header[1] = b.header[1]) and
     (a.endPad = b.endPad) and Same(a.tail, b.tail) and (a.flow.variant = b.flow.variant) and
-    (Length(a.flow.events) = Length(b.flow.events)) and SamePred(a.pred, b.pred) and Same(a.corr, b.corr);
+    (Length(a.flow.events) = Length(b.flow.events)) and SamePred(a.pred, b.pred) and Same(a.corr, b.corr) and
+    (a.encoder = b.encoder) and (a.mz.flags = b.mz.flags) and (a.mz.variant = b.mz.variant);
   if Result then
     for k := 0 to High(a.flow.events) do
       if (a.flow.events[k].pos <> b.flow.events[k].pos) or (a.flow.events[k].kind <> b.flow.events[k].kind) or
@@ -152,6 +153,23 @@ begin
   end;
 end;
 
+{ a kind-2 recipe (miniz) found again, and rebuilt, with the other code
+  (ppaminiz's parse in C or in Pascal): the same flags, the same stream }
+procedure CheckOtherMiniz(const a: TBytes; framing: TDeflFraming; const r: TDeflRecipe; const name: string);
+var z: TZStream; was: Boolean; r2: TDeflRecipe; back: TBytes; st: TDeflStatus;
+begin
+  if not Parse(a, framing, MAX_PLAIN, z).Ok then begin Fail('diffc: does not parse: ' + name); Exit; end;
+  was := UseMinizC;
+  try
+    UseMinizC := not was;
+    st := FindRecipe(a, z, r2, maxKindArg);
+    if (st <> dsOk) or not SameRecipe(r, r2) then begin Fail('C and Pascal find another kind-2 recipe: ' + name); Exit; end;
+    if not Rebuild(z.plain, r, back) or not Same(back, a) then Fail('kind 2 rebuilt by the other code differs: ' + name);
+  finally
+    UseMinizC := was;
+  end;
+end;
+
 function CheckStream(const a: TBytes; framing: TDeflFraming; const name: string; out kind: Integer): TDeflStatus;
 var plain, rb, back: TBytes; r, r2: TDeflRecipe; pos: SizeInt; saveMin, saveSeg: SizeInt; t0: TDateTime;
   msA, msR: Int64;
@@ -168,12 +186,16 @@ begin
   kind := r.kind;
   if r.kind = RECIPE_ZLIB then begin Inc(nKind0); Inc(bytesKind0, Length(a)); end
   else if r.kind = RECIPE_ZLIB_FLOW then begin Inc(nKind1); Inc(bytesKind1, Length(a)); end
+  else if r.kind = RECIPE_ENCODER then begin Inc(nKind2); Inc(bytesKind2, Length(a)); end
   else begin Inc(nKind3); Inc(bytesKind3, Length(a)); end;
   if verbose then begin
     if r.kind = RECIPE_CORR then
       Write(Format('  kind 3: chain %d nice %d lazy %d good %d hbits %d maxDist %d flags %d symEnd %d%s  %d bytes, corrections %d',
         [r.pred.chain, r.pred.nice, r.pred.lazy, r.pred.good, r.pred.hbits, r.pred.maxDist, r.pred.flags, r.pred.symEnd,
          BoolToStr(r.raw, ' raw', ''), Length(a), Length(r.corr)]))
+    else if r.kind = RECIPE_ENCODER then
+      Write(Format('  kind 2: miniz flags %x variant %d%s  %d bytes', [r.mz.flags, r.mz.variant, BoolToStr(r.raw, ' raw', ''),
+        Length(a)]))
     else
       Write(Format('  kind %d: level %d strategy %d memLevel %d wbits %d%s  %d bytes',
         [r.kind, r.prm.level, r.prm.strategy, r.prm.memLevel, r.prm.wbits, BoolToStr(r.raw, ' raw', ''), Length(a)]));
@@ -202,6 +224,7 @@ begin
   if r.kind = RECIPE_CORR then Inc(recipeKind3, Length(rb));
   TsvLine(name, Length(a), Length(plain), r.kind, Length(rb), msA, msR);
   if diffc and (r.kind = RECIPE_CORR) then CheckOtherCode(a, framing, r, name);
+  if diffc and (r.kind = RECIPE_ENCODER) then CheckOtherMiniz(a, framing, r, name);
   if r.kind = RECIPE_CORR then Exit;   { (one thread: segments are kind 0's) }
   { cut into segments (ppazlib's parallel rebuild) on 4 threads: the same }
   saveMin := ppazlib.PAR_MIN_BYTES; saveSeg := ppazlib.PAR_SEG_MIN;
@@ -321,6 +344,8 @@ begin
     a := ReadFile(dir + '/' + name);
     if not Parse(a, framing, MAX_PLAIN, z).Ok then begin Fail('golden: not a deflate stream: ' + name); Continue; end;
     plain := z.plain;
+    { a vector is never made again: only a stream without one gets its recipe }
+    if write and FileExists(dir + '/' + base + '.recipe') then Continue;
     if write then begin
       st := Analyze(a, framing, MAX_PLAIN, plain, r);
       if st <> dsOk then begin Fail('golden: no recipe: ' + name); Continue; end;
@@ -351,12 +376,13 @@ begin
     if (Analyze(a, framing, MAX_PLAIN, plain, r) = dsOk) and Same(RecipeBytes(r), rb) then Inc(nSame);
   end;
   files.Free;
-  if write then Crafts;
+  if write and not FileExists(dir + '/rgba8-zopfli~tree0.recipe') then Crafts;
   if n < minimum then Fail(Format('golden: %d vectors < minimum %d', [n, minimum]));
-  if write then Writeln(Format('%d recipes written: %d kind 0, %d kind 1, %d kind 3; %d failures',
-    [n, kinds[0], kinds[1], kinds[3], failures]))
-  else Writeln(Format('golden: %d recipes (%d kind 0, %d kind 1, %d kind 3) give their streams back, on 1 and 4 threads, ' +
-    'and are written the same; the encoder makes %d of them again; %d failures', [n, kinds[0], kinds[1], kinds[3], nSame, failures]));
+  if write then Writeln(Format('%d recipes written: %d kind 0, %d kind 1, %d kind 2, %d kind 3; %d failures',
+    [n, kinds[0], kinds[1], kinds[2], kinds[3], failures]))
+  else Writeln(Format('golden: %d recipes (%d kind 0, %d kind 1, %d kind 2, %d kind 3) give their streams back, on 1 and 4 ' +
+    'threads, and are written the same; the encoder makes %d of them again; %d failures',
+    [n, kinds[0], kinds[1], kinds[2], kinds[3], nSame, failures]));
 end;
 
 { ---------------------------------------------------------------- crafted cases }
@@ -1049,6 +1075,72 @@ begin
   if n3 = 0 then Fail('field flips: none kind 3');
 end;
 
+{ miniz's streams (ppaminiz's choices written: its levels, strategies and
+  both builds) of bytes made here: each must come back as kind 2 (or 0, if
+  zlib's are the same); and a kind-2 recipe damaged: each cut refused,
+  each value of each byte refused or rebuilt, never raised on }
+procedure CraftedMiniz;
+const
+  MZG = MZ_GREEDY;
+  NMZ = 17;
+  FL: array[0..NMZ - 1] of LongWord = (1 or MZG, 1 or MZG, 1, 6 or MZG, 32 or MZG, 16, 32, 128, 256, 1500, 128 or MZ_FILTER,
+    128 or MZ_STATIC, 1 or MZG or MZ_STATIC, 128 or MZ_RLE, 0, MZ_RAW or MZG, 32 or MZ_RAW);
+  VA: array[0..NMZ - 1] of Integer = (0, MZV_FAST, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, MZV_FAST, 0, 0, 0, 0);
+var plain, a, rb, back: TBytes; e: TZStream; p: TMinizParams; r, r2: TDeflRecipe; i, j, v, kind: Integer;
+  x: LongWord; st: TDeflStatus; pos: SizeInt; rr: TRecipeRead; first: Boolean;
+begin
+  if maxKindArg < RECIPE_ENCODER then Exit;
+  { 40 KB: words, a table of records, noise, a run (two blocks at least) }
+  SetLength(plain, 40000);
+  x := 12345;
+  for i := 0 to High(plain) do begin
+    {$push}{$Q-}{$R-} x := x * 1103515245 + 12345; {$pop}
+    case (i div 5000) mod 4 of
+      0: plain[i] := Ord('a') + (x shr 16) mod 7;
+      1: plain[i] := (i mod 37) xor ((x shr 20) and 1);
+      2: plain[i] := x shr 24;
+    else plain[i] := 0;
+    end;
+  end;
+  first := True;
+  for i := 0 to NMZ - 1 do begin
+    p.flags := FL[i]; p.variant := VA[i];
+    if not MinizChoices(plain, p, nil, True, e) then begin Fail(Format('crafted miniz %x: no choices', [p.flags])); Continue; end;
+    e.raw := False; e.header[0] := $78; e.header[1] := $01; e.adlerOk := True;
+    a := Encode(e);
+    st := CheckStream(a, dfZlib, Format('crafted: miniz flags %x variant %d', [p.flags, p.variant]), kind);
+    if (st <> dsOk) or ((kind <> RECIPE_ENCODER) and (kind <> RECIPE_ZLIB)) then
+      Fail(Format('crafted miniz flags %x variant %d: not kind 2 (kind %d)', [p.flags, p.variant, kind]));
+    if first and (st = dsOk) and (kind = RECIPE_ENCODER) and (Analyze(a, dfZlib, MAX_PLAIN, back, r) = dsOk) then begin
+      first := False;
+      rb := RecipeBytes(r);
+      for v := 0 to Length(rb) - 1 do begin
+        pos := 0;
+        if ReadRecipe(Copy(rb, 0, v), pos, Length(plain), 100, r2) = rrOk then Fail('a cut kind-2 recipe was read: ' + IntToStr(v));
+      end;
+      for j := 0 to Length(rb) - 1 do
+        for v := 0 to 255 do begin
+          a := Copy(rb, 0, Length(rb));
+          a[j] := v;
+          pos := 0;
+          try
+            rr := ReadRecipe(a, pos, Length(plain), 100, r2);
+            if (rr = rrOk) and not RecipeValid(r2) then Fail('a kind-2 recipe read out of range');
+            if rr = rrOk then Rebuild(plain, r2, back);
+          except
+            on e: Exception do Fail('damaged kind-2 recipe raised ' + e.ClassName);
+          end;
+        end;
+      r2 := r; r2.encoder := 2;
+      if Rebuild(plain, r2, back) then Fail('a kind-2 recipe of an unknown encoder rebuilt');
+      r2 := r; r2.mz.variant := MZV_LAST + 1;
+      if Rebuild(plain, r2, back) then Fail('a kind-2 recipe of an unknown build rebuilt');
+      r2 := r; r2.mz.flags := r2.mz.flags or $1000;
+      if Rebuild(plain, r2, back) then Fail('a kind-2 recipe with an unknown flag rebuilt');
+    end;
+  end;
+end;
+
 procedure Crafted;
 var a, rb, back, plain: TBytes; z, zf: TZStream; r, r2: TDeflRecipe; i, k, v, n, kind: Integer; pos: SizeInt;
   st: TDeflStatus; fixedNotTaken: Integer; rr: TRecipeRead;
@@ -1060,11 +1152,24 @@ begin
   a[0] := 1; a[1] := n and 255; a[2] := n shr 8; a[3] := not a[1]; a[4] := not a[2];
   for i := 0 to n - 1 do a[5 + i] := i mod 7;
   st := CheckStream(a, dfRaw, 'crafted: stored', kind);
-  if (maxKindArg >= RECIPE_CORR) and ((st <> dsOk) or (kind <> RECIPE_CORR)) then Fail('crafted stored stream: not kind 3');
+  { (one final stored block: what miniz writes at level 0, kind 2) }
+  if (maxKindArg >= RECIPE_CORR) and ((st <> dsOk) or ((kind <> RECIPE_CORR) and (kind <> RECIPE_ENCODER))) then
+    Fail('crafted stored stream: not kind 2 or 3');
   { without kind 3: not taken }
   if Analyze(a, dfRaw, MAX_PLAIN, plain, r, RECIPE_ZLIB_FLOW) <> dsNotTaken then
     Fail('crafted stored stream: not reported as not taken by kinds 0 and 1');
-  if flips and (maxKindArg >= RECIPE_CORR) then DamagedCorr(a);
+  { the same bytes in two stored blocks (miniz stores 31 KB at least but
+    for the last block): kind 3's recipe damaged }
+  if flips and (maxKindArg >= RECIPE_CORR) then begin
+    back := nil; SetLength(back, 10 + n);
+    back[0] := 0; back[1] := (n div 2) and 255; back[2] := (n div 2) shr 8; back[3] := not back[1]; back[4] := not back[2];
+    for i := 0 to n div 2 - 1 do back[5 + i] := i mod 7;
+    k := 5 + n div 2;
+    back[k] := 1; back[k + 1] := (n - n div 2) and 255; back[k + 2] := (n - n div 2) shr 8;
+    back[k + 3] := not back[k + 1]; back[k + 4] := not back[k + 2];
+    for i := n div 2 to n - 1 do back[k + 5 + i - n div 2] := i mod 7;
+    DamagedCorr(back);
+  end;
   { not deflate: block type 3; and nothing at all }
   a := nil; SetLength(a, 4); a[0] := 7;
   if CheckStream(a, dfRaw, 'crafted: block type 3', kind) <> dsNotDeflate then Fail('block type 3: not reported as not deflate');
@@ -1145,15 +1250,16 @@ begin
   if maxKindArg >= RECIPE_ZLIB_FLOW then TooFarFlows;
   LoopSwitchFlows;
   DamagedFlows;
+  CraftedMiniz;
   if flips and (maxKindArg >= RECIPE_CORR) then begin FieldFlips; RankEscape; FarEscape; end;
 end;
 
 var
   files: TStringList; sr: TSearchRec; dir, name, ext, only: string; i, minimum, min1, minOk, minV3, kind: Integer;
-  all0, none0, all01, all013, codec: Boolean; min3: Integer; tsvName: string;
+  all0, none0, all01, all013, codec: Boolean; min3, min2: Integer; tsvName: string;
   d: TBytes; p: TPng; s: SizeInt; st: TDeflStatus; t0: TDateTime; framing: TDeflFraming;
   dirStreams, dirBytes0, dirBytes1, dirKind0, dirKind1, dirNotTaken, dirNotDeflate: Int64;
-  dirKind3, dirBytes3, dirRecipe3: Int64;
+  dirKind3, dirBytes3, dirRecipe3, dirKind2, dirBytes2: Int64;
 
   procedure Expect(const what: string);
   begin
@@ -1177,7 +1283,7 @@ begin
       Halt(0);
     end;
   all0 := False; none0 := False; all01 := False; all013 := False; codec := False; verbose := False; min1 := 0; minOk := 0; minV3 := 0;
-  only := ''; min3 := 0; tsvName := ''; diffc := False; flips := False;
+  only := ''; min3 := 0; min2 := 0; tsvName := ''; diffc := False; flips := False;
   for i := 2 to ParamCount do
     if ParamStr(i) = '-all0' then all0 := True
     else if ParamStr(i) = '-none0' then none0 := True
@@ -1187,6 +1293,7 @@ begin
     else if ParamStr(i) = '-diffc' then diffc := True
     else if ParamStr(i) = '-flips' then flips := True
     else if (ParamStr(i) = '-min3') and (i < ParamCount) then min3 := StrToInt(ParamStr(i + 1))
+    else if (ParamStr(i) = '-min2') and (i < ParamCount) then min2 := StrToInt(ParamStr(i + 1))
     else if (ParamStr(i) = '-tsv') and (i < ParamCount) then tsvName := ParamStr(i + 1)
     else if (ParamStr(i) = '-min1') and (i < ParamCount) then min1 := StrToInt(ParamStr(i + 1))
     else if (ParamStr(i) = '-only') and (i < ParamCount) then only := ParamStr(i + 1)
@@ -1203,7 +1310,7 @@ begin
     FindClose(sr);
   end;
   failures := 0; nStreams := 0; nKind0 := 0; nKind1 := 0; nNotDeflate := 0; nNotTaken := 0;
-  bytesKind0 := 0; bytesKind1 := 0; nKind3 := 0; bytesKind3 := 0; recipeKind3 := 0;
+  bytesKind0 := 0; bytesKind1 := 0; nKind3 := 0; bytesKind3 := 0; recipeKind3 := 0; nKind2 := 0; bytesKind2 := 0;
   tsvOn := tsvName <> '';
   if tsvOn then begin AssignFile(tsv, tsvName); Rewrite(tsv); end;
   recipeHash := QWord($CBF29CE484222325);
@@ -1237,6 +1344,7 @@ begin
   { the directory's own counts; then the crafted cases' }
   dirStreams := nStreams; dirBytes0 := bytesKind0; dirBytes1 := bytesKind1; dirKind0 := nKind0; dirKind1 := nKind1;
   dirNotTaken := nNotTaken; dirNotDeflate := nNotDeflate; dirKind3 := nKind3; dirBytes3 := bytesKind3; dirRecipe3 := recipeKind3;
+  dirKind2 := nKind2; dirBytes2 := bytesKind2;
   if tsvOn then CloseFile(tsv);
   tsvOn := False;
   Writeln(Format('recipes %.16x', [recipeHash]));
@@ -1248,15 +1356,17 @@ begin
   if dirStreams < minimum then Fail(Format('%d streams < minimum %d', [dirStreams, minimum]));
   if dirKind1 < min1 then Fail(Format('%d kind 1 < minimum %d', [dirKind1, min1]));
   if dirKind3 < min3 then Fail(Format('%d kind 3 < minimum %d', [dirKind3, min3]));
+  if dirKind2 < min2 then Fail(Format('%d kind 2 < minimum %d', [dirKind2, min2]));
   if nCodecV[3] < minV3 then Fail(Format('%d files in codec stream version 3 < minimum %d', [nCodecV[3], minV3]));
   if codec then Writeln(Format('codec: %d files in stream version 2, %d in version 3 (each back, and in version 2 too)',
     [nCodecV[2], nCodecV[3]]));
-  if dirKind0 + dirKind1 + dirKind3 < minOk then Fail(Format('%d with a recipe < minimum %d', [dirKind0 + dirKind1 + dirKind3, minOk]));
-  Writeln(Format('%d streams: %d kind 0 (%d bytes), %d kind 1 (%d bytes), %d kind 3 (%d bytes, recipes %d bytes) ' +
-    '(written, read and rebuilt the same), %d not taken, %d not deflate; crafted: %d kind 0, %d kind 1, %d kind 3, ' +
-    '%d not taken, %d not deflate; %.1f s; %d failures',
-    [dirStreams, dirKind0, dirBytes0, dirKind1, dirBytes1, dirKind3, dirBytes3, dirRecipe3, dirNotTaken, dirNotDeflate,
-     nKind0 - dirKind0, nKind1 - dirKind1, nKind3 - dirKind3, nNotTaken - dirNotTaken, nNotDeflate - dirNotDeflate,
-     SecondSpan(Now, t0), failures]));
+  if dirKind0 + dirKind1 + dirKind2 + dirKind3 < minOk then
+    Fail(Format('%d with a recipe < minimum %d', [dirKind0 + dirKind1 + dirKind2 + dirKind3, minOk]));
+  Writeln(Format('%d streams: %d kind 0 (%d bytes), %d kind 1 (%d bytes), %d kind 2 (%d bytes), %d kind 3 (%d bytes, ' +
+    'recipes %d bytes) (written, read and rebuilt the same), %d not taken, %d not deflate; crafted: %d kind 0, ' +
+    '%d kind 1, %d kind 2, %d kind 3, %d not taken, %d not deflate; %.1f s; %d failures',
+    [dirStreams, dirKind0, dirBytes0, dirKind1, dirBytes1, dirKind2, dirBytes2, dirKind3, dirBytes3, dirRecipe3, dirNotTaken,
+     dirNotDeflate, nKind0 - dirKind0, nKind1 - dirKind1, nKind2 - dirKind2, nKind3 - dirKind3, nNotTaken - dirNotTaken,
+     nNotDeflate - dirNotDeflate, SecondSpan(Now, t0), failures]));
   if failures > 0 then Halt(1);
 end.

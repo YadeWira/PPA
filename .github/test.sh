@@ -138,8 +138,8 @@ echo "== layer 2a"
 "$OUT/test_deflate$EXE" tests/png 16 | tail -1
 "$OUT/test_deflate$EXE" tests/png 1 -dump "$OUT/z" > "$OUT/streams.txt"
 echo "== layer 2, the deflate recipes' golden vectors (C and Pascal)"
-"$OUT/test_preflate$EXE" tests/recipes 45 -golden | tail -1
-PPA_NOC=1 "$OUT/test_preflate$EXE" tests/recipes 45 -golden | tail -1
+"$OUT/test_preflate$EXE" tests/recipes 59 -golden | tail -1
+PPA_NOC=1 "$OUT/test_preflate$EXE" tests/recipes 59 -golden | tail -1
 echo "== layer 2b"
 "$OUT/test_zlib$EXE" tests/png -v > "$OUT/zlib.txt"
 tail -1 "$OUT/zlib.txt"

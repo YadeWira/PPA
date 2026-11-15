@@ -44,3 +44,17 @@ drawing-ldf9~tree3.raw	(drawing-ldf9.raw's bytes)	16100	211	crafted: drawing-ldf
 drawing-ldf9~tree4.raw	(drawing-ldf9.raw's bytes)	16100	210	crafted: drawing-ldf9.raw's recipe with tree4, and its rebuild
 drawing-ldf9~symend300.raw	(drawing-ldf9.raw's bytes)	16100	211	crafted: drawing-ldf9.raw's recipe with symend300, and its rebuild
 drawing-ldf9~toofar.raw	(drawing-ldf9.raw's bytes)	16100	211	crafted: drawing-ldf9.raw's recipe with toofar, and its rebuild
+text-mzk2-114-L1fast.raw	text	14000	7459	mzf114 text 0x4001
+text-mzk2-3-L1.raw	text	14000	6882	mzf3 text 0x4001
+bin-mzk2-3-L6.raw	bin	16000	7194	mzf3 bin 0x80
+zipf-mzk2-114-L9.raw	zipf	40000	21496	mzf114 zipf 0x300
+zipf-mzk2-3-L10.raw	zipf	40000	21487	mzf3 zipf 0x5dc
+photo-mzk2-3-png6.zlib	photo	18496	9574	mzf3 photo 0x1080
+text-mzk2-3-filtered.raw	text	14000	6482	mzf3 text 0x20080
+drawing-mzk2-3-rle.raw	drawing	16100	882	mzf3 drawing 0x10080
+photo-mzk2-3-huffman.raw	photo	18496	8068	mzf3 photo 0x0
+bin-mzk2-3-static.raw	bin	16000	8090	mzf3 bin 0x40080
+drawing-mzk2-3-L0.raw	drawing	16100	16105	mzf3 drawing 0x84000
+mixed-mzk2-3-L6.raw	mixed	88496	65083	mzf3 mixed 0x80
+mixed-mzk2-3u-L1fast.raw	mixed	88496	69537	mzf3u mixed 0x4001
+mixed-mzk2-3-L0.raw	mixed	88496	88511	mzf3 mixed 0x84000

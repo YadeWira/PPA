@@ -149,6 +149,13 @@ var
   CorrStatOn: Boolean = False;
   CorrStat: array[0..15] of Double;
 
+{ miniz's code lengths of the counts freq[0..n-1] (at most maxLen bits;
+  tdefl_optimize_huffman_table) into lens[0..n-1], and its run-length
+  coding of the lengths lens[0..total-1] (tdefl_start_dynamic_block) into
+  seq (ppadeflate's clenSeq: symbol | extra << 5; room for total + 1).
+  ppaminiz writes miniz's own blocks with them. }
+procedure LensMiniz(const freq: array of Integer; n, maxLen: Integer; var lens: array of Byte);
+procedure SeqMiniz(const lens: array of Byte; total: Integer; var seq: array of Word; var nSeq: Integer);
 
 implementation
 

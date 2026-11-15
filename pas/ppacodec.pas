@@ -38,8 +38,9 @@ const
   { The first byte of every stream. A new version never stops reading the
     older ones: 1, PPA 0.1.0's; 2, the static model's 320 contexts (the
     channel before's residual among them); 3, each image's deflate recipe
-    in ppapreflate's RecipeBytes (kinds 0, 1 and 3: zlib with its flushes,
-    and any deflate stream through a predictor and its corrections). }
+    in ppapreflate's RecipeBytes (kinds 0 to 3: zlib with its flushes,
+    miniz, and any deflate stream through a predictor and its
+    corrections). }
   STREAM_VERSION = 3;
   { the oldest version Compress writes: what every file needs (version 1's
     static model is not written any more). A file writes the oldest
@@ -369,11 +370,11 @@ begin
 end;
 
 { The stream version a deflate recipe needs: kind 0's, zlib's parameters,
-  is version 2's; kinds 1 and 3 (RecipeBytes) version 3's }
+  is version 2's; kinds 1 to 3 (RecipeBytes) version 3's }
 function RecipeVersion(const recipe: TDeflRecipe): Integer;
 begin
   if recipe.kind = RECIPE_ZLIB then Result := 2
-  else if recipe.kind in [RECIPE_ZLIB_FLOW, RECIPE_CORR] then Result := 3
+  else if recipe.kind in [RECIPE_ZLIB_FLOW, RECIPE_ENCODER, RECIPE_CORR] then Result := 3
   else Result := High(Integer);
 end;
 

@@ -10,6 +10,10 @@ that is checked.
     python3 tools/preflate/mkgolden.py OUTDIR      the streams and MANIFEST.tsv
     test_preflate OUTDIR 1 -writegolden            then each one's .recipe
 
+    python3 tools/preflate/mkgolden.py --kind2 tests/recipes
+                                                   kind 2's (miniz), added beside
+                                                   the others (M5, 15/11/2026)
+
 Run once per recipe format; the files are committed, not made again (a
 new format adds its own next to them). The encoders are the study's builds
 ($PF/tools/bin, tools/preflate/build_tools.sh: libdeflate 1.23, miniz 1.14
@@ -101,7 +105,17 @@ def png_gray(plain, w, h):
             chunk(b'IDAT', zlib.compress(plain, 9)) + chunk(b'IEND', b''))
 
 
+def mixed(seed):
+    """a photo, 40 KB of noise and text: miniz's blocks end where its code
+    buffer fills and past 31 KB, and the noise's go stored"""
+    r = random.Random(seed)
+    return (photo(96, 64, seed) + bytes(r.randrange(256) for _ in range(40000)) +
+            open(os.path.join(REPO, 'doc', 'CODEC.md'), 'rb').read()[:30000])
+
+
 def main():
+    if sys.argv[1] == '--kind2':
+        return kind2(sys.argv[2])
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
     tmp = os.path.join(out, '.plain')
@@ -204,6 +218,58 @@ def main():
         os.remove(os.path.join(tmp, k))
     os.rmdir(tmp)
     print('%d streams in %s' % (len(man), out))
+
+
+def kind2(out):
+    """kind 2's vectors (miniz's tdefl, ppaminiz): each of its paths, beside
+    the others, MANIFEST.tsv appended; then -writegolden writes the
+    recipes of the streams that have none"""
+    tmp = os.path.join(out, '.plain')
+    os.makedirs(tmp, exist_ok=True)
+    plains = {
+        'photo': photo(96, 64, 1),
+        'drawing': drawing(160, 100, 2),
+        'text': open(os.path.join(REPO, 'doc', 'CODEC.md'), 'rb').read()[:14000],
+        'bin': binary(16000, 3),
+        'zipf': zipf(40000, 5),
+        'mixed': mixed(7),
+    }
+    for k, v in plains.items():
+        open(os.path.join(tmp, k), 'wb').write(v)
+    G, ZH = 0x4000, 0x1000
+    cases = [
+        # name, plain, tool, flags: the level-1 loop (1.14 on x86), the normal one at
+        # level 1 (3.x), levels 6 and 9 (lazy), 10, the PNG writer's (no greedy, zlib
+        # framed), filtered, RLE, Huffman only, static codes, raw; and many blocks
+        ('text-mzk2-114-L1fast', 'text', 'mzf114', 1 | G),
+        ('text-mzk2-3-L1', 'text', 'mzf3', 1 | G),
+        ('bin-mzk2-3-L6', 'bin', 'mzf3', 128),
+        ('zipf-mzk2-114-L9', 'zipf', 'mzf114', 768),
+        ('zipf-mzk2-3-L10', 'zipf', 'mzf3', 1500),
+        ('photo-mzk2-3-png6', 'photo', 'mzf3', 128 | ZH),
+        ('text-mzk2-3-filtered', 'text', 'mzf3', 128 | 0x20000),
+        ('drawing-mzk2-3-rle', 'drawing', 'mzf3', 128 | 0x10000),
+        ('photo-mzk2-3-huffman', 'photo', 'mzf3', 0),
+        ('bin-mzk2-3-static', 'bin', 'mzf3', 128 | 0x40000),
+        ('drawing-mzk2-3-L0', 'drawing', 'mzf3', G | 0x80000),
+        ('mixed-mzk2-3-L6', 'mixed', 'mzf3', 128),
+        ('mixed-mzk2-3u-L1fast', 'mixed', 'mzf3u', 1 | G),
+        ('mixed-mzk2-3-L0', 'mixed', 'mzf3', G | 0x80000),
+    ]
+    man = []
+    for name, plain, t, flags in cases:
+        ext = 'zlib' if flags & ZH else 'raw'
+        data = subprocess.run([os.path.join(BIN, t), os.path.join(tmp, plain), str(flags)], check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+        open(os.path.join(out, name + '.' + ext), 'wb').write(data)
+        man.append((name + '.' + ext, plain, len(plains[plain]), len(data), '%s %s 0x%x' % (t, plain, flags)))
+    with open(os.path.join(out, 'MANIFEST.tsv'), 'a') as f:
+        for r in man:
+            f.write('\t'.join(str(x) for x in r) + '\n')
+    for k in plains:
+        os.remove(os.path.join(tmp, k))
+    os.rmdir(tmp)
+    print('%d streams added in %s' % (len(man), out))
 
 
 main()
