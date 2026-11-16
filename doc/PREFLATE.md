@@ -767,6 +767,19 @@ added: 30 minutes each of `lib_ppa_chk` (libFuzzer, 104,314 runs) and
   B (57.52% -> 57.09%). Every file extracted and compared.
 - **Speed**: 15 oxipng photos (`-o1` to `max`), 8 at once: compressing
   10.3 s (0.3.0, kind 3) -> 6.8 s.
+- **The corpora's PNG streams by libdeflate and oxipng** (`png-synth`):
+  libdeflate 1.23's (levels 1, 6, 9, 12) 49 of 51 kind 2, oxipng's 116 of
+  153 (of the rest, 34 are `-o2-zopfli`, zopfli's: kind 3; one zlib's,
+  kind 0); the 2 and 2 left are s33's noise, stored blocks only over 64
+  KB, where libdeflate is not tried. `raw`: libdeflate's 48 kind 2 (was
+  kind 3); `pda`: 2.
+- **CI** (04c15e8): the six platforms, 32 and 64 bits, give the same
+  hashes (`determinism`); the zpaq-std tarball builds alone (`ppa.so`,
+  `ppa.dll`, `ppa32.dll`; the DLLs still import only kernel32, oleaut32
+  and user32).
+- **Fuzzing** (`pas/tests/fuzz`), seeds with version 4 streams
+  (`tests/png3`): 30 minutes each of `lib_ppa_chk` (libFuzzer, 145,600
+  runs) and `afl_ppa_chk` (AFL++, 43,418): nothing.
 
 ## Credits
 
