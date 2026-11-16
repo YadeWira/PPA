@@ -7,7 +7,8 @@
   bare deflate; else zlib if its header says so, bare otherwise).
 
     test_preflate <directory> [minimum streams] [-all0 | -none0 | -all01 | -all013] [-min1 N] [-min3 N] [-minok N]
-                  [-max01] [-only TEXT] [-codec] [-minv3 N] [-minv4 N] [-diffc] [-flips] [-tsv FILE] [-v]
+                  [-max01] [-only TEXT] [-codec] [-minv3 N] [-minv4 N] [-minv5 N] [-zop BYTES] [-diffc] [-flips]
+                  [-tsv FILE] [-v]
     test_preflate tests/recipes [minimum] -golden | -writegolden
 
   -golden: the golden vectors (tests/recipes, tools/preflate/mkgolden.py):
@@ -32,8 +33,11 @@
   libdeflate) and with maxVersion 2 (version 2, the very stream of the
   default when that is version 2; ppa1's MODE_STATIC call too) and 3 (what
   0.3.0 reads), each verified and decompressed back, and versions it does
-  not write refused; -minv3 N, -minv4 N: at least N files written in
-  version 3, 4. The last line has a digest
+  not write refused; -minv3 N, -minv4 N, -minv5 N: at least N files
+  written in version 3, 4, 5. -zop BYTES: zopfli (kind 2's encoder 3) is
+  tried for streams of up to BYTES (by default never: each try costs a
+  zopfli run; the codec's default level tries it up to 64 KiB). The last
+  line has a digest
   of every recipe's bytes, the same from the C and the Pascal code.
 
   Then, whatever the directory, crafted cases: streams that are deflate
@@ -51,7 +55,7 @@
 program test_preflate;
 {$I ../ppa.inc}
 uses {$ifdef UNIX} cthreads, {$endif} SysUtils, Classes, DateUtils, ppapng, ppadeflate, ppazlib, ppapreflate,
-  ppacodec, ppacorr, ppaminiz, ppalibdeflate;
+  ppacodec, ppacorr, ppaminiz, ppalibdeflate, ppazopfli;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);
@@ -67,7 +71,7 @@ var
   maxKindArg: Integer = RECIPE_KIND_LAST;
   tsv: TextFile;
   recipeHash: QWord;   { FNV-1a of every recipe's bytes, in order }
-  nCodecV: array[2..4] of Int64;   { -codec: the files Compress wrote in each stream version }
+  nCodecV: array[2..5] of Int64;   { -codec: the files Compress wrote in each stream version }
 
 procedure Fail(const s: string);
 begin
@@ -105,7 +109,9 @@ begin
     (a.endPad = b.endPad) and Same(a.tail, b.tail) and (a.flow.variant = b.flow.variant) and
     (Length(a.flow.events) = Length(b.flow.events)) and SamePred(a.pred, b.pred) and Same(a.corr, b.corr) and
     (a.encoder = b.encoder) and (a.mz.flags = b.mz.flags) and (a.mz.variant = b.mz.variant) and
-    (a.ldf.variant = b.ldf.variant) and (a.ldf.level = b.ldf.level);
+    (a.ldf.variant = b.ldf.variant) and (a.ldf.level = b.ldf.level) and
+    (a.zop.variant = b.zop.variant) and (a.zop.iterations = b.zop.iterations) and (a.zop.flags = b.zop.flags) and
+    (a.zop.bsMax = b.zop.bsMax);
   if Result then
     for k := 0 to High(a.flow.events) do
       if (a.flow.events[k].pos <> b.flow.events[k].pos) or (a.flow.events[k].kind <> b.flow.events[k].kind) or
@@ -195,6 +201,9 @@ begin
       Write(Format('  kind 3: chain %d nice %d lazy %d good %d hbits %d maxDist %d flags %d symEnd %d%s  %d bytes, corrections %d',
         [r.pred.chain, r.pred.nice, r.pred.lazy, r.pred.good, r.pred.hbits, r.pred.maxDist, r.pred.flags, r.pred.symEnd,
          BoolToStr(r.raw, ' raw', ''), Length(a), Length(r.corr)]))
+    else if (r.kind = RECIPE_ENCODER) and (r.encoder = ENC_ZOPFLI) then
+      Write(Format('  kind 2: zopfli iterations %d flags %d bsMax %d variant %d%s  %d bytes', [r.zop.iterations, r.zop.flags,
+        r.zop.bsMax, r.zop.variant, BoolToStr(r.raw, ' raw', ''), Length(a)]))
     else if (r.kind = RECIPE_ENCODER) and (r.encoder = ENC_LIBDEFLATE) then
       Write(Format('  kind 2: libdeflate level %d variant %d%s  %d bytes', [r.ldf.level, r.ldf.variant,
         BoolToStr(r.raw, ' raw', ''), Length(a)]))
@@ -252,15 +261,18 @@ end;
   byte) is refused: libdeflate's recipe is not one version 3 holds. Each
   stream, verified as it is made, decompresses to the file. }
 procedure CheckCodec(const d: TBytes; const name: string);
-var s0, s2, s3, back: TBytes; why: string; stats: TCodecStats; t0, t2, t3: Boolean;
+var s0, s2, s3, s4, back: TBytes; why: string; stats: TCodecStats; t0, t2, t3, t4: Boolean;
 begin
   t0 := Compress(d, s0, why, stats, True, 1);
   t2 := Compress(d, s2, why, stats, True, 1, -1, 2);
   t3 := Compress(d, s3, why, stats, True, 1, -1, 3);
-  if (t0 <> t2) or (t0 <> t3) then Fail('Compress takes the file with one maxVersion and not another: ' + name);
+  t4 := Compress(d, s4, why, stats, True, 1, -1, 4);
+  if (t0 <> t2) or (t0 <> t3) or (t0 <> t4) then Fail('Compress takes the file with one maxVersion and not another: ' + name);
+  if t4 and not (s4[0] in [2, 3, 4]) then Fail('Compress with maxVersion 4 wrote another version: ' + name);
+  if t0 and (s0[0] <= 4) and not Same(s0, s4) then Fail('a version 2 to 4 stream differs with maxVersion 4: ' + name);
   if t2 and (s2[0] <> 2) then Fail('Compress with maxVersion 2 wrote another version: ' + name);
   if t3 and not (s3[0] in [2, 3]) then Fail('Compress with maxVersion 3 wrote another version: ' + name);
-  if t0 and not (s0[0] in [2, 3, 4]) then Fail('Compress wrote a version other than 2 to 4: ' + name);
+  if t0 and not (s0[0] in [2, 3, 4, 5]) then Fail('Compress wrote a version other than 2 to 5: ' + name);
   if t0 and (s0[0] = 2) and not Same(s0, s2) then Fail('a version 2 stream differs with maxVersion 2: ' + name);
   if t0 and (s0[0] <= 3) and not Same(s0, s3) then Fail('a version 2 or 3 stream differs with maxVersion 3: ' + name);
   if t0 then begin
@@ -268,6 +280,12 @@ begin
     if not Decompress(s0, Length(d), back, why) or not Same(back, d) then Fail('the default stream does not come back: ' + name);
     if not Decompress(s2, Length(d), back, why) or not Same(back, d) then Fail('the version 2 stream does not come back: ' + name);
     if not Decompress(s3, Length(d), back, why) or not Same(back, d) then Fail('the version 3 stream does not come back: ' + name);
+    if not Decompress(s4, Length(d), back, why) or not Same(back, d) then Fail('the version 4 stream does not come back: ' + name);
+    if s0[0] = 5 then begin
+      s4 := Copy(s0, 0, Length(s0));
+      s4[0] := 4;
+      if Decompress(s4, Length(d), back, why) then Fail('a version 5 stream read as version 4: ' + name);
+    end;
     if s0[0] = 4 then begin
       s3 := Copy(s0, 0, Length(s0));
       s3[0] := 3;
@@ -1233,6 +1251,96 @@ begin
   end;
 end;
 
+{ zopfli's streams (its deflate with 15, 5 and 1 iterations, with and
+  without block splitting) of bytes made here, zlib-framed: each must come
+  back as kind 2's zopfli with options that write the same bytes, never
+  with kind 2's encoders up to libdeflate (codec stream version 4) nor with
+  zopfli's search off (zopMax 0); and its recipe (of 600 bytes: each
+  rebuild runs zopfli) cut anywhere refused, each value of each byte
+  refused or rebuilt, never raised on }
+procedure CraftedZopfli;
+const IT: array[0..3] of Integer = (15, 5, 1, 15); FL: array[0..3] of Integer = (ZOPF_SPLIT, ZOPF_SPLIT, ZOPF_SPLIT, 0);
+var plain, small, a, rb, back, raw, raw2: TBytes; e, z: TZStream; p: TZopParams; r, r2: TDeflRecipe; i, j, v, kind: Integer;
+  x: LongWord; st: TDeflStatus; pos: SizeInt; rr: TRecipeRead; was: SizeInt;
+begin
+  if maxKindArg < RECIPE_ENCODER then Exit;
+  was := AnalyzeZopMax;
+  AnalyzeZopMax := 1 shl 20;
+  try
+    SetLength(plain, 24000);
+    x := 777;
+    for i := 0 to High(plain) do begin
+      {$push}{$Q-}{$R-} x := x * 1103515245 + 12345; {$pop}
+      case (i div 3000) mod 4 of
+        0: plain[i] := Ord('a') + (x shr 16) mod 7;
+        1: plain[i] := (i mod 37) xor ((x shr 20) and 1);
+        2: plain[i] := x shr 24;
+      else plain[i] := 0;
+      end;
+    end;
+    p.variant := ZOPV_103; p.bsMax := 15;
+    for i := 0 to High(IT) do begin
+      p.iterations := IT[i]; p.flags := FL[i];
+      if not ZopChoices(plain, p, e) then begin Fail(Format('crafted zopfli %d/%d: no choices', [IT[i], FL[i]])); Continue; end;
+      e.raw := False; e.header[0] := $78; e.header[1] := $DA; e.adlerOk := True;
+      a := Encode(e);
+      st := CheckStream(a, dfZlib, Format('crafted: zopfli iterations %d flags %d', [IT[i], FL[i]]), kind);
+      { (zopfli's search assumes its default splitting: without it the
+        stream may be kind 3, as before) }
+      if (FL[i] = ZOPF_SPLIT) and ((st <> dsOk) or (kind <> RECIPE_ENCODER)) then
+        Fail(Format('crafted zopfli iterations %d: not kind 2 (kind %d)', [IT[i], kind]));
+      if (st <> dsOk) or (Analyze(a, dfZlib, MAX_PLAIN, back, r) <> dsOk) then Continue;
+      if (r.kind = RECIPE_ENCODER) and (r.encoder = ENC_ZOPFLI) and (r.zop.iterations <> p.iterations) then
+        if not ZopDeflate(plain, r.zop, raw) or not ZopDeflate(plain, p, raw2) or not Same(raw, raw2) then
+          Fail(Format('crafted zopfli iterations %d: %d found, other bytes', [IT[i], r.zop.iterations]));
+      { kind 2's encoders up to libdeflate (version 4), or zopfli's search off: never zopfli's }
+      if Parse(a, dfZlib, MAX_PLAIN, z).Ok then begin
+        if (FindRecipe(a, z, r2, maxKindArg, 1, ENC_LIBDEFLATE, 1 shl 20) = dsOk) and (r2.kind = RECIPE_ENCODER) and
+          (r2.encoder = ENC_ZOPFLI) then Fail('crafted zopfli: zopfli''s recipe with the encoders up to libdeflate');
+        if (FindRecipe(a, z, r2, maxKindArg, 1, ENC_LAST, 0) = dsOk) and (r2.kind = RECIPE_ENCODER) and
+          (r2.encoder = ENC_ZOPFLI) then Fail('crafted zopfli: zopfli''s recipe with zopMax 0');
+      end;
+    end;
+    { the recipe damaged, on 600 bytes }
+    small := Copy(plain, 0, 600);
+    p.iterations := 5; p.flags := ZOPF_SPLIT;
+    if not ZopChoices(small, p, e) then begin Fail('crafted zopfli: no choices for the damage'); Exit; end;
+    e.raw := False; e.header[0] := $78; e.header[1] := $DA; e.adlerOk := True;
+    a := Encode(e);
+    if (Analyze(a, dfZlib, MAX_PLAIN, back, r) <> dsOk) or (r.kind <> RECIPE_ENCODER) or (r.encoder <> ENC_ZOPFLI) then begin
+      Fail('crafted zopfli: the 600 bytes not kind 2''s zopfli'); Exit;
+    end;
+    rb := RecipeBytes(r);
+    for v := 0 to Length(rb) - 1 do begin
+      pos := 0;
+      if ReadRecipe(Copy(rb, 0, v), pos, Length(small), 100, r2) = rrOk then Fail('a cut zopfli recipe was read: ' + IntToStr(v));
+    end;
+    for j := 0 to Length(rb) - 1 do
+      for v := 0 to 255 do begin
+        a := Copy(rb, 0, Length(rb));
+        a[j] := v;
+        pos := 0;
+        try
+          rr := ReadRecipe(a, pos, Length(small), 100, r2);
+          if (rr = rrOk) and not RecipeValid(r2) then Fail('a zopfli recipe read out of range');
+          if rr = rrOk then Rebuild(small, r2, back);
+        except
+          on e: Exception do Fail('damaged zopfli recipe raised ' + e.ClassName);
+        end;
+      end;
+    r2 := r; r2.zop.variant := ZOPV_LAST + 1;
+    if Rebuild(small, r2, back) then Fail('a zopfli recipe of an unknown variant rebuilt');
+    r2 := r; r2.zop.iterations := 0;
+    if Rebuild(small, r2, back) then Fail('a zopfli recipe of 0 iterations rebuilt');
+    r2 := r; r2.zop.iterations := ZOP_ITER_MAX + 1;
+    if Rebuild(small, r2, back) then Fail('a zopfli recipe of too many iterations rebuilt');
+    r2 := r; r2.zop.flags := 4;
+    if Rebuild(small, r2, back) then Fail('a zopfli recipe with an unknown flag rebuilt');
+  finally
+    AnalyzeZopMax := was;
+  end;
+end;
+
 procedure Crafted;
 var a, rb, back, plain: TBytes; z, zf: TZStream; r, r2: TDeflRecipe; i, k, v, n, kind: Integer; pos: SizeInt;
   st: TDeflStatus; fixedNotTaken: Integer; rr: TRecipeRead;
@@ -1344,11 +1452,12 @@ begin
   DamagedFlows;
   CraftedMiniz;
   CraftedLibdeflate;
+  CraftedZopfli;
   if flips and (maxKindArg >= RECIPE_CORR) then begin FieldFlips; RankEscape; FarEscape; end;
 end;
 
 var
-  files: TStringList; sr: TSearchRec; dir, name, ext, only: string; i, minimum, min1, minOk, minV3, minV4, kind: Integer;
+  files: TStringList; sr: TSearchRec; dir, name, ext, only: string; i, minimum, min1, minOk, minV3, minV4, minV5, kind: Integer;
   all0, none0, all01, all013, codec: Boolean; min3, min2: Integer; tsvName: string;
   d: TBytes; p: TPng; s: SizeInt; st: TDeflStatus; t0: TDateTime; framing: TDeflFraming;
   dirStreams, dirBytes0, dirBytes1, dirKind0, dirKind1, dirNotTaken, dirNotDeflate: Int64;
@@ -1364,6 +1473,9 @@ var
 
 begin
   dir := ParamStr(1); minimum := StrToIntDef(ParamStr(2), 1);
+  { -zop counts for -golden and -writegolden too }
+  for i := 2 to ParamCount - 1 do
+    if ParamStr(i) = '-zop' then AnalyzeZopMax := StrToInt(ParamStr(i + 1));
   for i := 2 to ParamCount do
     if (ParamStr(i) = '-golden') or (ParamStr(i) = '-writegolden') then begin
       failures := 0;
@@ -1375,7 +1487,7 @@ begin
       if failures > 0 then Halt(1);
       Halt(0);
     end;
-  all0 := False; none0 := False; all01 := False; all013 := False; codec := False; verbose := False; min1 := 0; minOk := 0; minV3 := 0; minV4 := 0;
+  all0 := False; none0 := False; all01 := False; all013 := False; codec := False; verbose := False; min1 := 0; minOk := 0; minV3 := 0; minV4 := 0; minV5 := 0;
   only := ''; min3 := 0; min2 := 0; tsvName := ''; diffc := False; flips := False;
   for i := 2 to ParamCount do
     if ParamStr(i) = '-all0' then all0 := True
@@ -1393,6 +1505,8 @@ begin
     else if (ParamStr(i) = '-minok') and (i < ParamCount) then minOk := StrToInt(ParamStr(i + 1))
     else if (ParamStr(i) = '-minv3') and (i < ParamCount) then minV3 := StrToInt(ParamStr(i + 1))
     else if (ParamStr(i) = '-minv4') and (i < ParamCount) then minV4 := StrToInt(ParamStr(i + 1))
+    else if (ParamStr(i) = '-minv5') and (i < ParamCount) then minV5 := StrToInt(ParamStr(i + 1))
+    else if (ParamStr(i) = '-zop') and (i < ParamCount) then AnalyzeZopMax := StrToInt(ParamStr(i + 1))
     else if ParamStr(i) = '-codec' then codec := True
     else if ParamStr(i) = '-v' then verbose := True;
   files := TStringList.Create; files.Sorted := True;
@@ -1453,8 +1567,9 @@ begin
   if dirKind2 < min2 then Fail(Format('%d kind 2 < minimum %d', [dirKind2, min2]));
   if nCodecV[3] < minV3 then Fail(Format('%d files in codec stream version 3 < minimum %d', [nCodecV[3], minV3]));
   if nCodecV[4] < minV4 then Fail(Format('%d files in codec stream version 4 < minimum %d', [nCodecV[4], minV4]));
-  if codec then Writeln(Format('codec: %d files in stream version 2, %d in version 3, %d in version 4 (each back, ' +
-    'and in versions 2 and 3 too)', [nCodecV[2], nCodecV[3], nCodecV[4]]));
+  if nCodecV[5] < minV5 then Fail(Format('%d files in codec stream version 5 < minimum %d', [nCodecV[5], minV5]));
+  if codec then Writeln(Format('codec: %d files in stream version 2, %d in version 3, %d in version 4, %d in version 5 ' +
+    '(each back, and in versions 2 to 4 too)', [nCodecV[2], nCodecV[3], nCodecV[4], nCodecV[5]]));
   if dirKind0 + dirKind1 + dirKind2 + dirKind3 < minOk then
     Fail(Format('%d with a recipe < minimum %d', [dirKind0 + dirKind1 + dirKind2 + dirKind3, minOk]));
   Writeln(Format('%d streams: %d kind 0 (%d bytes), %d kind 1 (%d bytes), %d kind 2 (%d bytes), %d kind 3 (%d bytes, ' +

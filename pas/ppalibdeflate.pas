@@ -63,6 +63,8 @@ implementation
 uses ppacorr;
 
 {$L ppaldfc.o}
+{ memcpy, memmove, memset, memcmp for ppaldfc.c and ppazopc.c (ppazopfli) }
+{$L ppamemc.o}
 
 type
   TAllocFn = function(n: SizeUInt): Pointer; cdecl;

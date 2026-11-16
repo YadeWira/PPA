@@ -1004,7 +1004,8 @@ begin
   for i := 0 to 18 do clen[i] := l[i];
 end;
 
-function LibdeflateTrees(const z: TZStream; bi: SizeInt): Boolean;
+{ whether dynamic block bi of z has builder tb's code lengths and code-length code }
+function TreesAre(tb: Integer; const z: TZStream; bi: SizeInt): Boolean;
 var t, L, i: SizeInt; lf: array[0..285] of Integer; df: array[0..29] of Integer; sf: array[0..18] of Integer;
   pb: TDeflateBlock; cl: array[0..18] of Byte;
 begin
@@ -1023,7 +1024,7 @@ begin
       end;
     end;
     pb := Default(TDeflateBlock);
-    TreesBy(TB_LIBDEFLATE, lf, df, pb);
+    TreesBy(tb, lf, df, pb);
     for i := 0 to 285 do if pb.litLen[i] <> litLen[i] then Exit;
     for i := 0 to 29 do if pb.distLen[i] <> distLen[i] then Exit;
     FillChar(sf, SizeOf(sf), 0);
@@ -1032,6 +1033,11 @@ begin
     for i := 0 to 18 do if cl[i] <> clen[i] then Exit;
   end;
   Result := True;
+end;
+
+function LibdeflateTrees(const z: TZStream; bi: SizeInt): Boolean;
+begin
+  Result := TreesAre(TB_LIBDEFLATE, z, bi);
 end;
 
 { run-length codings of lens[0..total-1] (both trees at once) into seq

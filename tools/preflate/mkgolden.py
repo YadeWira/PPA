@@ -17,6 +17,11 @@ that is checked.
                                                    kind 2's libdeflate (encoder 2,
                                                    codec stream version 4; M6,
                                                    16/11/2026)
+    python3 tools/preflate/mkgolden.py --zopfli tests/recipes
+                                                   kind 2's zopfli (encoder 3,
+                                                   codec stream version 5; M9,
+                                                   16/11/2026); then
+                                                   test_preflate -writegolden -zop N
 
 Run once per recipe format; the files are committed, not made again (a
 new format adds its own next to them). The encoders are the study's builds
@@ -122,6 +127,8 @@ def main():
         return kind2(sys.argv[2])
     if sys.argv[1] == '--libdeflate':
         return libdeflate(sys.argv[2])
+    if sys.argv[1] == '--zopfli':
+        return zopfli(sys.argv[2])
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
     tmp = os.path.join(out, '.plain')
@@ -324,6 +331,69 @@ def libdeflate(out):
         if level in (6, 11):
             continue
         name = '%s-ldk2-L%d' % (plain, level)
+        d = bytearray(open(os.path.join(out, name + '.raw'), 'rb').read())
+        padded = bytes(d[:-1]) + bytes([d[-1] | 0x80])
+        if padded == bytes(d):
+            continue
+        try:
+            o = zlib.decompressobj(-15)
+            ok = o.decompress(padded) == plains[plain] and o.eof
+        except zlib.error:
+            ok = False
+        if ok:
+            open(os.path.join(out, name + '-pad.raw'), 'wb').write(padded)
+            man.append((name + '-pad.raw', plain, len(plains[plain]), len(padded),
+                        name + '.raw with its last byte or 0x80 (pad bits)'))
+            break
+    with open(os.path.join(out, 'MANIFEST.tsv'), 'a') as f:
+        for r in man:
+            f.write('\t'.join(str(x) for x in r) + '\n')
+    for k in plains:
+        os.remove(os.path.join(tmp, k))
+    os.rmdir(tmp)
+    print('%d streams added in %s' % (len(man), out))
+
+
+def zopfli(out):
+    """kind 2's zopfli vectors (ppazopfli: zopfli 1.0.3's deflate, the
+    study's zop, built with glibc's log): its iteration counts (zopflipng's
+    15 and 5, 1, 10, 20), raw, and zlib-framed as zopfli's own zlib
+    container frames them, one with a wrong Adler-32 and bytes after it, one
+    with pad bits set; small ones, each rebuilt by a zopfli run. MANIFEST.tsv
+    appended, then -writegolden -zop writes the recipes"""
+    tmp = os.path.join(out, '.plain')
+    os.makedirs(tmp, exist_ok=True)
+    plains = {
+        'photo': photo(96, 64, 1),
+        'drawing': drawing(160, 100, 2),
+        'text': open(os.path.join(REPO, 'doc', 'CODEC.md'), 'rb').read()[:14000],
+        'bin': binary(16000, 3),
+        'zipf': zipf(20000, 5),
+    }
+    for k, v in plains.items():
+        open(os.path.join(tmp, k), 'wb').write(v)
+    cases = [('photo', 15), ('text', 15), ('drawing', 5), ('bin', 1), ('zipf', 10), ('photo', 20)]
+    man = []
+    for plain, it in cases:
+        data = subprocess.run([os.path.join(BIN, 'zop'), os.path.join(tmp, plain), str(it)], check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+        name = '%s-zok2-i%d' % (plain, it)
+        if (plain, it) == ('text', 15):
+            data = b'\x78\xda' + data + struct.pack('>I', zlib.adler32(plains[plain]))
+            ext, how = 'zlib', 'zop %s %d in a zlib frame' % (plain, it)
+        else:
+            ext, how = 'raw', 'zop %s %d' % (plain, it)
+        open(os.path.join(out, name + '.' + ext), 'wb').write(data)
+        man.append((name + '.' + ext, plain, len(plains[plain]), len(data), how))
+    d = open(os.path.join(out, 'photo-zok2-i15.raw'), 'rb').read()
+    z = b'\x78\xda' + d + struct.pack('>I', zlib.adler32(plains['photo']) ^ 1) + b'tail'
+    open(os.path.join(out, 'photo-zok2-i15-badadler-tail.zlib'), 'wb').write(z)
+    man.append(('photo-zok2-i15-badadler-tail.zlib', 'photo', len(plains['photo']), len(z),
+                'photo-zok2-i15.raw in a zlib frame, Adler-32 xor 1, 4 bytes after'))
+    for plain, it in cases:
+        name = '%s-zok2-i%d' % (plain, it)
+        if not os.path.exists(os.path.join(out, name + '.raw')):
+            continue
         d = bytearray(open(os.path.join(out, name + '.raw'), 'rb').read())
         padded = bytes(d[:-1]) + bytes([d[-1] | 0x80])
         if padded == bytes(d):

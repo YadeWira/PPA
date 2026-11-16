@@ -15,8 +15,9 @@ W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 mkdir -p "$W/$NAME" "$OUT"
 # the plugin's sources: PPA's units and C, the plugin, PJA's vendored codec,
-# libdeflate's compressor (ppacodec links it, though ppa1 writes version 2)
-git archive "$C" LICENSE NOTICE pas/build_c.sh pas/plugin vendor/pja vendor/libdeflate \
+# libdeflate's compressor and zopfli's deflate (ppacodec links them, though
+# ppa1 writes version 2)
+git archive "$C" LICENSE NOTICE pas/build_c.sh pas/plugin vendor/pja vendor/libdeflate vendor/zopfli \
   $(git ls-tree --name-only "$C" pas/ | grep -E '\.(pas|c|h|inc)$') | tar -x -C "$W/$NAME"
 PCOMP=$(git show "$C:pas/plugin/ppa1zpaql.inc" | grep -o '[0-9,]* bytes of PCOMP' | head -1 | cut -d' ' -f1 || true)
 sed -e "s/@COMMIT@/$C/" -e "s/@TAG@/${TAG:+ (tag \`$TAG\`)}/" -e "s/@PCOMP@/${PCOMP:-?}/" \

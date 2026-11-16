@@ -26,9 +26,14 @@ echo "== build"
 case ${CC:-} in /*) PATH=$(dirname "$CC"):$PATH; export PATH ;; esac
 sh pas/build_c.sh "$OUT/c" || { echo "the C part did not build (CC=${CC:-cc})"; exit 1; }
 # the C objects call no library: on Linux, nm must find no undefined symbol
-# (a 64-bit builtin once pulled libgcc's __ctzdi2 into the 32-bit build)
+# that another of them does not define (ppamemc.o's memcpy and its kin, for
+# ppaldfc.o and ppazopc.o; a 64-bit builtin once pulled libgcc's __ctzdi2
+# into the 32-bit build)
 if [ "$(uname -s)" = Linux ] && command -v nm > /dev/null; then
-  if nm "$OUT"/c/*.o | grep ' U '; then echo "FAIL: the C objects need a library"; exit 1; fi
+  nm --defined-only "$OUT"/c/*.o | awk 'NF == 3 { print $3 }' | sort -u > "$OUT/c.defined"
+  if nm -u "$OUT"/c/*.o | awk 'NF == 2 { print $2 }' | sort -u | comm -23 - "$OUT/c.defined" | grep .; then
+    echo "FAIL: the C objects need a library"; exit 1
+  fi
 fi
 for prog in test_png test_deflate test_zlib test_preflate test_pixels test_arith measure_model measure_fast measure_static test_codec; do
   # shellcheck disable=SC2086
@@ -149,8 +154,8 @@ echo "== layer 2a"
 "$OUT/test_deflate$EXE" tests/png 16 | tail -1
 "$OUT/test_deflate$EXE" tests/png 1 -dump "$OUT/z" > "$OUT/streams.txt"
 echo "== layer 2, the deflate recipes' golden vectors (C and Pascal)"
-"$OUT/test_preflate$EXE" tests/recipes 73 -golden | tail -1
-PPA_NOC=1 "$OUT/test_preflate$EXE" tests/recipes 73 -golden | tail -1
+"$OUT/test_preflate$EXE" tests/recipes 81 -golden | tail -1
+PPA_NOC=1 "$OUT/test_preflate$EXE" tests/recipes 81 -golden | tail -1
 echo "== layer 2b"
 "$OUT/test_zlib$EXE" tests/png -v > "$OUT/zlib.txt"
 tail -1 "$OUT/zlib.txt"

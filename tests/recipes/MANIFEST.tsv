@@ -72,3 +72,11 @@ drawing-ldk2-L12.raw	drawing	16100	203	ldf drawing 12
 zipf-ldk2-L12.raw	zipf	40000	17859	ldf zipf 12
 photo-ldk2-L12-badadler-tail.zlib	photo	18496	8074	photo-ldk2-L12.raw in a zlib frame, Adler-32 xor 1, 4 bytes after
 text-ldk2-L1-pad.raw	text	14000	6359	text-ldk2-L1.raw with its last byte or 0x80 (pad bits)
+photo-zok2-i15.raw	photo	18496	8755	zop photo 15
+text-zok2-i15.zlib	text	14000	5950	zop text 15 in a zlib frame
+drawing-zok2-i5.raw	drawing	16100	202	zop drawing 5
+bin-zok2-i1.raw	bin	16000	6825	zop bin 1
+zipf-zok2-i10.raw	zipf	20000	8976	zop zipf 10
+photo-zok2-i20.raw	photo	18496	8746	zop photo 20
+photo-zok2-i15-badadler-tail.zlib	photo	18496	8765	photo-zok2-i15.raw in a zlib frame, Adler-32 xor 1, 4 bytes after
+photo-zok2-i15-pad.raw	photo	18496	8755	photo-zok2-i15.raw with its last byte or 0x80 (pad bits)

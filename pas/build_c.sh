@@ -2,7 +2,8 @@
 # The C part of PPA as objects for FreePascal to link: layer 5's pixel loop
 # (ppamodelc.c, {$L ppamodelc.o} in ppamodel.pas; ppafastc.c, the fast one) and layer 2b's
 # longest_match (ppazlibc.c, in ppazlib.pas), libdeflate's compressor
-# (ppaldfc.c over vendor/libdeflate, in ppalibdeflate.pas), and PJA's
+# (ppaldfc.c over vendor/libdeflate, in ppalibdeflate.pas), zopfli's
+# (ppazopc.c over vendor/zopfli, in ppazopfli.pas), and PJA's
 # (vendor/pja, built by its own build_c.sh), found through -Fo<dir>. As PJA's pas/build_c.sh.
 #
 #   pas/build_c.sh <out dir> [extra C flags]
@@ -30,12 +31,18 @@ case "$CC $*" in
   *-m32*|*i686*|*i386*) FLAGS="$FLAGS -fno-pic" ;;
 esac
 mkdir -p "$OUT"
-for f in ppamodelc ppafastc ppastaticc ppazlibc ppapixc ppadeflatec ppacorrc ppaminizc ppasysc; do
+for f in ppamodelc ppafastc ppastaticc ppazlibc ppapixc ppadeflatec ppacorrc ppaminizc ppasysc ppamemc; do
   # shellcheck disable=SC2086
   $CC $FLAGS "$@" -c "$HERE/$f.c" -o "$OUT/$f.o"
 done
 # libdeflate's compressor (vendor/libdeflate, unmodified) behind ppaldfc.c
 # shellcheck disable=SC2086
 $CC $FLAGS "$@" -I"$HERE/../vendor/libdeflate" -c "$HERE/ppaldfc.c" -o "$OUT/ppaldfc.o"
+# zopfli's deflate (vendor/zopfli, unmodified) behind ppazopc.c: its doubles
+# SSE2's on 32-bit x86 too (never x87's), so that every platform gives the
+# same bits; a processor without SSE2 fails its calls cleanly
+ZF=; case "$CC $*" in *-m32*|*i686*|*i386*|*i586*) ZF="-msse2 -mfpmath=sse" ;; esac
+# shellcheck disable=SC2086
+$CC $FLAGS "$@" $ZF -I"$HERE/../vendor/zopfli" -c "$HERE/ppazopc.c" -o "$OUT/ppazopc.o"
 # PJA's C (vendor/pja: its version 7 model, for a JNG's JPEG), by its own script
 CC=$CC sh "$HERE/../vendor/pja/pas/build_c.sh" "$OUT" "$@"

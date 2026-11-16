@@ -39,12 +39,12 @@ unit ppapreflate;
 
 interface
 
-uses SysUtils, ppadeflate, ppazlib, ppacorr, ppaminiz, ppalibdeflate;
+uses SysUtils, ppadeflate, ppazlib, ppacorr, ppaminiz, ppalibdeflate, ppazopfli;
 
 const
   { the recipe kinds: 0, zlib's parameters give the stream exactly; 1,
     zlib's parameters and its flushes and parameter changes; 2, another
-    known encoder exactly (miniz, libdeflate); 3, a zlib-like predictor and the
+    known encoder exactly (miniz, libdeflate, zopfli); 3, a zlib-like predictor and the
     corrections that make it the stream (ppacorr: any stream) }
   RECIPE_ZLIB = 0;
   RECIPE_ZLIB_FLOW = 1;
@@ -55,7 +55,9 @@ const
     since codec stream version 4) }
   ENC_MINIZ = 1;
   ENC_LIBDEFLATE = 2;
-  ENC_LAST = ENC_LIBDEFLATE;
+  { zopfli (ppazopfli: its variant and options; since codec stream version 5) }
+  ENC_ZOPFLI = 3;
+  ENC_LAST = ENC_ZOPFLI;
   RECIPE_KIND_LAST = RECIPE_CORR;
   { the version of RecipeBytes' format (doc/PREFLATE.md) }
   RECIPE_FORMAT = 2;
@@ -77,6 +79,7 @@ type
     encoder: Integer;                { kind 2: ENC_MINIZ, ENC_LIBDEFLATE }
     mz: TMinizParams;                { kind 2, miniz: its flags and build }
     ldf: TLdfParams;                 { kind 2, libdeflate: its variant and level }
+    zop: TZopParams;                 { kind 2, zopfli: its variant and options }
     pred: TPredParams;               { kind 3: the predictor's parameters }
     corr: TBytes;                    { kind 3: the corrections (ppacorr), coded }
     { the framing, as ppadeflate.TZStream has it }
@@ -101,13 +104,23 @@ function Parse(const a: TBytes; framing: TDeflFraming; maxPlain: SizeInt; out z:
   otherwise. Kind 0 is looked for first, as codec stream version 2 does.
   threads: kind 3's parameter search and the rebuilds' (the same recipe
   with any). maxEncoder: kind 2's encoders up to it (codec stream version
-  3 holds miniz's only). }
+  3 holds miniz's only, 4 libdeflate's too). zopMax: zopfli is tried for
+  streams of at most this many bytes (0: never; its search and rebuild
+  cost a zopfli run, about 0.2 MB/s). }
 function FindRecipe(const a: TBytes; const z: TZStream; out recipe: TDeflRecipe;
-  maxKind: Integer = RECIPE_KIND_LAST; threads: Integer = 1; maxEncoder: Integer = ENC_LAST): TDeflStatus;
+  maxKind: Integer = RECIPE_KIND_LAST; threads: Integer = 1; maxEncoder: Integer = ENC_LAST;
+  zopMax: SizeInt = 0): TDeflStatus;
 
-{ Parse and FindRecipe: a -> the bytes it holds and its recipe. }
+{ Parse and FindRecipe: a -> the bytes it holds and its recipe. zopMax:
+  FindRecipe's (0 by default: zopfli not tried; AnalyzeZopMax for the
+  tools and the tests). }
 function Analyze(const a: TBytes; framing: TDeflFraming; maxPlain: SizeInt; out plain: TBytes;
   out recipe: TDeflRecipe; maxKind: Integer = RECIPE_KIND_LAST): TDeflStatus;
+
+var
+  { Analyze's zopMax (the tools' and the tests'; the codec calls
+    FindRecipe with its own) }
+  AnalyzeZopMax: SizeInt = 0;
 
 { Whether a recipe is one Rebuild can use: a known kind, its parameters in
   range (and a flow's variant, events and their parameters; where they
@@ -750,7 +763,7 @@ end;
 { ---------------------------------------------------------------- recipes }
 
 function FindRecipe(const a: TBytes; const z: TZStream; out recipe: TDeflRecipe; maxKind: Integer;
-  threads: Integer; maxEncoder: Integer): TDeflStatus;
+  threads: Integer; maxEncoder: Integer; zopMax: SizeInt): TDeflStatus;
 var e: TZStream; back: TBytes; i: SizeInt; markers: Boolean; memo: TLongMemo;
 begin
   Result := dsNotTaken;
@@ -807,6 +820,22 @@ begin
     back := Encode(e);
     if SameBytes(back, a) and Rebuild(z.plain, recipe, back, threads) and SameBytes(back, a) then Exit(dsOk);
   end;
+  { kind 2's zopfli (zopflipng, advpng -z4) after kind 1: its search costs
+    zopfli runs, and zlib with flushes is the commoner; for streams of at
+    most zopMax bytes }
+  if (maxKind >= RECIPE_ENCODER) and not markers and (maxEncoder >= ENC_ZOPFLI) and (zopMax > 0) then begin
+    recipe.kind := RECIPE_ENCODER;
+    recipe.prm := Default(TZlibParams);
+    recipe.flow := Default(TZlibFlow);
+    recipe.encoder := ENC_ZOPFLI;
+    if FindZopParams(a, z, zopMax, recipe.zop, e) then begin
+      PutFraming(recipe, e);
+      back := Encode(e);
+      if SameBytes(back, a) and Rebuild(z.plain, recipe, back, threads) and SameBytes(back, a) then Exit(dsOk);
+    end;
+    recipe.zop := Default(TZopParams);
+    recipe.encoder := 0;
+  end;
   if maxKind < RECIPE_CORR then Exit;
   { kind 3: any stream ppadeflate reads, rebuilt and compared }
   recipe.kind := RECIPE_CORR;
@@ -836,7 +865,7 @@ begin
   plain := nil;
   recipe := Default(TDeflRecipe);
   if (Length(a) = 0) or not Parse(a, framing, maxPlain, z).Ok then Exit(dsNotDeflate);
-  Result := FindRecipe(a, z, recipe, maxKind);
+  Result := FindRecipe(a, z, recipe, maxKind, 1, ENC_LAST, AnalyzeZopMax);
   if Result = dsOk then plain := z.plain;
 end;
 
@@ -846,7 +875,8 @@ begin
   if recipe.kind = RECIPE_CORR then Exit(PredValid(recipe.pred) and (Length(recipe.flow.events) = 0));
   if recipe.kind = RECIPE_ENCODER then
     Exit((((recipe.encoder = ENC_MINIZ) and MinizValid(recipe.mz)) or
-          ((recipe.encoder = ENC_LIBDEFLATE) and LdfValid(recipe.ldf))) and (Length(recipe.flow.events) = 0));
+          ((recipe.encoder = ENC_LIBDEFLATE) and LdfValid(recipe.ldf)) or
+          ((recipe.encoder = ENC_ZOPFLI) and ZopValid(recipe.zop))) and (Length(recipe.flow.events) = 0));
   if recipe.kind > RECIPE_ZLIB_FLOW then Exit(False);
   with recipe.prm do
     Result := (recipe.kind >= RECIPE_ZLIB) and (recipe.kind <= RECIPE_KIND_LAST) and (level >= 1) and (level <= 9) and
@@ -870,6 +900,12 @@ begin
     e := Default(TZStream);
     PutFraming(recipe, e);
     Exit(CorrRebuild(plain, recipe.pred, recipe.corr, e, stream));
+  end;
+  if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_ZOPFLI) then begin
+    if not ZopChoices(plain, recipe.zop, e) then Exit(False);
+    PutFraming(recipe, e);
+    stream := Encode(e);
+    Exit(True);
   end;
   if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_LIBDEFLATE) then begin
     if not LdfChoices(plain, recipe.ldf, e) then Exit(False);
@@ -1021,6 +1057,16 @@ begin
     SetLength(o.b, o.n);
     Exit(o.b);
   end;
+  if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_ZOPFLI) then begin
+    Put(o, recipe.encoder);
+    Put(o, recipe.zop.variant);
+    PutVar(o, recipe.zop.iterations);
+    Put(o, recipe.zop.flags);
+    PutVar(o, recipe.zop.bsMax);
+    PutFramingBytes(o, recipe);
+    SetLength(o.b, o.n);
+    Exit(o.b);
+  end;
   if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_LIBDEFLATE) then begin
     Put(o, recipe.encoder);
     Put(o, recipe.ldf.variant);
@@ -1090,6 +1136,11 @@ begin
     if recipe.encoder = ENC_LIBDEFLATE then begin
       recipe.ldf.variant := r.Get;
       recipe.ldf.level := r.GetVar(LDF_LEVEL_MAX);
+    end else if recipe.encoder = ENC_ZOPFLI then begin
+      recipe.zop.variant := r.Get;
+      recipe.zop.iterations := r.GetVar(ZOP_ITER_MAX);
+      recipe.zop.flags := r.Get;
+      recipe.zop.bsMax := r.GetVar(ZOP_BSMAX_MAX);
     end else begin
       recipe.mz.variant := r.Get;
       recipe.mz.flags := r.GetVar(MZ_FLAGS);

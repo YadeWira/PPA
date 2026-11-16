@@ -28,6 +28,11 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
   PPA 0.3.0 refuses it as a newer PPA's (its version byte) and reads every
   other file 0.4.0 writes. A version 3 stream holding encoder 2 is damage
   (never written so) and is refused.
+- **Codec stream version 5** (M9) is version 4 and kind 2's encoder 3,
+  zopfli: written only when an image's recipe is zopfli's (at the default
+  level, images of up to 64 KiB of bytes; at `-3`, any), so 0.4.0 refuses
+  such a file as a newer PPA's and reads every other. A version 4 stream
+  holding encoder 3 is damage.
 
 ## Kinds
 
@@ -35,7 +40,7 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
 |---|---|---|---|
 | 0 | `RECIPE_ZLIB` | zlib's parameters: level, strategy, memLevel, windowBits | 0.1.0 (codec v2) |
 | 1 | `RECIPE_ZLIB_FLOW` | kind 0's parameters at the start, and a **flow**: the flushes and parameter changes zlib made along the stream, and which zlib made them | M2 (codec v3, M4) |
-| 2 | `RECIPE_ENCODER` | another encoder, exactly: which (`ENC_MINIZ`, miniz's tdefl; `ENC_LIBDEFLATE`, libdeflate) and its parameters (miniz: its flags and build; libdeflate: its variant and level) | M5 (codec v3), M6 (libdeflate, codec v4) |
+| 2 | `RECIPE_ENCODER` | another encoder, exactly: which (`ENC_MINIZ`, miniz's tdefl; `ENC_LIBDEFLATE`, libdeflate) and its parameters (miniz: its flags and build; libdeflate: its variant and level; zopfli: its variant and options) | M5 (codec v3), M6 (libdeflate, codec v4), M9 (zopfli, codec v5) |
 | 3 | `RECIPE_CORR` | a zlib-like predictor (`ppacorr`) and the **corrections** that make what it predicts the stream: any stream `ppadeflate` reads | M3a, M3b (codec v3, M4) |
 | 4 | | reserved: cost-guided predictor plus corrections | |
 
@@ -206,6 +211,66 @@ on small inputs) count as found.
 MB/s of bytes on one thread (a 787 KB photo in 0.23 s), level 6 about 40
 MB/s; kind 3's rebuild of the same streams was about 0.4 MB/s.
 
+### Kind 2's zopfli (M9)
+
+`pas/ppazopfli.pas` and `pas/ppazopc.c`: zopfli's own deflate
+(`vendor/zopfli`: zopfli 1.0.3's `src/zopfli`, without its containers and
+command, copied unmodified from its release tarball; NOTICE has its
+license; its master branch has the same deflate), built with no C runtime
+and so that every platform gives the same bits:
+
+- zopfli's costs are doubles. IEEE `+`, `-`, `*` and `/` give the same
+  results everywhere with `-ffp-contract=off` and SSE2 doubles (32-bit x86
+  builds this object with `-msse2 -mfpmath=sse`, never x87's; a processor
+  without SSE2 fails the calls cleanly: such a file does not extract
+  there). Its one libm call, `log()` of symbol counts, is
+  `ppa_zop_log`: double-double arithmetic, correctly rounded. glibc's log
+  is not correctly rounded for 487 of the integers up to 20,000,000 (32-bit
+  glibc's x87 log for more): a stream whose zopfli met one of those where
+  a tie turns on it would not be given back, and is simply not this
+  recipe (none met in the corpus).
+- Memory: `malloc`, `realloc`, `calloc` and `free` are the caller's
+  (FreePascal's heap), each block on a list kept for the call; where zopfli
+  would `exit()` (an allocation failed) the call jumps back
+  (`__builtin_setjmp`) and frees the list: a host never exits. Its
+  `qsort` (at most 288 leaves of distinct weights) is an insertion sort;
+  `memcpy` and its kin are `ppamemc.c`'s; Windows' stack probe
+  (`___chkstk_ms`) is PPA's own.
+
+| field | values | meaning |
+|---|---|---|
+| `encoder` | 3 `ENC_ZOPFLI` | zopfli's deflate (`ZopfliDeflate`, btype 2, final) |
+| `zop.variant` | 0 `ZOPV_103` | zopfli 1.0.3 with a correctly rounded log |
+| `zop.iterations` | 1 to 1000 | `numiterations` |
+| `zop.flags` | bit 0 block splitting, bit 1 splitting last | `blocksplitting`, `blocksplittinglast` |
+| `zop.bsMax` | 0 to 1000 | `blocksplittingmax` (zopfli's default 15) |
+
+zopflipng writes with it: 15 iterations for images under 200,000 bytes,
+5 over (60 and 20 with `-m`), splitting first, at most 15 blocks;
+advpng `-z4` with 5 iterations; zopfli's command 15.
+
+**The search** (`FindZopParams`). zopfli splits a master block (1,000,000
+bytes) before it iterates, optimises each piece on its own and writes the
+pieces' tokens in order (the blocks may be grouped again after, if that
+is smaller): so a candidate number of iterations is tried on the first
+piece alone, against the stream's first tokens, and only the one that
+gives them is run whole and compared. First on the stream's first block
+(zopfli's first piece when it kept its split: cheap), with every
+candidate (15, 60, 5, 20, 1, 10, 30, 50, 100; 5 and 20 first over
+200,000 bytes) when one of the first four dynamic blocks has the code
+lengths zopfli itself gives its tokens (`ppa_zop_lengths`: its
+`GetDynamicLengths`, ties as it breaks them), else zopflipng's two; then,
+with those trees, on the first piece of zopfli's own split
+(`ppa_zop_split`). Tried after kind 1 (its cost is zopfli runs), for
+streams of at most `zopMax` bytes: the codec's level decides it (`-1`
+never, `-2` up to 64 KiB, `-3` any). A stream that is not zopfli's costs
+about 0.4 s for 60 KB at the default level; one that is, its search and a
+zopfli run (s23's 60 KB: 2 s).
+
+**Rebuilding** costs a zopfli run: about 0.2 MB/s of bytes at
+zopflipng's settings (60 KB in 1.0 to 1.4 s; 1.9 MB in 47 s), which is
+why the default level keeps it to small images.
+
 ### Kind 3: a predictor and its corrections
 
 `pas/ppacorr.pas` (and its hot loops in `pas/ppacorrc.c`). `FindRecipe`
@@ -337,13 +402,19 @@ set on all but the last).
 byte    format              RECIPE_FORMAT = 2
 byte    kind                0 to 3
 kind 2: everything below it instead:
-  byte    encoder           1 (miniz), 2 (libdeflate: codec stream version 4)
+  byte    encoder           1 (miniz), 2 (libdeflate: codec stream version 4),
+                            3 (zopfli: codec stream version 5)
   encoder 1:
     byte    variant         0..1
     varint  flags           the bits of MZ_FLAGS only
   encoder 2:
     byte    variant         0
     varint  level           1..12
+  encoder 3:
+    byte    variant         0
+    varint  iterations      1..1000
+    byte    flags           0..3
+    varint  bsMax           0..1000
   framing (below)
 kind 3: everything below it instead:
   byte    version           PRED_VERSION = 2
@@ -428,8 +499,11 @@ flush, the old versions' second block. So:
   --libdeflate`) 14 kind 2's libdeflate (libdeflate 1.23, as oxipng has
   it: each parser, levels 1, 2, 4, 5, 6, 8, 9, 10, 11, 12, raw and in a
   zlib frame, one with a wrong Adler-32 and bytes after it, one with pad
-  bits set): 73.
-  `test_preflate tests/recipes 73 -golden` requires each recipe,
+  bits set); and (M9, `mkgolden.py --zopfli`) 8 kind 2's zopfli (the
+  study's zopfli 1.0.3 with glibc's log: 1, 5, 10, 15 and 20 iterations,
+  raw and in a zlib frame, a wrong Adler-32 and bytes after it, pad bits):
+  81.
+  `test_preflate tests/recipes 81 -golden` requires each recipe,
   read back, to give its stream bit for bit (on 1 thread and in segments on
   4) and to be written the same again; `.github/test.sh` runs it on the six
   platforms, 32 and 64 bits, with the C and the Pascal code. A vector is
@@ -781,6 +855,38 @@ added: 30 minutes each of `lib_ppa_chk` (libFuzzer, 104,314 runs) and
   (`tests/png3`): 30 minutes each of `lib_ppa_chk` (libFuzzer, 145,600
   runs) and `afl_ppa_chk` (AFL++, 43,418): nothing.
 
+## Status (M9, 16/11/2026): kind 2, zopfli exact
+
+`pas/ppazopfli.pas` and `pas/ppazopc.c` over `vendor/zopfli` ("Kind 2's
+zopfli" above), in codec stream version 5.
+
+- **zopfli itself**: zopflipng's IDAT is zopfli 1.0.3's deflate with 15
+  iterations under 200,000 bytes and 5 over (its `num_iterations_large`);
+  advpng `-z4`'s with 5. PPA's build (correctly rounded log, SSE2) gives
+  47 of png-synth's 53 zopflipng and advpng `-z4` streams back at the
+  iterations tried there, the same bits on x86-64 and on x86 (the other 6
+  are advpng over 2 MB, tried at 1 iteration only); with no C runtime it
+  leaves no symbol undefined for x86-64, x86, arm64, mingw x64 and x86,
+  clang 64 and 32. Its log is the correctly rounded one where glibc's is
+  not (checked to 20,000,000 against Python's decimal).
+- **Not the same**: oxipng's `--zopfli` (a Rust port: the same blocks, a
+  token differs here and there, a tie in its costs) and advpng `-z3`
+  (7-Zip's deflate): kind 3 as before; another variant if ever.
+- **The search**: s23's 60 KB found in 1.9 s (15 iterations), s05's 283
+  KB in 2.9 s (5); a 60 KB stream that is not zopfli's costs 0.4 s;
+  `rgba8-zopfli` (one block) 0.09 s.
+- **The corpora** (`test_preflate`): png-synth's zopflipng files of up to
+  64 KiB, 8 kind 2 (up to 256 KiB: 12; advpng `-z4`: 3 and 7); `tests/png3`'s
+  `rgba8-zopfli.png` is written in version 5 (kind 2 at 15 iterations).
+  Crafted: zopfli's 15, 5 and 1 iterations come back as kind 2, never with
+  the encoders up to libdeflate (version 4) nor with zopfli's search off;
+  without block splitting, kind 3 (not searched); a zopfli recipe cut
+  anywhere is refused, every value of every byte refused or rebuilt.
+- **The hash gate** against the published 0.4.0, the benchmark's three
+  sets at the default level: every `.ppa` the same, byte for byte (they
+  hold no zopfli image); compressing 4 to 5% longer (zopfli's search on
+  the streams that go to kind 3).
+
 ## Studied, not done yet (M7, 16/11/2026): zlib-ng
 
 zlib-ng 2.0.7, 2.1.8, 2.2.5 and 2.3.3 built with and without SIMD
@@ -802,7 +908,7 @@ zlib-ng 2.0.7, 2.1.8, 2.2.5 and 2.3.3 built with and without SIMD
   study's own samples (`zlibng-1`, `-6`, `-9`: about 335 KB of the 731 KB
   of kind-3 corrections the corpus's PNGs cost, nearly all level 1).
 
-Wira's decision: zopfli (M9) before zlib-ng.
+Wira's decision: zopfli (M9) before zlib-ng (done above).
 
 ## Credits
 
@@ -816,4 +922,6 @@ flushes are zlib's own (`deflate.c`, `trees.c` of zlib 1.3.1, 1.2.5 and
 Kind 2's miniz is miniz's own tdefl (1.14 and 3.0.2; Rich Geldreich and
 contributors, MIT / public domain), ported into `ppaminiz` as NOTICE says.
 Kind 2's libdeflate is libdeflate's own compressor (1.26; Eric Biggers,
-MIT), unmodified in `vendor/libdeflate`, as NOTICE says.
+MIT), unmodified in `vendor/libdeflate`, as NOTICE says. Kind 2's zopfli
+is zopfli's own deflate (1.0.3; Google, Apache-2.0), unmodified in
+`vendor/zopfli`, as NOTICE says.

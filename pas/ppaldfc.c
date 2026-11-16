@@ -5,61 +5,11 @@
    No C runtime, as the rest of PPA's C: libdeflate's freestanding build
    (FREESTANDING: its memcpy, memmove and memset are the compiler's
    built-ins), the memory the caller's (libdeflate_alloc_compressor_ex),
-   and memcpy, memmove and memset defined here for the copies the compiler
-   still calls them for (a struct assigned whole, a length known only at
-   run time). They are hidden where the object format allows it: nothing
-   outside this object sees them. build_c.sh keeps the compiler from
-   turning their loops into calls to themselves. */
+   and memcpy, memmove and memset from ppamemc.c for the copies the
+   compiler still calls them for (a struct assigned whole, a length known
+   only at run time). */
 #define FREESTANDING
 #include "lib/lib_common.h"
-
-#if defined(_WIN32) || defined(__CYGWIN__)
-#define PPA_LDF_LOCAL
-#else
-#define PPA_LDF_LOCAL __attribute__((visibility("hidden")))
-#endif
-
-#undef memcpy
-#undef memmove
-#undef memset
-#undef memcmp
-
-PPA_LDF_LOCAL void *memcpy(void *d, const void *s, size_t n) {
-  unsigned char *a = d;
-  const unsigned char *b = s;
-  while (n--) *a++ = *b++;
-  return d;
-}
-
-PPA_LDF_LOCAL void *memmove(void *d, const void *s, size_t n) {
-  unsigned char *a = d;
-  const unsigned char *b = s;
-  if (a <= b)
-    while (n--) *a++ = *b++;
-  else {
-    a += n; b += n;
-    while (n--) *--a = *--b;
-  }
-  return d;
-}
-
-PPA_LDF_LOCAL void *memset(void *d, int c, size_t n) {
-  unsigned char *a = d;
-  while (n--) *a++ = (unsigned char)c;
-  return d;
-}
-
-PPA_LDF_LOCAL int memcmp(const void *x, const void *y, size_t n) {
-  const unsigned char *a = x, *b = y;
-  for (; n; n--, a++, b++)
-    if (*a != *b) return *a < *b ? -1 : 1;
-  return 0;
-}
-
-#define memcpy(d, s, n) __builtin_memcpy((d), (s), (n))
-#define memmove(d, s, n) __builtin_memmove((d), (s), (n))
-#define memset(s, c, n) __builtin_memset((s), (c), (n))
-#define memcmp(x, y, n) __builtin_memcmp((x), (y), (n))
 
 /* libdeflate's utils.c, the parts the compressor calls (its default
    allocator is never used: ppa_ldf_compress always gives one) */

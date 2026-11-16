@@ -1,0 +1,18 @@
+zopfli 1.0.3 (tag zopfli-1.0.3), https://github.com/google/zopfli, by
+Google (Lode Vandevenne, Jyrki Alakuijala and the CONTRIBUTORS): from its
+release's source tarball zopfli-zopfli-1.0.3.tar.gz (sha256
+e955a7739f71af37ef3349c4fa141c648e8775bceb2195be07e86f8e638814bd), only
+the files its deflate is built from (src/zopfli, without the gzip and zlib
+containers and the command), copied unmodified. Apache License 2.0
+(COPYING).
+
+PPA uses it for deflate recipe kind 2, encoder 3 (doc/PREFLATE.md): a
+stream zopfli wrote (zopflipng: 15 iterations under 200,000 bytes, 5 over;
+advpng -z4; zopfli's own command) is rebuilt by calling it again with the
+stream's options. pas/ppazopc.c builds these files with no C runtime and
+with the same bits on every platform (SSE2 doubles, and log() replaced by
+a correctly rounded one of PPA's). zopfli's master branch (df1517d, 2021)
+has the same deflate.
+
+Do not patch these files here: a new release comes in whole, replacing
+this directory, and only if it gives the same bytes (or as a new variant).

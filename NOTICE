@@ -17,6 +17,13 @@ Copyright 2016 Eric Biggers, 2024 Google LLC, MIT: vendor/libdeflate/COPYING),
 its compressor's files unmodified, for the deflate recipes of kind 2's
 encoder 2 (doc/PREFLATE.md); pas/ppaldfc.c builds it.
 
+vendor/zopfli is zopfli 1.0.3 (https://github.com/google/zopfli, Copyright
+2011 Google Inc., Apache License 2.0: vendor/zopfli/COPYING; its authors
+in vendor/zopfli/CONTRIBUTORS), its deflate's files unmodified, for the
+deflate recipes of kind 2's encoder 3; pas/ppazopc.c builds it, with PPA's
+own log() (correctly rounded) and memory functions in place of the C
+library's.
+
 pas/ppazlib.pas is a port to FreePascal of the parts of zlib 1.3's
 deflate.c and trees.c that decide deflate's choices (hash chains,
 longest_match, deflate_fast, deflate_slow, deflate_rle, deflate_huff, and
