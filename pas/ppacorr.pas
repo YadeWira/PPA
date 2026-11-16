@@ -157,6 +157,13 @@ var
 procedure LensMiniz(const freq: array of Integer; n, maxLen: Integer; var lens: array of Byte);
 procedure SeqMiniz(const lens: array of Byte; total: Integer; var seq: array of Word; var nSeq: Integer);
 
+{ Whether dynamic block bi of z has the literal/length and distance code
+  lengths libdeflate builds from the block's own symbol counts (and the
+  code-length code it builds from the run-length symbols): the quick test
+  before ppalibdeflate tries its levels. False for a block that is not
+  dynamic. }
+function LibdeflateTrees(const z: TZStream; bi: SizeInt): Boolean;
+
 implementation
 
 uses ppaarith, ppazlib, ppathreads;
@@ -995,6 +1002,36 @@ begin
   else LensPM(f, 19, 7, l);
   end;
   for i := 0 to 18 do clen[i] := l[i];
+end;
+
+function LibdeflateTrees(const z: TZStream; bi: SizeInt): Boolean;
+var t, L, i: SizeInt; lf: array[0..285] of Integer; df: array[0..29] of Integer; sf: array[0..18] of Integer;
+  pb: TDeflateBlock; cl: array[0..18] of Byte;
+begin
+  Result := False;
+  if (bi < 0) or (bi > High(z.blocks)) then Exit;
+  with z.blocks[bi] do begin
+    if btype <> btDynamic then Exit;
+    FillChar(lf, SizeOf(lf), 0); FillChar(df, SizeOf(df), 0);
+    lf[256] := 1;
+    for t := firstToken to firstToken + nTokens - 1 do begin
+      L := z.tokLen[t];
+      if L = 0 then Inc(lf[z.tokVal[t] and 255])
+      else begin
+        if L = LEN_258_AS_284 then Inc(lf[284]) else Inc(lf[LenSym[L]]);
+        Inc(df[DistSym[z.tokVal[t]]]);
+      end;
+    end;
+    pb := Default(TDeflateBlock);
+    TreesBy(TB_LIBDEFLATE, lf, df, pb);
+    for i := 0 to 285 do if pb.litLen[i] <> litLen[i] then Exit;
+    for i := 0 to 29 do if pb.distLen[i] <> distLen[i] then Exit;
+    FillChar(sf, SizeOf(sf), 0);
+    for i := 0 to High(clenSeq) do Inc(sf[clenSeq[i] and $1F]);
+    ClenBy(TB_LIBDEFLATE, sf, cl);
+    for i := 0 to 18 do if cl[i] <> clen[i] then Exit;
+  end;
+  Result := True;
 end;
 
 { run-length codings of lens[0..total-1] (both trees at once) into seq

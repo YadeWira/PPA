@@ -1,8 +1,9 @@
 #!/bin/sh
 # The C part of PPA as objects for FreePascal to link: layer 5's pixel loop
 # (ppamodelc.c, {$L ppamodelc.o} in ppamodel.pas; ppafastc.c, the fast one) and layer 2b's
-# longest_match (ppazlibc.c, in ppazlib.pas), and PJA's (vendor/pja, built
-# by its own build_c.sh), found through -Fo<dir>. As PJA's pas/build_c.sh.
+# longest_match (ppazlibc.c, in ppazlib.pas), libdeflate's compressor
+# (ppaldfc.c over vendor/libdeflate, in ppalibdeflate.pas), and PJA's
+# (vendor/pja, built by its own build_c.sh), found through -Fo<dir>. As PJA's pas/build_c.sh.
 #
 #   pas/build_c.sh <out dir> [extra C flags]
 #
@@ -33,5 +34,8 @@ for f in ppamodelc ppafastc ppastaticc ppazlibc ppapixc ppadeflatec ppacorrc ppa
   # shellcheck disable=SC2086
   $CC $FLAGS "$@" -c "$HERE/$f.c" -o "$OUT/$f.o"
 done
+# libdeflate's compressor (vendor/libdeflate, unmodified) behind ppaldfc.c
+# shellcheck disable=SC2086
+$CC $FLAGS "$@" -I"$HERE/../vendor/libdeflate" -c "$HERE/ppaldfc.c" -o "$OUT/ppaldfc.o"
 # PJA's C (vendor/pja: its version 7 model, for a JNG's JPEG), by its own script
 CC=$CC sh "$HERE/../vendor/pja/pas/build_c.sh" "$OUT" "$@"

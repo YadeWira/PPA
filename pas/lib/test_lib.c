@@ -90,12 +90,12 @@ static void versions(const unsigned char *ppa, size_t pn) {
   check(ppa_decompress(p, pn, &back, &bn, 0, 1) == PPA_E_VERSION, "a .ppa of format version 2: PPA_E_VERSION", "");
   ppa_free(back); back = 0;
   memcpy(p, ppa, pn);
-  for (int v = 4; v < 256; v++) {
+  for (int v = 5; v < 256; v++) {
     p[37] = (unsigned char)v;
     bad += ppa_decompress(p, pn, &back, &bn, 0, 1) != PPA_E_VERSION;
     ppa_free(back); back = 0;
   }
-  check(bad == 0, "codec stream versions 4 to 255 in a .ppa: PPA_E_VERSION", "");
+  check(bad == 0, "codec stream versions 5 to 255 in a .ppa: PPA_E_VERSION", "");
   p[37] = 0;
   check(ppa_decompress(p, pn, &back, &bn, 0, 1) == PPA_E_DATA, "codec stream version 0: PPA_E_DATA", "");
   ppa_free(back);
@@ -113,12 +113,12 @@ static void versions(const unsigned char *ppa, size_t pn) {
   }
   check(bad == 0, "filter records 02 to FE: PPA_E_VERSION", "");
   bad = 0;
-  for (int v = 4; v < 256; v++) {
+  for (int v = 5; v < 256; v++) {
     /* a file of 100 bytes whose codec stream (10 bytes) is version v */
     unsigned char s1[] = {'P', 'P', 'A', 'F', 1, 0x01, 100, 10, (unsigned char)v, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF};
     bad += filter_result(s1, sizeof s1) != PPA_E_VERSION;
   }
-  check(bad == 0, "a filter record whose codec stream is version 4 to 255: PPA_E_VERSION", "");
+  check(bad == 0, "a filter record whose codec stream is version 5 to 255: PPA_E_VERSION", "");
   printf("what a newer PPA wrote: PPA_E_VERSION (.ppa, codec stream, filter version and records)\n");
 }
 

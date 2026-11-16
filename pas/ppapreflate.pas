@@ -39,19 +39,23 @@ unit ppapreflate;
 
 interface
 
-uses SysUtils, ppadeflate, ppazlib, ppacorr, ppaminiz;
+uses SysUtils, ppadeflate, ppazlib, ppacorr, ppaminiz, ppalibdeflate;
 
 const
   { the recipe kinds: 0, zlib's parameters give the stream exactly; 1,
     zlib's parameters and its flushes and parameter changes; 2, another
-    known encoder exactly (miniz); 3, a zlib-like predictor and the
+    known encoder exactly (miniz, libdeflate); 3, a zlib-like predictor and the
     corrections that make it the stream (ppacorr: any stream) }
   RECIPE_ZLIB = 0;
   RECIPE_ZLIB_FLOW = 1;
   RECIPE_ENCODER = 2;
   RECIPE_CORR = 3;
-  { kind 2's encoders: miniz's tdefl (ppaminiz) }
+  { kind 2's encoders: miniz's tdefl (ppaminiz); libdeflate (ppalibdeflate:
+    its variant and level, in the fields miniz's variant and flags take;
+    since codec stream version 4) }
   ENC_MINIZ = 1;
+  ENC_LIBDEFLATE = 2;
+  ENC_LAST = ENC_LIBDEFLATE;
   RECIPE_KIND_LAST = RECIPE_CORR;
   { the version of RecipeBytes' format (doc/PREFLATE.md) }
   RECIPE_FORMAT = 2;
@@ -70,8 +74,9 @@ type
     kind: Integer;                   { RECIPE_ZLIB, RECIPE_ZLIB_FLOW, RECIPE_ENCODER, RECIPE_CORR }
     prm: TZlibParams;                { zlib's parameters (kind 1: at the start; kind 3: none) }
     flow: TZlibFlow;                 { kind 1: its flushes and parameter changes }
-    encoder: Integer;                { kind 2: ENC_MINIZ }
+    encoder: Integer;                { kind 2: ENC_MINIZ, ENC_LIBDEFLATE }
     mz: TMinizParams;                { kind 2, miniz: its flags and build }
+    ldf: TLdfParams;                 { kind 2, libdeflate: its variant and level }
     pred: TPredParams;               { kind 3: the predictor's parameters }
     corr: TBytes;                    { kind 3: the corrections (ppacorr), coded }
     { the framing, as ppadeflate.TZStream has it }
@@ -95,9 +100,10 @@ function Parse(const a: TBytes; framing: TDeflFraming; maxPlain: SizeInt; out z:
   maxKind: dsOk when one gives a back bit for bit (checked), dsNotTaken
   otherwise. Kind 0 is looked for first, as codec stream version 2 does.
   threads: kind 3's parameter search and the rebuilds' (the same recipe
-  with any). }
+  with any). maxEncoder: kind 2's encoders up to it (codec stream version
+  3 holds miniz's only). }
 function FindRecipe(const a: TBytes; const z: TZStream; out recipe: TDeflRecipe;
-  maxKind: Integer = RECIPE_KIND_LAST; threads: Integer = 1): TDeflStatus;
+  maxKind: Integer = RECIPE_KIND_LAST; threads: Integer = 1; maxEncoder: Integer = ENC_LAST): TDeflStatus;
 
 { Parse and FindRecipe: a -> the bytes it holds and its recipe. }
 function Analyze(const a: TBytes; framing: TDeflFraming; maxPlain: SizeInt; out plain: TBytes;
@@ -744,7 +750,7 @@ end;
 { ---------------------------------------------------------------- recipes }
 
 function FindRecipe(const a: TBytes; const z: TZStream; out recipe: TDeflRecipe; maxKind: Integer;
-  threads: Integer): TDeflStatus;
+  threads: Integer; maxEncoder: Integer): TDeflStatus;
 var e: TZStream; back: TBytes; i: SizeInt; markers: Boolean; memo: TLongMemo;
 begin
   Result := dsNotTaken;
@@ -779,8 +785,19 @@ begin
       back := Encode(e);
       if SameBytes(back, a) and Rebuild(z.plain, recipe, back, threads) and SameBytes(back, a) then Exit(dsOk);
     end;
-    recipe.encoder := 0;
     recipe.mz := Default(TMinizParams);
+    { libdeflate (oxipng): its levels tried where the first blocks' trees
+      are its own (miniz's are the same: after miniz) }
+    if maxEncoder >= ENC_LIBDEFLATE then begin
+      recipe.encoder := ENC_LIBDEFLATE;
+      if FindLdfParams(a, z, recipe.ldf, e) then begin
+        PutFraming(recipe, e);
+        back := Encode(e);
+        if SameBytes(back, a) and Rebuild(z.plain, recipe, back, threads) and SameBytes(back, a) then Exit(dsOk);
+      end;
+      recipe.ldf := Default(TLdfParams);
+    end;
+    recipe.encoder := 0;
   end;
   recipe.kind := RECIPE_ZLIB_FLOW;
   { the recipe itself rebuilt (its parameters, flow and variant: what a
@@ -828,7 +845,8 @@ var k: SizeInt;
 begin
   if recipe.kind = RECIPE_CORR then Exit(PredValid(recipe.pred) and (Length(recipe.flow.events) = 0));
   if recipe.kind = RECIPE_ENCODER then
-    Exit((recipe.encoder = ENC_MINIZ) and MinizValid(recipe.mz) and (Length(recipe.flow.events) = 0));
+    Exit((((recipe.encoder = ENC_MINIZ) and MinizValid(recipe.mz)) or
+          ((recipe.encoder = ENC_LIBDEFLATE) and LdfValid(recipe.ldf))) and (Length(recipe.flow.events) = 0));
   if recipe.kind > RECIPE_ZLIB_FLOW then Exit(False);
   with recipe.prm do
     Result := (recipe.kind >= RECIPE_ZLIB) and (recipe.kind <= RECIPE_KIND_LAST) and (level >= 1) and (level <= 9) and
@@ -852,6 +870,12 @@ begin
     e := Default(TZStream);
     PutFraming(recipe, e);
     Exit(CorrRebuild(plain, recipe.pred, recipe.corr, e, stream));
+  end;
+  if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_LIBDEFLATE) then begin
+    if not LdfChoices(plain, recipe.ldf, e) then Exit(False);
+    PutFraming(recipe, e);
+    stream := Encode(e);
+    Exit(True);
   end;
   if recipe.kind = RECIPE_ENCODER then begin
     if not MinizChoices(plain, recipe.mz, nil, not recipe.raw, e) then Exit(False);
@@ -997,6 +1021,14 @@ begin
     SetLength(o.b, o.n);
     Exit(o.b);
   end;
+  if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_LIBDEFLATE) then begin
+    Put(o, recipe.encoder);
+    Put(o, recipe.ldf.variant);
+    PutVar(o, recipe.ldf.level);
+    PutFramingBytes(o, recipe);
+    SetLength(o.b, o.n);
+    Exit(o.b);
+  end;
   if recipe.kind = RECIPE_ENCODER then begin
     Put(o, recipe.encoder);
     Put(o, recipe.mz.variant);
@@ -1055,9 +1087,14 @@ begin
   end;
   if recipe.kind = RECIPE_ENCODER then begin
     recipe.encoder := r.Get;
-    recipe.mz.variant := r.Get;
-    recipe.mz.flags := r.GetVar(MZ_FLAGS);
-    if not r.ok or (recipe.encoder <> ENC_MINIZ) then Exit;
+    if recipe.encoder = ENC_LIBDEFLATE then begin
+      recipe.ldf.variant := r.Get;
+      recipe.ldf.level := r.GetVar(LDF_LEVEL_MAX);
+    end else begin
+      recipe.mz.variant := r.Get;
+      recipe.mz.flags := r.GetVar(MZ_FLAGS);
+    end;
+    if not r.ok or (recipe.encoder < ENC_MINIZ) or (recipe.encoder > ENC_LAST) then Exit;
     if not RecipeValid(recipe) then Exit(rrBadParams);
     Result := ReadFramingBytes(r, maxTail, recipe);
     pos := r.pos;

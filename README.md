@@ -44,9 +44,9 @@ comes back byte for byte, and nothing is written unless it verified.
   Adam7, any line filters; its pixels coded by one of three models chosen
   image by image, and its deflate stream rebuilt bit for bit: zlib's from
   zlib's own parameters (every level, strategy, window and memLevel, its
-  flushes too), and since 0.3.0 miniz's from its flags and any other
-  encoder's (zopfli, libdeflate and oxipng, advpng, 7-Zip) from a
-  predictor and a few corrections.
+  flushes too), since 0.3.0 miniz's from its flags and any other
+  encoder's (zopfli, advpng, 7-Zip) from a predictor and a few
+  corrections, and since 0.4.0 libdeflate's and oxipng's from their level.
 - **APNG**: every frame's stream, the same way.
 - **MNG**: the PNG and JNG images it embeds.
 - **JNG**: its JPEG through [PJA](https://github.com/YadeWira/PJA)'s codec.

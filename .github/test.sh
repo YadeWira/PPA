@@ -149,8 +149,8 @@ echo "== layer 2a"
 "$OUT/test_deflate$EXE" tests/png 16 | tail -1
 "$OUT/test_deflate$EXE" tests/png 1 -dump "$OUT/z" > "$OUT/streams.txt"
 echo "== layer 2, the deflate recipes' golden vectors (C and Pascal)"
-"$OUT/test_preflate$EXE" tests/recipes 59 -golden | tail -1
-PPA_NOC=1 "$OUT/test_preflate$EXE" tests/recipes 59 -golden | tail -1
+"$OUT/test_preflate$EXE" tests/recipes 73 -golden | tail -1
+PPA_NOC=1 "$OUT/test_preflate$EXE" tests/recipes 73 -golden | tail -1
 echo "== layer 2b"
 "$OUT/test_zlib$EXE" tests/png -v > "$OUT/zlib.txt"
 tail -1 "$OUT/zlib.txt"
@@ -161,7 +161,7 @@ echo "== layer 7, damaged .ppa files through the release build"
 "$OUT/test_format_fast$EXE" tests/png > "$OUT/damaged.txt" 2>&1 || { cat "$OUT/damaged.txt"; echo "FAIL: the release build on damaged files"; exit 1; }
 tail -1 "$OUT/damaged.txt"
 grep -q ', 0 failures' "$OUT/damaged.txt" || { cat "$OUT/damaged.txt"; exit 1; }
-# codec stream version 3's (tests/png3)
+# codec stream versions 3 and 4 (tests/png3)
 "$OUT/test_format_fast$EXE" tests/png3 > "$OUT/damaged3.txt" 2>&1 || { cat "$OUT/damaged3.txt"; echo "FAIL: the release build on damaged files"; exit 1; }
 tail -1 "$OUT/damaged3.txt"
 grep -q ', 0 failures' "$OUT/damaged3.txt" || { cat "$OUT/damaged3.txt"; exit 1; }
@@ -169,8 +169,8 @@ echo "== layer 6, bands (4 KB ones, decoded last first)"
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec$EXE" tests/png 14 | sed 's/; [0-9.]* s;/;/' | tee "$OUT/bands.txt"
 echo "== layer 2b, the deflate streams rebuilt in segments on 4 threads"
 PPA_TEST_PAR_BYTES=512 PPA_TEST_THREADS=4 "$OUT/test_codec$EXE" tests/png 14 | tail -1
-echo "== layer 6, codec stream version 3 (tests/png3: images other encoders wrote)"
-"$OUT/test_codec$EXE" tests/png3 5 -v | sed 's/; [0-9.]* s;/;/' | tee "$OUT/png3.txt" | tail -1
+echo "== layer 6, codec stream versions 3 and 4 (tests/png3: images other encoders wrote)"
+"$OUT/test_codec$EXE" tests/png3 6 -v | sed 's/; [0-9.]* s;/;/' | tee "$OUT/png3.txt" | tail -1
 # the .ppa the command writes of them, the same on every platform, and back
 rm -rf "$OUT/v3" "$OUT/v3x"; mkdir -p "$OUT/v3" "$OUT/v3x"
 "$OUT/ppa$EXE" a -q -o "$OUT/v3/" tests/png3/*.png

@@ -1,0 +1,17 @@
+libdeflate 1.26 (tag v1.26), https://github.com/ebiggers/libdeflate, by
+Eric Biggers: from its release's tarball libdeflate-1.26.tar.gz (sha256
+125856d4656e0feab660f94842f835923410c9281fedbcee64598c918da42b5a), only
+the files its compressor is built from, copied unmodified. MIT (COPYING).
+
+PPA uses it for deflate recipe kind 2, encoder 2 (doc/PREFLATE.md): a
+stream libdeflate wrote (oxipng writes with it: -o1 is its level 10, -o2
+11, -o3 and over 12) is rebuilt by calling it again with the stream's
+level. pas/ppaldfc.c builds lib/deflate_compress.c with no C runtime;
+nothing else of libdeflate is used (PPA has its own inflate).
+
+libdeflate 1.19 to 1.26 give the same bytes at every level (checked on
+the corpus's PNG streams); 1.18 and before sometimes differ, and would be
+another variant of encoder 2.
+
+Do not patch these files here: a new release comes in whole, replacing
+this directory, and only if it gives the same bytes (or as a new variant).

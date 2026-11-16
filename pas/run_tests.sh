@@ -71,24 +71,26 @@ same_recipes "$OUT/pf_c.txt" "$OUT/pf_pas.txt"
 # the golden vectors (tests/recipes, tools/preflate/mkgolden.py): each
 # committed recipe gives its stream back, C and Pascal (.github/test.sh: on
 # every platform, 32 and 64 bits)
-"$OUT/test_preflate" "$PPA/tests/recipes" 59 -golden | tail -1
-PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/recipes" 59 -golden | tail -1
-# codec stream version 3 (tests/png3: images other encoders wrote): 3 of
-# the 5 files are written in it, each back, and in version 2 too
-"$OUT/test_preflate" "$PPA/tests/png3" 5 -none0 -all013 -codec -minv3 3 | tail -1
+"$OUT/test_preflate" "$PPA/tests/recipes" 73 -golden | tail -1
+PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/recipes" 73 -golden | tail -1
+# codec stream versions 3 and 4 (tests/png3: images other encoders wrote):
+# 3 of the 6 files are written in version 3, 1 (oxipng's: libdeflate) in
+# version 4, each back, and in versions 2 and 3 too
+"$OUT/test_preflate" "$PPA/tests/png3" 6 -none0 -all013 -codec -minv3 3 -minv4 1 | tail -1
 PF_CORPUS=${PREFLATE_CORPUS-/mnt/IA_LAB/agentes/ppa/preflate/corpus}
 if [ -d "$PF_CORPUS/png-zlib" ]; then
   # the regression set: all 392 streams kind 0; zlib alone does not write the
   # 24 others (ipad.png is zlib with a full flush, the 6 spider images zlib
-  # built with TOO_FAR 32767: kind 1; the 12 miniz 1.x images kind 2; the 5
-  # oxipng ones kind 3, the same from the C and the Pascal code)
+  # built with TOO_FAR 32767: kind 1; the 12 miniz 1.x images and the 5
+  # oxipng ones (libdeflate, codec stream version 4) kind 2, the same from
+  # the C and the Pascal code)
   "$OUT/test_preflate" "$PF_CORPUS/png-zlib" 392 -all0 | tail -1
-  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 7 -min2 12 -all013 -min3 5 -diffc -codec -minv3 19 | tail -1
+  "$OUT/test_preflate" "$PF_CORPUS/png-nonzlib" 24 -none0 -min1 7 -min2 17 -all013 -diffc -codec -minv3 16 -minv4 5 | tail -1
 fi
 if [ -d "$PF_CORPUS/hostile" ]; then
   # kind 3 (M3a): every stream that inflates has a recipe; the others are
-  # refused cleanly
-  "$OUT/test_preflate" "$PF_CORPUS/hostile" 18 -all013 -min3 7 -diffc | tail -1
+  # refused cleanly (zeros64m.ldf12, libdeflate's, is kind 2 since M6)
+  "$OUT/test_preflate" "$PF_CORPUS/hostile" 18 -all013 -min3 6 -min2 1 -diffc | tail -1
 fi
 if [ -d "$PF_CORPUS/zflow" ]; then
   # kind 1 (M2): zlib's flushes and deflateParams. zlib 1.3.1, 1.2.5 and 1.2.3,
@@ -102,14 +104,21 @@ if [ -d "$PF_CORPUS/zflow" ]; then
   "$OUT/test_preflate" "$PF_CORPUS/png-synth" 288 -all01 -min1 288 -only .zfl- | tail -1
   # every PNG miniz 1.14 and 3.x wrote (levels 1, 6, 9, 10): kind 2 (M5)
   "$OUT/test_preflate" "$PF_CORPUS/png-synth" 55 -min2 55 -only .miniz | tail -1
+  # every PNG libdeflate 1.23 wrote (levels 1, 6, 9, 12) and oxipng -o2
+  # (libdeflate's 11): kind 2's libdeflate (M6), but for s33's noise (stored
+  # blocks only, over 64 KB: libdeflate is not tried; kind 3) and one oxipng
+  # stream zlib's parameters give (kind 0)
+  "$OUT/test_preflate" "$PF_CORPUS/png-synth" 51 -min2 49 -all013 -only .libdeflate- | tail -1
+  "$OUT/test_preflate" "$PF_CORPUS/png-synth" 34 -min2 32 -all013 -only .oxipng-o2. | tail -1
   # the PDA sample: at least the 568 streams the census's zlib with flushes
-  # rebuilt kind 0 or 1 (595), all 742 with a recipe (one miniz's, kind 3 the rest)
-  "$OUT/test_preflate" "$PF_CORPUS/pda" 742 -minok 742 -all013 -min2 1 -min3 146 -diffc | tail -1
+  # rebuilt kind 0 or 1 (595), all 742 with a recipe (one miniz's and two
+  # libdeflate's kind 2, kind 3 the rest)
+  "$OUT/test_preflate" "$PF_CORPUS/pda" 742 -minok 742 -all013 -min2 3 -min3 144 -diffc | tail -1
 fi
 if [ -d "$PF_CORPUS/raw" ]; then
   # bare deflate of the study's samples by 33 encoder settings: all with a
-  # recipe (miniz's 12: kind 2)
-  "$OUT/test_preflate" "$PF_CORPUS/raw" 101 -all013 -min2 12 -min3 72 | tail -1
+  # recipe (miniz's 12 and libdeflate's 48: kind 2)
+  "$OUT/test_preflate" "$PF_CORPUS/raw" 101 -all013 -min2 60 -min3 24 | tail -1
 fi
 
 echo "== layer 3: filtered lines <-> each line's filter and the image's bytes"
@@ -151,15 +160,15 @@ for d in "${dirs[@]}"; do "$OUT/measure_static" "$d" | tail -1; done
 echo "== layer 6: the codec (every file compressed, verified, decompressed)"
 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 # codec stream version 3: images other encoders wrote (tests/png3)
-"$OUT/test_codec" "$PPA/tests/png3" 5 | tail -1
-PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png3" 5 | tail -1
+"$OUT/test_codec" "$PPA/tests/png3" 6 | tail -1
+PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png3" 6 | tail -1
 # bands: 4 KB ones, so that the samples have several, decoded last first
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 # --max (-3): every image with the slow model
 PPA_TEST_MAX=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 # --fast (-1): no image with the slow model that the fast or the static one takes
 PPA_TEST_LEVEL=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
-PPA_TEST_LEVEL=1 "$OUT/test_codec" "$PPA/tests/png3" 5 | tail -1
+PPA_TEST_LEVEL=1 "$OUT/test_codec" "$PPA/tests/png3" 6 | tail -1
 # each deflate stream rebuilt in segments on 4 threads (ppazlib's ParallelSlow), the small samples too
 PPA_TEST_PAR_BYTES=512 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 PPA_TEST_MAX=1 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1

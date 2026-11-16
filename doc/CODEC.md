@@ -22,7 +22,7 @@ over a large corpus, is the oracle for the whole project.
 | 1 | `ppapng` | file ↔ chunks + one data stream per image (IDAT, fdAT, JDAT, JDAA) + what is needed to cut them into the same chunks | done |
 | 2a | `ppadeflate` | zlib stream ↔ the bytes it holds + every choice its encoder made (blocks, codes, tokens, pad bits): the same bits back | done |
 | 2b | `ppazlib` | those choices predicted from the bytes the way zlib makes them, only the differences kept (our own preflate) | in progress: zlib's choices exact |
-| 2 | `ppapreflate` | one deflate stream's API, independent of PNG (for PDA too): stream ↔ its bytes + a recipe (the framing, and how the deflate data is made: kind 0, zlib's parameters; kind 1, and zlib's flushes and parameter changes; kind 2, miniz's flags; kind 3, a predictor and its corrections; `PREFLATE.md`), checked bit for bit; the codec keeps each image stream's recipe | kind 0 (zlib's parameters exact), written as stream version 2 writes it; kinds 1 (zlib's flushes), 2 (miniz exact) and 3 (a zlib-like predictor and corrections: any stream) in codec stream version 3 |
+| 2 | `ppapreflate` | one deflate stream's API, independent of PNG (for PDA too): stream ↔ its bytes + a recipe (the framing, and how the deflate data is made: kind 0, zlib's parameters; kind 1, and zlib's flushes and parameter changes; kind 2, miniz's flags or libdeflate's level; kind 3, a predictor and its corrections; `PREFLATE.md`), checked bit for bit; the codec keeps each image stream's recipe | kind 0 (zlib's parameters exact), written as stream version 2 writes it; kinds 1 (zlib's flushes), 2 (miniz exact) and 3 (a zlib-like predictor and corrections: any stream) in codec stream version 3; kind 2's libdeflate (its own compressor) in version 4 |
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
 | 4 | `ppaarith` | binary arithmetic coder, adaptive bit counters, stretch and squash | done |
 | 5 | `ppastatic`, `ppafast`, `ppamodel` | modelling the pixels (three models, chosen by image and level: never the slow one for an image the others take with `-1`, the slow one for all with `-3`), the deflate corrections and the raw bytes | static and fast models; slow one, second version |
@@ -262,7 +262,9 @@ follows the deflate data) and how the deflate data is made from the bytes:
 - **kind 1**, zlib with its flushes and parameter changes, **kind 2**,
   miniz's flags (its deflate ported exactly), and **kind 3**, a
   predictor's parameters and the corrections that make any deflate stream
-  (libdeflate, oxipng, zopfli, 7-Zip, ...): version 3. Every image's
+  (zopfli, 7-Zip, ...): version 3; **kind 2's libdeflate** (libdeflate's
+  own compressor at the stream's level: oxipng's streams), version 4,
+  only in a file with such an image. Every image's
   recipe is then written in `RecipeBytes`' format, after its length, and
   read once the image's size is known (a flow's events are checked against
   the bytes they are for; the recipe must use all of its bytes). Such an

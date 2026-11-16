@@ -22,6 +22,12 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
   whose images are all zlib's alone is still written as version 2, the
   same `.ppa` as before (M4's hash gate). Format 2, published with
   0.3.0 (kinds 0 to 3), is frozen by the versioning rule.
+- **Codec stream version 4** (M6, PPA 0.4.0) is version 3 and one more
+  value: kind 2's encoder 2, libdeflate. The same format 2; a file is
+  written in version 4 only when an image's recipe is libdeflate's, so
+  PPA 0.3.0 refuses it as a newer PPA's (its version byte) and reads every
+  other file 0.4.0 writes. A version 3 stream holding encoder 2 is damage
+  (never written so) and is refused.
 
 ## Kinds
 
@@ -29,7 +35,7 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
 |---|---|---|---|
 | 0 | `RECIPE_ZLIB` | zlib's parameters: level, strategy, memLevel, windowBits | 0.1.0 (codec v2) |
 | 1 | `RECIPE_ZLIB_FLOW` | kind 0's parameters at the start, and a **flow**: the flushes and parameter changes zlib made along the stream, and which zlib made them | M2 (codec v3, M4) |
-| 2 | `RECIPE_ENCODER` | another encoder, exactly: which (`ENC_MINIZ`, miniz's tdefl) and its parameters (miniz: its flags and build) | M5 (codec v3) |
+| 2 | `RECIPE_ENCODER` | another encoder, exactly: which (`ENC_MINIZ`, miniz's tdefl; `ENC_LIBDEFLATE`, libdeflate) and its parameters (miniz: its flags and build; libdeflate: its variant and level) | M5 (codec v3), M6 (libdeflate, codec v4) |
 | 3 | `RECIPE_CORR` | a zlib-like predictor (`ppacorr`) and the **corrections** that make what it predicts the stream: any stream `ppadeflate` reads | M3a, M3b (codec v3, M4) |
 | 4 | | reserved: cost-guided predictor plus corrections | |
 
@@ -148,6 +154,7 @@ What decides miniz's choices, all of it in the port:
 `FindRecipe` tries kind 2 after kind 0 and before kind 1: its search is
 quick (each candidate stops at its first token, block end or block type
 unlike the stream's), kind 1's long where it fails, and no stream is both.
+Miniz first, then libdeflate (below).
 The candidates (`FindMinizParams`): every level's probes (1, 6, 32, 16, 32,
 128, 256, 512, 768, 1500), greedy as the level makes it and the other way
 (the PNG writer makes no level greedy), level 1 in both builds; the same
@@ -157,6 +164,47 @@ Huffman only and `MZ_RAW` where there is none (`MZ_RAW` first where every
 block is stored). A stream with a match of 3 bytes from 8 KB or further,
 or 258 written as 284, is not miniz's. The first whose choices are the
 stream's is the recipe, verified as every kind is.
+
+### Kind 2's libdeflate (M6)
+
+`pas/ppalibdeflate.pas` and `pas/ppaldfc.c`: not a port but libdeflate's
+own compressor (`vendor/libdeflate`: libdeflate 1.26's
+`lib/deflate_compress.c` and the headers it includes, copied unmodified
+from its release tarball; NOTICE has its license), built with no C
+runtime (its freestanding build; `memcpy`, `memmove` and `memset` defined
+in `ppaldfc.c`, hidden, for the copies the compiler still calls them for)
+and its memory from FreePascal's heap. `Rebuild` calls
+`libdeflate_deflate_compress` at the recipe's level with all the bytes,
+reads its stream back into blocks and tokens (`ppadeflate.Decode`) and
+writes them with the recipe's framing (`Encode`): the same bits. It is C
+only: libdeflate itself is the reference (`PPA_NOC` and `--path=pascal`
+do not change it).
+
+| field | values | meaning |
+|---|---|---|
+| `encoder` | 2 `ENC_LIBDEFLATE` | libdeflate's compressor |
+| `ldf.variant` | 0 `LDFV_119` | libdeflate 1.19 to 1.26: the same bytes at every level (checked: 1.19, 1.23 and 1.26 on the corpus's streams and made ones, every level, x86-64 and x86); 1.18 and before sometimes differ (a few streams of 65), which would be another variant |
+| `ldf.level` | 1 to 12 | `libdeflate_alloc_compressor`'s level: 1 its own loop, 2-4 greedy, 5-7 lazy, 8-9 lazy2, 10-12 near-optimal parsing |
+
+oxipng writes its PNGs with libdeflate (libdeflater): its `-o1` is level
+10, `-o2` level 11, `-o3` and over level 12 (oxipng 10.1.1, checked);
+libdeflate's own default is 6. One call with all the bytes, as oxipng and
+libdeflate's zlib and gzip wrappers make it.
+
+**The search** (`FindLdfParams`): only where the first two dynamic blocks
+have libdeflate's code lengths for their own symbol counts and its
+code-length code (`ppacorr.LibdeflateTrees`, kind 3's tree builder 1:
+miniz's lengths are the same, so miniz is tried first), or where there is
+no dynamic block and at most 64 KB of bytes. Then the levels 12, 11, 10
+(oxipng's), 6, 9, 8, 7, 5, 4, 3, 2, 1, each compressed whole and compared
+with the stream's deflate bytes but the last (whose pad bits the framing
+keeps); the first that matches is rebuilt and compared bit for bit, as
+every kind is. Levels that write the same bytes (8 and 9 often, 10 and 12
+on small inputs) count as found.
+
+**Rebuilding** costs libdeflate's time at that level: level 12 about 3.4
+MB/s of bytes on one thread (a 787 KB photo in 0.23 s), level 6 about 40
+MB/s; kind 3's rebuild of the same streams was about 0.4 MB/s.
 
 ### Kind 3: a predictor and its corrections
 
@@ -289,9 +337,13 @@ set on all but the last).
 byte    format              RECIPE_FORMAT = 2
 byte    kind                0 to 3
 kind 2: everything below it instead:
-  byte    encoder           1 (miniz)
-  byte    variant           0..1
-  varint  flags             the bits of MZ_FLAGS only
+  byte    encoder           1 (miniz), 2 (libdeflate: codec stream version 4)
+  encoder 1:
+    byte    variant         0..1
+    varint  flags           the bits of MZ_FLAGS only
+  encoder 2:
+    byte    variant         0
+    varint  level           1..12
   framing (below)
 kind 3: everything below it instead:
   byte    version           PRED_VERSION = 2
@@ -372,8 +424,12 @@ flush, the old versions' second block. So:
   builder); and (M5, `mkgolden.py --kind2`, beside them) 14 kind 2, miniz
   1.14 and 3.0.2 (both builds of level 1, levels 6, 9 and 10, the PNG
   writer's, filtered, RLE, Huffman only, static, raw, and 88 KB of photo,
-  noise and text in several blocks, some stored): 59.
-  `test_preflate tests/recipes 59 -golden` requires each recipe,
+  noise and text in several blocks, some stored); and (M6, `mkgolden.py
+  --libdeflate`) 14 kind 2's libdeflate (libdeflate 1.23, as oxipng has
+  it: each parser, levels 1, 2, 4, 5, 6, 8, 9, 10, 11, 12, raw and in a
+  zlib frame, one with a wrong Adler-32 and bytes after it, one with pad
+  bits set): 73.
+  `test_preflate tests/recipes 73 -golden` requires each recipe,
   read back, to give its stream bit for bit (on 1 thread and in segments on
   4) and to be written the same again; `.github/test.sh` runs it on the six
   platforms, 32 and 64 bits, with the C and the Pascal code. A vector is
@@ -681,6 +737,37 @@ added: 30 minutes each of `lib_ppa_chk` (libFuzzer, 104,314 runs) and
   (`mz_deflate` with `MZ_SYNC_FLUSH` or `MZ_FULL_FLUSH`), and
   miniz_oxide (Rust's port, which has parted from miniz's choices).
 
+## Status (M6, 16/11/2026): kind 2, libdeflate exact
+
+`pas/ppalibdeflate.pas` and `pas/ppaldfc.c` over `vendor/libdeflate`
+("Kind 2's libdeflate" above), in codec stream version 4.
+
+- **libdeflate itself**: `ppaldfc.c` built as PPA builds its C gives what
+  libdeflate 1.23 (Debian's) writes, byte for byte, on 216 cases (18
+  streams' bytes, levels 1 to 12) on x86-64 and on x86; 1.19, 1.23 and 1.26
+  agree on 130 of 130; 1.15 and 1.18 differ on 7 and 2 of 65. With no C
+  runtime it leaves no symbol undefined for x86-64, x86, arm64 (gcc),
+  Windows x64 and x86 (mingw) or clang (64 and 32 bits).
+- **oxipng 10.1.1**: its IDAT is libdeflate's level 10 for `-o1`, 11 for
+  `-o2`, 12 for `-o4`, `-o6` and `max` (3 photos, 5 presets each).
+- **The corpora** (`test_preflate`): `png-nonzlib`'s 5 oxipng images are
+  kind 2 now (were kind 3; 0 kind 3 left there); `hostile`'s
+  `zeros64m.ldf12` too; `tests/png3` has `rgb8-oxipng-o2.png` (oxipng
+  `-o2 --force`, written in version 4) and its two libdeflate images (6 and
+  12) are kind 2. Crafted: libdeflate's 12 levels of 40 KB of words, a
+  table, noise and zeros each come back as kind 2 (8 and 9 write the same
+  bytes), never with kind 2's encoders up to miniz (version 3); a kind-2
+  libdeflate recipe cut anywhere is refused, every value of every byte is
+  refused or rebuilt, and an unknown variant, level 0 or 13 do not rebuild.
+- **The hash gate** against the published 0.3.0, the benchmark's three
+  sets: corpus 70 and photos 20 `.ppa` the same byte for byte; generated
+  70 of 75 the same and its 5 oxipng files smaller: photo 316,583 ->
+  285,331 B, rgba 137,037 -> 109,996, art 55,285 -> 50,530, graphic
+  21,073 -> 19,690, icon 67,950 -> 66,107; the set 9,006,469 -> 8,940,195
+  B (57.52% -> 57.09%). Every file extracted and compared.
+- **Speed**: 15 oxipng photos (`-o1` to `max`), 8 at once: compressing
+  10.3 s (0.3.0, kind 3) -> 6.8 s.
+
 ## Credits
 
 The idea of rebuilding a deflate stream from its bytes and a small
@@ -692,3 +779,5 @@ flushes are zlib's own (`deflate.c`, `trees.c` of zlib 1.3.1, 1.2.5 and
 
 Kind 2's miniz is miniz's own tdefl (1.14 and 3.0.2; Rich Geldreich and
 contributors, MIT / public domain), ported into `ppaminiz` as NOTICE says.
+Kind 2's libdeflate is libdeflate's own compressor (1.26; Eric Biggers,
+MIT), unmodified in `vendor/libdeflate`, as NOTICE says.

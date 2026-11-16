@@ -12,6 +12,11 @@ BLAKE3 is pBLAKE3's (https://github.com/YadeWira/pBLAKE3, MIT, the same
 author: vendor/pja/pas/pjablake3.pas and b3chunks.c, as PJA vendors it).
 pas/ppacpu.pas is PJA's pjacpu under another name.
 
+vendor/libdeflate is libdeflate 1.26 (https://github.com/ebiggers/libdeflate,
+Copyright 2016 Eric Biggers, 2024 Google LLC, MIT: vendor/libdeflate/COPYING),
+its compressor's files unmodified, for the deflate recipes of kind 2's
+encoder 2 (doc/PREFLATE.md); pas/ppaldfc.c builds it.
+
 pas/ppazlib.pas is a port to FreePascal of the parts of zlib 1.3's
 deflate.c and trees.c that decide deflate's choices (hash chains,
 longest_match, deflate_fast, deflate_slow, deflate_rle, deflate_huff, and

@@ -13,6 +13,10 @@ that is checked.
     python3 tools/preflate/mkgolden.py --kind2 tests/recipes
                                                    kind 2's (miniz), added beside
                                                    the others (M5, 15/11/2026)
+    python3 tools/preflate/mkgolden.py --libdeflate tests/recipes
+                                                   kind 2's libdeflate (encoder 2,
+                                                   codec stream version 4; M6,
+                                                   16/11/2026)
 
 Run once per recipe format; the files are committed, not made again (a
 new format adds its own next to them). The encoders are the study's builds
@@ -116,6 +120,8 @@ def mixed(seed):
 def main():
     if sys.argv[1] == '--kind2':
         return kind2(sys.argv[2])
+    if sys.argv[1] == '--libdeflate':
+        return libdeflate(sys.argv[2])
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
     tmp = os.path.join(out, '.plain')
@@ -263,6 +269,75 @@ def kind2(out):
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
         open(os.path.join(out, name + '.' + ext), 'wb').write(data)
         man.append((name + '.' + ext, plain, len(plains[plain]), len(data), '%s %s 0x%x' % (t, plain, flags)))
+    with open(os.path.join(out, 'MANIFEST.tsv'), 'a') as f:
+        for r in man:
+            f.write('\t'.join(str(x) for x in r) + '\n')
+    for k in plains:
+        os.remove(os.path.join(tmp, k))
+    os.rmdir(tmp)
+    print('%d streams added in %s' % (len(man), out))
+
+
+def libdeflate(out):
+    """kind 2's libdeflate vectors (ppalibdeflate: libdeflate's compressor,
+    the study's ldf, libdeflate 1.23 as oxipng has it): each of its parsers
+    (level 1's, greedy 2-4, lazy 5-7, lazy2 8-9, near-optimal 10-12), raw,
+    and zlib-framed as libdeflate's zlib wrapper frames them, one with a
+    wrong Adler-32 and bytes after it, one with pad bits set; MANIFEST.tsv
+    appended, then -writegolden writes the recipes"""
+    tmp = os.path.join(out, '.plain')
+    os.makedirs(tmp, exist_ok=True)
+    plains = {
+        'photo': photo(96, 64, 1),
+        'drawing': drawing(160, 100, 2),
+        'text': open(os.path.join(REPO, 'doc', 'CODEC.md'), 'rb').read()[:14000],
+        'bin': binary(16000, 3),
+        'zipf': zipf(40000, 5),
+        'mixed': mixed(7),
+    }
+    for k, v in plains.items():
+        open(os.path.join(tmp, k), 'wb').write(v)
+    flg = {1: 0x01, 2: 0x5E, 3: 0x5E, 4: 0x5E, 5: 0x5E, 6: 0x9C}
+    cases = [('text', 1), ('bin', 2), ('drawing', 4), ('photo', 5), ('zipf', 6), ('text', 8), ('bin', 9),
+             ('photo', 10), ('mixed', 11), ('photo', 12), ('drawing', 12), ('zipf', 12)]
+    man = []
+    for plain, level in cases:
+        data = subprocess.run([os.path.join(BIN, 'ldf'), os.path.join(tmp, plain), str(level)], check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+        name = '%s-ldk2-L%d' % (plain, level)
+        if level in (6, 11):
+            # zlib-framed, as libdeflate_zlib_compress writes it
+            data = bytes([0x78, flg.get(level, 0xDA)]) + data + struct.pack('>I', zlib.adler32(plains[plain]))
+            ext, how = 'zlib', 'ldf %s %d in a zlib frame' % (plain, level)
+        else:
+            ext, how = 'raw', 'ldf %s %d' % (plain, level)
+        open(os.path.join(out, name + '.' + ext), 'wb').write(data)
+        man.append((name + '.' + ext, plain, len(plains[plain]), len(data), how))
+    d = open(os.path.join(out, 'photo-ldk2-L12.raw'), 'rb').read()
+    z = b'\x78\xda' + d + struct.pack('>I', zlib.adler32(plains['photo']) ^ 1) + b'tail'
+    open(os.path.join(out, 'photo-ldk2-L12-badadler-tail.zlib'), 'wb').write(z)
+    man.append(('photo-ldk2-L12-badadler-tail.zlib', 'photo', len(plains['photo']), len(z),
+                'photo-ldk2-L12.raw in a zlib frame, Adler-32 xor 1, 4 bytes after'))
+    # pad bits set: the first stream whose last byte has its top bit free
+    # (the same bytes decode with it set)
+    for plain, level in cases:
+        if level in (6, 11):
+            continue
+        name = '%s-ldk2-L%d' % (plain, level)
+        d = bytearray(open(os.path.join(out, name + '.raw'), 'rb').read())
+        padded = bytes(d[:-1]) + bytes([d[-1] | 0x80])
+        if padded == bytes(d):
+            continue
+        try:
+            o = zlib.decompressobj(-15)
+            ok = o.decompress(padded) == plains[plain] and o.eof
+        except zlib.error:
+            ok = False
+        if ok:
+            open(os.path.join(out, name + '-pad.raw'), 'wb').write(padded)
+            man.append((name + '-pad.raw', plain, len(plains[plain]), len(padded),
+                        name + '.raw with its last byte or 0x80 (pad bits)'))
+            break
     with open(os.path.join(out, 'MANIFEST.tsv'), 'a') as f:
         for r in man:
             f.write('\t'.join(str(x) for x in r) + '\n')

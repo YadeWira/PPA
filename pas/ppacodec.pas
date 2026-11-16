@@ -40,8 +40,9 @@ const
     channel before's residual among them); 3, each image's deflate recipe
     in ppapreflate's RecipeBytes (kinds 0 to 3: zlib with its flushes,
     miniz, and any deflate stream through a predictor and its
-    corrections). }
-  STREAM_VERSION = 3;
+    corrections); 4, version 3's and kind 2's libdeflate (encoder 2: the
+    same layout, a value a version 3 reader refuses). }
+  STREAM_VERSION = 4;
   { the oldest version Compress writes: what every file needs (version 1's
     static model is not written any more). A file writes the oldest
     version that holds everything in it, so a file the zlib parameters
@@ -387,6 +388,7 @@ end;
 function RecipeVersion(const recipe: TDeflRecipe): Integer;
 begin
   if recipe.kind = RECIPE_ZLIB then Result := 2
+  else if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_LIBDEFLATE) then Result := 4
   else if recipe.kind in [RECIPE_ZLIB_FLOW, RECIPE_ENCODER, RECIPE_CORR] then Result := 3
   else Result := High(Integer);
 end;
@@ -395,6 +397,12 @@ end;
 function MaxRecipeKind(streamVer: Integer): Integer;
 begin
   if streamVer >= 3 then Result := RECIPE_KIND_LAST else Result := RECIPE_ZLIB;
+end;
+
+{ kind 2's encoders a stream version holds }
+function MaxRecipeEncoder(streamVer: Integer): Integer;
+begin
+  if streamVer >= 4 then Result := ENC_LAST else Result := ENC_MINIZ;
 end;
 
 { Whether stream s can be kept as an image, and its plan. model: Compress's
@@ -417,7 +425,7 @@ begin
   { a recipe whose rebuild is the stream, bit for bit (checked); one the
     stream version the caller allows can hold (kind 0 is looked for
     first: a file of zlib's streams stays a version 2 stream) }
-  if FindRecipe(a, plan.z, plan.recipe, MaxRecipeKind(maxVersion), threads) <> dsOk then Exit;
+  if FindRecipe(a, plan.z, plan.recipe, MaxRecipeKind(maxVersion), threads, MaxRecipeEncoder(maxVersion)) <> dsOk then Exit;
   if RecipeVersion(plan.recipe) > maxVersion then Exit;
   { a model given takes every image it can (ChooseModel's trials skipped) }
   if (model = MODE_IMAGE) or ((model in [MODE_FAST, MODE_STATIC]) and FastEligible(info)) then
@@ -1055,6 +1063,9 @@ begin
           rrBad: Exit(Bad('bad deflate recipe'));
         end;
         if rpos <> Length(recipeRaw[s]) then Exit(Bad('bad deflate recipe'));
+        { a recipe its stream's version does not hold (encoder 2 in a
+          version 3 stream): damage, never written so }
+        if RecipeVersion(recipes[s]) > stream[0] then Exit(Bad('bad deflate recipe'));
         recipeRaw[s] := nil;
       end;
       if not InitLayout(info, pxs[s]) then Exit(Bad('bad image header'));

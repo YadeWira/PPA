@@ -23,7 +23,8 @@ static uint8_t **kept; static size_t *keptLen; static size_t nKept, capKept;
 
 static void *h_alloc(size_t n) { return malloc(n ? n : 1); }
 static void h_release(void *p) { free(p); }
-static void *h_open(int threads, int encode) { (void)threads; return (void *)(intptr_t)(encode + 1); }
+/* encode: 0 decoding, 1 to 3 encoding at that level (the pool's handle: 1, 2) */
+static void *h_open(int threads, int encode) { (void)threads; return (void *)(intptr_t)(encode ? 2 : 1); }
 static void h_wait(void *pool, job_t *j) { (void)pool; (void)j; }
 static void h_close(void *pool) { (void)pool; }
 
@@ -105,7 +106,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
   }
   io_t e = {data + 1, size - 1, 0, 0, 0, 0, data[0] & 2};
   capKept = 0;
-  int r = ppafilter_encode(fz_rd, &e, fz_wr, &e, 1 + (data[0] >> 4));
+  int r = ppafilter_encode(fz_rd, &e, fz_wr, &e, 1 + (data[0] >> 4), 1 + (data[0] >> 3 & 1) * 2);
   if (r != PPA_OK) { fprintf(stderr, "encode: %d\n", r); abort(); }
   if (!capKept) { capKept = 1; kept = malloc(sizeof *kept); keptLen = malloc(sizeof *keptLen); }
   io_t d = {e.o, e.on, 0, 0, 0, 0, data[0] & 4};

@@ -100,6 +100,8 @@ jobs:
           for d in "$CLI" "$LIBP"; do
             cp vendor/pja/LICENSE "$d/LICENSE-PJA"
             cp vendor/pja/NOTICE "$d/NOTICE-PJA"
+            # libdeflate's compressor (deflate recipes of kind 2): its license
+            cp vendor/libdeflate/COPYING "$d/LICENSE-libdeflate"
           done
           for d in "$CLI" "$LIBP"; do
             case $P in
