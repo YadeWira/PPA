@@ -781,6 +781,29 @@ added: 30 minutes each of `lib_ppa_chk` (libFuzzer, 104,314 runs) and
   (`tests/png3`): 30 minutes each of `lib_ppa_chk` (libFuzzer, 145,600
   runs) and `afl_ppa_chk` (AFL++, 43,418): nothing.
 
+## Studied, not done yet (M7, 16/11/2026): zlib-ng
+
+zlib-ng 2.0.7, 2.1.8, 2.2.5 and 2.3.3 built with and without SIMD
+(`WITH_OPTIM`), each level and strategy on 14 streams' bytes (scripts in
+`/mnt/IA_LAB/agentes/ppa/m7/`):
+
+- 2.2.x and 2.3.x write the same with and without SIMD, and the same as
+  2.1.8 without it: one variant would cover them on any CPU. 2.0.x and
+  2.1.x with SIMD differ at levels 1 to 5 (the CPU's).
+- It differs from zlib at every level but on some level 9 streams; its
+  Huffman-only, RLE and fixed strategies write zlib's (kind 0).
+- Unlike zlib, levels 1 (`deflate_quick`), 5 and 6 (`deflate_medium`)
+  depend on how the input is given (fed a row at a time, as libpng does,
+  31 of 117 streams differ from one call) and, more rarely, on the output
+  buffer (libpng's 8 KB; Python's growing blocks): a recipe would have to
+  name the program's feeding as well. Levels 2 to 4 and 7 to 9 do not.
+- The corpus's 1,820 PNGs: zlib-ng in 2 real files (Debian's apache2-doc,
+  level 6 a row at a time; 553 B of kind-3 corrections each), and the
+  study's own samples (`zlibng-1`, `-6`, `-9`: about 335 KB of the 731 KB
+  of kind-3 corrections the corpus's PNGs cost, nearly all level 1).
+
+Wira's decision: zopfli (M9) before zlib-ng.
+
 ## Credits
 
 The idea of rebuilding a deflate stream from its bytes and a small
