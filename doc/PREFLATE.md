@@ -764,7 +764,7 @@ added: 30 minutes each of `lib_ppa_chk` (libFuzzer, 104,314 runs) and
   70 of 75 the same and its 5 oxipng files smaller: photo 316,583 ->
   285,331 B, rgba 137,037 -> 109,996, art 55,285 -> 50,530, graphic
   21,073 -> 19,690, icon 67,950 -> 66,107; the set 9,006,469 -> 8,940,195
-  B (57.52% -> 57.09%). Every file extracted and compared.
+  B (57.52% -> 57.10%). Every file extracted and compared.
 - **Speed**: 15 oxipng photos (`-o1` to `max`), 8 at once: compressing
   10.3 s (0.3.0, kind 3) -> 6.8 s.
 - **The corpora's PNG streams by libdeflate and oxipng** (`png-synth`):
