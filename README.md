@@ -108,9 +108,11 @@ on one thread), as rebuilding the encoder's choices costs about as much as
 packPNG's whole decompression. One photo extracts in 0.29 s on 8 threads.
 0.3.0 rebuilds the streams zlib did not write (oxipng, miniz) instead of
 keeping them as bytes: generated 58.86% -> 57.52%, corpus 56.30% -> 56.22%.
-`ppa a --max` takes the slowest model for every image: 51.04%, 58.53% and
-55.39% of the three sets (measured with a build before 0.1.1), about ten
-times slower to extract.
+Three levels since 0.4.0 (8 at once; corpus, photos, generated): `-1`
+(`--fast`, no slow model where another takes the image) 58.79%, 60.51%,
+58.46%, extracting in 6.0, 2.1, 4.0 s; `-2`, the default, as above, in 18.0,
+2.3, 6.9 s; `-3` (`--max`, the slow model for every image) 50.96%, 58.53%,
+53.89%, in 52.3, 18.3, 13.1 s. Extracting needs no level.
 
 ## Safe by design
 
