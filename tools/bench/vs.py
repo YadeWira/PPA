@@ -9,7 +9,7 @@ the files; the others THREADS processes, one file each.
     python3 tools/bench/vs.py THREADS SET... (corpus photos generated)
 
 PPA (the ppa command) from $PPA, packPNG from $PACKPNG, precomp from
-$PRECOMP; the sets in /mnt/IA_LAB/agentes/ppa/sets, the work in $WORK."""
+$PRECOMP (PPA_ONLY=1: PPA alone); the sets in /mnt/IA_LAB/agentes/ppa/sets, the work in $WORK."""
 import os, sys, glob, subprocess, time, shutil, filecmp
 from concurrent.futures import ThreadPoolExecutor
 
@@ -64,6 +64,14 @@ for name in names:
     td = time.time() - t0
     size, taken = tally(files, lambda f: d + '/ppa/' + stem(f) + '.ppa', lambda f: d + '/ppax/' + os.path.basename(f))
     rows.append(('PPA', size, taken, tc, td))
+
+    # PPA_ONLY=1: PPA alone (the others' binaries unchanged since their last run)
+    if os.environ.get('PPA_ONLY'):
+        print(f'## {name}: {len(files)} files, {orig} bytes, {TH} at once')
+        for tool, size, taken, tc, td in rows:
+            print(f'  {tool:14} {size:>11} {100 * size / orig:6.2f}%  takes {taken}/{len(files)}  compress {tc:7.1f} s  decompress {td:7.1f} s')
+        sys.stdout.flush()
+        continue
 
     # packPNG 2.0b: its default (preflate + WebP-lossless), verifying
     tc = each(lambda f: quiet([PACKPNG, 'a', '-np', '-o', '-ver', '-th1', '-od' + d + '/ppg', f]), files)
