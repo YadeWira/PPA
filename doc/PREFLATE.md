@@ -886,6 +886,15 @@ zopfli" above), in codec stream version 5.
   sets at the default level: every `.ppa` the same, byte for byte (they
   hold no zopfli image); compressing 4 to 5% longer (zopfli's search on
   the streams that go to kind 3).
+- **CI** (a536fa5): the six platforms, 32 and 64 bits, give the same
+  hashes (`determinism`: `tests/png3`'s version 5 stream, zopfli's doubles
+  and log, the same bits on x86-64, x86, arm64, macOS and Windows). Apple's
+  clang has no `__builtin_setjmp` on arm64: macOS takes the system's
+  `_setjmp`. The zpaq-std tarball builds alone; the DLLs import only
+  kernel32, oleaut32 and user32.
+- **Fuzzing**, seeds with version 5 streams: 30 minutes each of
+  `lib_ppa_chk` (libFuzzer, 84,938 runs) and `afl_ppa_chk` (AFL++, 40,900):
+  nothing.
 
 ## Studied, not done yet (M7, 16/11/2026): zlib-ng
 
