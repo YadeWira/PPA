@@ -179,16 +179,16 @@ again, and `pas/run_tests.sh` fails while it is not current.
 ### `ppa --version`
 
 ```
-ppa 0.2.1
-stream_version: 1
+ppa 0.3.0
+stream_version: 3
 format_version: 1
-commit: 1854965
-built: 2026/11/07
+commit: 25bbe73
+built: 2026/11/15
 fpc: 3.2.2
 c_compiler: gcc 14.2.0
 c_simd: sse2
 target: x86_64-linux
-system: Linux 6.12.115 x86_64
+system: Linux 6.12.116+deb13-amd64 x86_64
 cpu: Intel(R) Xeon(R) CPU E5-2697A v4 @ 2.60GHz
 code_path: c
 jpeg_model_simd: sse4.1 avx2

@@ -41,9 +41,12 @@ comes back byte for byte, and nothing is written unless it verified.
 ## What it handles
 
 - **PNG**: every colour type and bit depth (1 to 16 bits, palette, alpha),
-  Adam7, any line filters; each zlib stream rebuilt from zlib's own
-  parameters (every level, strategy, window and memLevel), and its pixels
-  coded by one of three models chosen image by image.
+  Adam7, any line filters; its pixels coded by one of three models chosen
+  image by image, and its deflate stream rebuilt bit for bit: zlib's from
+  zlib's own parameters (every level, strategy, window and memLevel, its
+  flushes too), and since 0.3.0 miniz's from its flags and any other
+  encoder's (zopfli, libdeflate and oxipng, advpng, 7-Zip) from a
+  predictor and a few corrections.
 - **APNG**: every frame's stream, the same way.
 - **MNG**: the PNG and JNG images it embeds.
 - **JNG**: its JPEG through [PJA](https://github.com/YadeWira/PJA)'s codec.
@@ -52,9 +55,9 @@ comes back byte for byte, and nothing is written unless it verified.
 - Odd files: wrong CRCs, a file cut short, bytes after the end; taken and
   given back as they are, what can be recompressed recompressed.
 
-A deflate stream that zlib did not write (zopfli, libdeflate, advpng)
-goes through as bytes for now, and so does anything else; `ppa info` says
-what PPA does with a file ([details][wHandles]).
+An image whose pixels and recipe would not take less than its deflate
+stream (noise, a few colours) goes through as bytes, and so does anything
+else; `ppa info` says what PPA does with a file ([details][wHandles]).
 
 ## Install
 

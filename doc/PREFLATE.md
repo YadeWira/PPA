@@ -20,8 +20,8 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
 - **Codec stream version 3** (M4, PPA 0.3.0) holds any kind in
   **`RecipeBytes`**' format, below. Kind 0 is looked for first, so a file
   whose images are all zlib's alone is still written as version 2, the
-  same `.ppa` as before (M4's hash gate). Once 0.3.0 is published, format
-  2 is frozen by the versioning rule.
+  same `.ppa` as before (M4's hash gate). Format 2, published with
+  0.3.0 (kinds 0 to 3), is frozen by the versioning rule.
 
 ## Kinds
 

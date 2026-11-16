@@ -33,7 +33,7 @@ extension. A version past 1 is a newer PPA's.
 |---|---|---|---|
 | 1 | 0.1.0 | every release | the first: the structure, zlib's parameters, the three pixel models (slow, fast, static with 64 contexts), a JNG's JPEG through PJA's stream 7 |
 | 2 | 0.1.1 | 0.1.1 and later | the static model's 320 contexts (the channel before's residual in five levels) |
-| 3 | 0.3.0 | 0.3.0 and later | each image's deflate recipe in `RecipeBytes`' format 2 (doc/PREFLATE.md): zlib with its flushes (kind 1) and any deflate stream through a predictor and its corrections (kind 3); a file whose images are all zlib's alone is still written as version 2 |
+| 3 | 0.3.0 | 0.3.0 and later | each image's deflate recipe in `RecipeBytes`' format 2 (doc/PREFLATE.md): zlib with its flushes (kind 1), miniz by its flags (kind 2) and any deflate stream through a predictor and its corrections (kind 3); a file whose images are all zlib's alone is still written as version 2 |
 
 A recipe format, once a stream PPA wrote holds it, gives the same deflate
 stream for every recipe it accepts, forever: `tests/recipes/` holds
