@@ -85,8 +85,10 @@ and no exception leaves the library: errors are return codes.
 |---|---|
 | `ppa_version()` | `"ppa 0.3.0"` |
 | `ppa_compress(in, size, &out, &out_size, threads)` | a file of the PNG family → a `.ppa` (the command's format: size and BLAKE3 hash inside; no extension kept); `PPA_E_NOT_TAKEN` for a file PPA does not take or does not make smaller |
+| `ppa_compress_level(in, size, &out, &out_size, threads, level)` | the same at a level (since 0.4.0): `PPA_LEVEL_FAST` (1, the command's `-1`), `PPA_LEVEL_DEFAULT` (2, what `ppa_compress` does) or `PPA_LEVEL_MAX` (3, `-3`); another level is `PPA_E_ARG`. Nothing records it: every release since 0.2.0 reads a file of any level |
 | `ppa_decompress(in, size, &out, &out_size, max_size, threads)` | a `.ppa` → the original, checked against its size and hash; `PPA_E_VERSION` for one a newer PPA wrote |
 | `ppa_filter_encode(read, ctx, write, ctx, threads)` | the filter: every byte read → its stream, written |
+| `ppa_filter_encode_level(read, ctx, write, ctx, threads, level)` | the filter at a level, as `ppa_compress_level` (since 0.4.0) |
 | `ppa_filter_decode(read, ctx, write, ctx, threads)` | its stream → the bytes |
 | `ppa_free(p)` | frees what the library returned (never `free()`) |
 
@@ -140,6 +142,13 @@ be 7-Zip's: the x64 `ppa.dll` for 64-bit 7-Zip, the x86 one for 32-bit
 7z a -m0=PPA -m1=zstd  images.7z images/        # 7-Zip-zstd
 7z x images.7z
 ```
+
+7-Zip's level (`-mx`, or `-m0=PPA:x9` for PPA alone; since 0.4.0) picks
+PPA's: `-mx1` to `-mx3` its level 1 (no slow model where the fast or the
+static one takes the image: quicker to extract), `-mx4` to `-mx6` (`-mx5`
+is 7-Zip's default) level 2, `-mx7` to `-mx9` level 3 (the slow model for
+every image: smaller, ten to forty times slower to extract). Extracting
+needs nothing: the level is not written.
 
 A stream a newer PPA wrote (`PPA_E_VERSION`) comes out of the plugin as
 `E_NOTIMPL`, which 7-Zip reports as "Unsupported Method" for the block's

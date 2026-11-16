@@ -79,7 +79,8 @@ void ppa7z_host(const host7z_t *h) {
 
 typedef ptrdiff_t (PPA_CALL *ppa_read_fn)(void *ctx, void *buf, size_t size);
 typedef int (PPA_CALL *ppa_write_fn)(void *ctx, const void *buf, size_t size);
-int ppafilter_encode(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void *write_ctx, int threads);
+int ppafilter_encode(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void *write_ctx, int threads,
+                     int level);
 int ppafilter_decode(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void *write_ctx, int threads);
 
 /* The method: the filter (ppafilter.c), one stream, which goes on to the
@@ -104,7 +105,10 @@ static int is_iunknown(const guid_t *g) {
   for (int k = 0; k < 8; k++) if (g->d4[k] != d4[k]) return 0;
   return 1;
 }
-enum { G_STREAM = 3, G_CODER = 4, S_CODER = 0x05, S_CODER2 = 0x18, S_PROGRESS = 0x04, S_CODER_MT = 0x25 };
+enum { G_STREAM = 3, G_CODER = 4, S_CODER = 0x05, S_CODER2 = 0x18, S_PROGRESS = 0x04, S_CODER_MT = 0x25,
+       S_CODER_PROPS = 0x20 };
+/* NCoderPropID::kLevel: -mx (or -m0=PPA:x9), 0 to 9 */
+enum { PROP_LEVEL = 15 };
 
 /* ---------- the streams 7-Zip hands in ---------- */
 
@@ -351,15 +355,24 @@ typedef struct {
   uint32_t (COMCALL *Release)(void *);
   HRESULT (COMCALL *SetNumberOfThreads)(void *, uint32_t threads);
 } coder_mt_vt;
+typedef struct {
+  HRESULT (COMCALL *QueryInterface)(void *, const guid_t *, void **);
+  uint32_t (COMCALL *AddRef)(void *);
+  uint32_t (COMCALL *Release)(void *);
+  HRESULT (COMCALL *SetCoderProperties)(void *, const uint32_t *ids, const propvariant_t *props, uint32_t n);
+} coder_props_vt;
 struct coder {
   const coder_vt *vt;
   const coder_mt_vt *mt_vt;    /* ICompressSetCoderMt: a second table, at &c->mt_vt */
+  const coder_props_vt *props_vt;  /* ICompressSetCoderProperties (the encoder's), a third */
   int32_t refs;
   int encode, streams;
   int threads;
+  int level;                   /* PPA's: 1 to 3 */
 };
 
 static coder_t *from_mt(void *p) { return (coder_t *)((char *)p - offsetof(coder_t, mt_vt)); }
+static coder_t *from_props(void *p) { return (coder_t *)((char *)p - offsetof(coder_t, props_vt)); }
 
 static HRESULT COMCALL c_query(coder_t *c, const guid_t *iid, void **out);
 /* a plain count, as 7-Zip's own coders keep it (CMyUnknownImp): a coder is
@@ -377,7 +390,7 @@ static HRESULT COMCALL c_code(coder_t *c, instream_t *in, outstream_t *out, cons
   if (!in || !out) return E_INVALIDARG;
   run_t r = {progress, 0, 0, REPORT_EVERY, S_OK};
   io_t io = {in, out, &r};
-  int res = c->encode ? ppafilter_encode(io_read, &io, io_write, &io, c->threads)
+  int res = c->encode ? ppafilter_encode(io_read, &io, io_write, &io, c->threads, c->level)
                       : ppafilter_decode(io_read, &io, io_write, &io, c->threads);
   return result(&r, res);
 }
@@ -393,14 +406,33 @@ static HRESULT COMCALL m_threads(void *p, uint32_t threads) {
   return S_OK;
 }
 
+/* 7-Zip's level, 0 to 9 (5 by default), as PPA's: 1 (-1, --fast) up to 3,
+   2 (the default) from 4 to 6, 3 (-3, --max) from 7. No level, or another
+   property: PPA's default, and S_OK (each is optional for PPA). */
+static HRESULT COMCALL p_query(void *p, const guid_t *iid, void **out) { return c_query(from_props(p), iid, out); }
+static uint32_t COMCALL p_addref(void *p) { return c_addref(from_props(p)); }
+static uint32_t COMCALL p_release(void *p) { return c_release(from_props(p)); }
+static HRESULT COMCALL p_set(void *p, const uint32_t *ids, const propvariant_t *props, uint32_t n) {
+  coder_t *c = from_props(p);
+  if (n && (!ids || !props)) return E_INVALIDARG;
+  for (uint32_t k = 0; k < n; k++) {
+    if (ids[k] != PROP_LEVEL || props[k].vt != VT_UI4) continue;
+    uint32_t x = props[k].v.u32;
+    c->level = x <= 3 ? 1 : x <= 6 ? 2 : 3;
+  }
+  return S_OK;
+}
+
 static const coder_vt CODER_VT = {c_query, c_addref, c_release, c_code};
 static const coder_mt_vt CODER_MT_VT = {m_query, m_addref, m_release, m_threads};
+static const coder_props_vt CODER_PROPS_VT = {p_query, p_addref, p_release, p_set};
 
 static HRESULT COMCALL c_query(coder_t *c, const guid_t *iid, void **out) {
   if (!out) return E_INVALIDARG;
   *out = 0;
   if (is_iunknown(iid) || is_7zip_iid(iid, G_CODER, S_CODER)) *out = c;
   else if (is_7zip_iid(iid, G_CODER, S_CODER_MT)) *out = &c->mt_vt;
+  else if (c->encode && is_7zip_iid(iid, G_CODER, S_CODER_PROPS)) *out = &c->props_vt;
   else return E_NOINTERFACE;
   c_addref(c);
   return S_OK;
@@ -414,7 +446,8 @@ static HRESULT new_coder(uint32_t index, int encode, const guid_t *iid, void **o
   if (!c) return E_OUTOFMEMORY;
   c->streams = (int)METHODS[index].streams;
   c->vt = &CODER_VT;
-  c->mt_vt = &CODER_MT_VT; c->refs = 1; c->encode = encode;
+  c->mt_vt = &CODER_MT_VT; c->props_vt = &CODER_PROPS_VT; c->refs = 1; c->encode = encode;
+  c->level = 2;
   /* extracting, 7-Zip tells only the first coder of the chain that takes
      it (LZMA2 or zstd) how many threads to use: -mmt on the command line,
      else the processors (up to 8). A 32-bit 7-Zip keeps to its 2 (the

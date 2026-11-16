@@ -71,6 +71,20 @@ const char *PPA_CALL ppa_version(void);
    the original's). */
 int PPA_CALL ppa_compress(const void *in, size_t in_size, void **out, size_t *out_size, int threads);
 
+/* The levels (the command's -1, -2, -3): how each image's model is chosen.
+   None is written in the .ppa or the filter's stream: every release since
+   0.2.0 reads a file of any level. PPA_LEVEL_FAST never takes the slow
+   model for an image the fast or the static one takes (about ten times as
+   quick to extract it, a little larger on drawings); PPA_LEVEL_DEFAULT, as
+   ppa_compress and ppa_filter_encode; PPA_LEVEL_MAX, the slow model for
+   every image (smaller, ten to forty times slower to extract). Since
+   0.4.0. */
+enum { PPA_LEVEL_FAST = 1, PPA_LEVEL_DEFAULT = 2, PPA_LEVEL_MAX = 3 };
+
+/* ppa_compress at a level; another level: PPA_E_ARG */
+int PPA_CALL ppa_compress_level(const void *in, size_t in_size, void **out, size_t *out_size, int threads,
+                                int level);
+
 /* A .ppa -> the original, checked against its size and hash. max_size caps
    the original's size (0: no cap but the library's own, 2^31); it does not
    cap the memory a decode takes on the way (each image's pixels, up to
@@ -89,6 +103,9 @@ typedef int (PPA_CALL *ppa_write_fn)(void *ctx, const void *buf, size_t size);
 /* Every byte read -> the filter's stream, written. */
 int PPA_CALL ppa_filter_encode(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void *write_ctx,
                                int threads);
+/* ppa_filter_encode at a level (above); another level: PPA_E_ARG */
+int PPA_CALL ppa_filter_encode_level(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void *write_ctx,
+                                     int threads, int level);
 /* The filter's stream, read -> the original bytes, written. PPA_E_VERSION:
    a newer PPA wrote it (a filter version or a record it does not know, or a
    file's codec stream of a later version); what came before it may have

@@ -202,6 +202,18 @@ int main(int argc, char **argv) {
             "the same bytes on 1 thread", argv[a]);
       ppa_free(p2);
       if (!threaded) { threads_test(d, n, p, pn, argv[a]); threaded = 1; }
+      /* the levels: level 2 is ppa_compress; 1 and 3 come back too */
+      for (int lv = 1; lv <= 3; lv++) {
+        void *pl = 0, *bl = 0;
+        size_t pln = 0, bln = 0;
+        int rl = ppa_compress_level(d, n, &pl, &pln, 1, lv);
+        if (lv == 2) check(rl == PPA_OK && pln == pn && memcmp(pl, p, pn) == 0, "level 2: ppa_compress's bytes", argv[a]);
+        else if (rl == PPA_OK) {
+          check(ppa_decompress(pl, pln, &bl, &bln, 0, 1) == PPA_OK && bln == n && memcmp(bl, d, n) == 0,
+                lv == 1 ? "level 1 back" : "level 3 back", argv[a]);
+        } else check(rl == PPA_E_NOT_TAKEN, "level 1 or 3: taken or not", argv[a]);
+        ppa_free(pl); ppa_free(bl);
+      }
       taken++; insum += n; outsum += pn;
       r = ppa_decompress(p, pn, &back, &bn, 0, 2);
       check(r == PPA_OK && bn == n && memcmp(back, d, n) == 0, "decompress", argv[a]);
@@ -242,6 +254,10 @@ int main(int argc, char **argv) {
     check(ppa_compress(some, 8, &p, &pn, 1) == PPA_E_NOT_TAKEN, "compress, a signature alone: not taken", "");
     check(ppa_filter_encode(NULL, NULL, NULL, NULL, 1) == PPA_E_ARG, "filter, null functions", "");
     check(ppa_filter_decode(NULL, NULL, NULL, NULL, 1) == PPA_E_ARG, "filter decode, null functions", "");
+    check(ppa_compress_level(some, 8, &p, &pn, 1, 0) == PPA_E_ARG, "compress, level 0", "");
+    check(ppa_compress_level(some, 8, &p, &pn, 1, 4) == PPA_E_ARG, "compress, level 4", "");
+    check(ppa_filter_encode_level(rd, NULL, wr, NULL, 1, 0) == PPA_E_ARG, "filter, level 0", "");
+    check(ppa_filter_encode_level(rd, NULL, wr, NULL, 1, 4) == PPA_E_ARG, "filter, level 4", "");
   }
   static const size_t steps[] = {1 << 20, 4096, 1000, 7, 1};
   dst_t enc = {0};
@@ -268,6 +284,17 @@ int main(int argc, char **argv) {
     check(ppa_filter_encode(rd, &in, wr, &e, 1) == PPA_OK && e.n == enc.n && memcmp(e.d, enc.d, e.n) == 0,
           "filter: the same stream on 1 thread", "");
     free(e.d);
+  }
+  /* the levels: the default is level 2; levels 1 and 3 come back */
+  for (int lv = 1; lv <= 3; lv++) {
+    src_t in = {all, alln, 0, 1 << 20};
+    dst_t e = {0}, b = {0};
+    check(ppa_filter_encode_level(rd, &in, wr, &e, 4, lv) == PPA_OK, "filter encode at a level", "");
+    if (lv == 2) check(e.n == enc.n && memcmp(e.d, enc.d, e.n) == 0, "filter: level 2 is the default", "");
+    src_t in2 = {e.d, e.n, 0, 1 << 20};
+    check(ppa_filter_decode(rd, &in2, wr, &b, 4) == PPA_OK && b.n == alln && memcmp(b.d, all, alln) == 0,
+          "filter round trip at a level", "");
+    free(e.d); free(b.d);
   }
   /* damaged filter streams: about 300 bytes spread over the stream
      flipped, one at a time, and cut short at a few places */

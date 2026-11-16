@@ -67,7 +67,7 @@ typedef struct {
 typedef struct {
   void *(*alloc)(size_t size);
   void (*release)(void *p);
-  void *(*pool_open)(int threads, int encode);
+  void *(*pool_open)(int threads, int encode);  /* encode: 0 decoding, 1 to 3 the level */
   void (*pool_submit)(void *pool, job_t *job);
   void (*pool_wait)(void *pool, job_t *job);
   void (*pool_close)(void *pool);
@@ -278,8 +278,10 @@ static void retire(in_t *s, out_t *o) {
   s->np--; s->pbytes -= f->size;
 }
 
-int ppafilter_encode(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void *write_ctx, int threads) {
-  if (!read || !write || !H.alloc) return PPA_E_ARG;
+/* level: 1 to 3, Compress's (ppacodec's LEVEL_*), checked by the caller */
+int ppafilter_encode(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void *write_ctx, int threads,
+                     int level) {
+  if (!read || !write || !H.alloc || level < 1 || level > 3) return PPA_E_ARG;
   if (threads < 1) threads = 1;
   in_t s = {0};
   s.read = read; s.ctx = read_ctx; s.cap = WINDOW;
@@ -288,7 +290,7 @@ int ppafilter_encode(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void 
   s.buf = H.alloc(s.cap);
   s.files = H.alloc(sizeof(job_t) * (size_t)s.maxp);
   s.at = H.alloc(sizeof(size_t) * (size_t)s.maxp);
-  s.pool = H.pool_open(threads, 1);
+  s.pool = H.pool_open(threads, level);
   if (!s.buf || !s.files || !s.at || !s.pool) s.err = PPA_E_MEMORY;
   put(&o, MAGIC, sizeof MAGIC);
   size_t pos = 0;                                 /* where the search goes on */

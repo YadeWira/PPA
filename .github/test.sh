@@ -129,7 +129,18 @@ else
   for f in "$OUT"/7in/*; do
     cmp -s "$f" "$OUT/7x/$(basename "$f")" || { echo "FAIL: 7-Zip: $(basename "$f") does not come back"; exit 1; }
   done
-  echo "7-Zip with the PPA plugin: every sample back, $(wc -c < "$OUT/a.7z" | tr -d ' ') bytes"
+  # the level: -mx9 (PPA's 3, the slow model for every image) and -mx1
+  # (PPA's 1) come back; with Copy after PPA, -mx9 differs from -mx5
+  for x in 1 5 9; do
+    rm -rf "$OUT/7x$x"; mkdir -p "$OUT/7x$x"
+    (cd "$OUT/7in" && "../7z/7z$EXE" a -bso0 -bsp0 -mx$x -m0=PPA -m1=Copy ../l$x.7z .)
+    "$Z/7z$EXE" x -bso0 -bsp0 -o"$OUT/7x$x" "$OUT/l$x.7z"
+    for f in "$OUT"/7in/*; do
+      cmp -s "$f" "$OUT/7x$x/$(basename "$f")" || { echo "FAIL: 7-Zip -mx$x: $(basename "$f") does not come back"; exit 1; }
+    done
+  done
+  ! cmp -s "$OUT/l5.7z" "$OUT/l9.7z" || { echo "FAIL: 7-Zip: -mx9 does not reach PPA"; exit 1; }
+  echo "7-Zip with the PPA plugin: every sample back, $(wc -c < "$OUT/a.7z" | tr -d ' ') bytes; -mx1, 5 and 9 back"
 fi
 
 echo "== layer 1"

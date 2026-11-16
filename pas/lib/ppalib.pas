@@ -57,6 +57,7 @@ type
   THost = record
     alloc: function(size: SizeUInt): Pointer; cdecl;
     release: procedure(p: Pointer); cdecl;
+    { packing: 0 decoding; 1 to 3, encoding at that level (ppacodec's LEVEL_*) }
     poolOpen: function(threads, packing: LongInt): Pointer; cdecl;
     poolSubmit: procedure(pool: Pointer; job: PJob); cdecl;
     poolWait: procedure(pool: Pointer; job: PJob); cdecl;
@@ -68,7 +69,7 @@ type
 
 procedure ppafilter_host(constref h: THost); cdecl; external;
 function ppafilter_encode(read: TReadFn; readCtx: Pointer; write: TWriteFn; writeCtx: Pointer;
-  threads: LongInt): LongInt; cdecl; external;
+  threads, level: LongInt): LongInt; cdecl; external;
 function ppafilter_decode(read: TReadFn; readCtx: Pointer; write: TWriteFn; writeCtx: Pointer;
   threads: LongInt): LongInt; cdecl; external;
 
@@ -231,13 +232,13 @@ end;
 { one of the filter's jobs. Encoding: the file as PPA's codec stream, not
   ok when PPA does not take it. Decoding: the file back, of `expected`
   bytes. }
-procedure RunJob(var j: TJob; packing: Boolean; threads: Integer);
+procedure RunJob(var j: TJob; packing: Boolean; threads, level: Integer);
 var b: TBytes; why: string; st: TCodecStats; fail: TDecodeFailure;
 begin
   j.output := nil; j.outSize := 0; j.ok := 0; j.cause := 0;
   try
     if packing then begin
-      if not Compress(InBytes(j.input, j.size), b, why, st, True, threads) then Exit;
+      if not Compress(InBytes(j.input, j.size), b, why, st, True, threads, -1, STREAM_VERSION, level) then Exit;
     end else begin
       if not DecompressEx(InBytes(j.input, j.size), Int64(j.expected), b, why, fail, threads) then begin
         if fail = dfFuture then j.cause := 1
@@ -276,6 +277,7 @@ type
     queue: array of PJob;
     head, count: Integer;
     stop, packing: Boolean;
+    level: Integer;
     workers: array of TPoolThread;
     function Take(out j: PJob): Boolean;
   end;
@@ -297,7 +299,7 @@ begin
   while pool.Take(j) do
     if j = nil then RTLEventWaitFor(pool.work, 20)
     else begin
-      RunJob(j^, pool.packing, j^.threads);
+      RunJob(j^, pool.packing, j^.threads, pool.level);
       InterLockedExchange(j^.done, 1);
       RTLEventSetEvent(pool.finished);
     end;
@@ -316,6 +318,7 @@ begin
     p.work := RTLEventCreate;
     p.finished := RTLEventCreate;
     p.packing := packing <> 0;
+    p.level := packing;
     SetLength(p.queue, 64);
     SetLength(p.workers, threads);
     { a thread the system refuses (a host at its limit): the pool goes on
@@ -394,19 +397,20 @@ end;
 { ppa_compress and ppa_decompress run the codec on the caller's thread.
   out and outSize are pointers, not out parameters, so that a null one is
   an error and not a crash. }
-function ppa_compress(input: PByte; size: SizeUInt; output: PPByte; outSize: PSizeUInt;
-                      threads: LongInt): LongInt; cdecl;
+function ppa_compress_level(input: PByte; size: SizeUInt; output: PPByte; outSize: PSizeUInt;
+                            threads, level: LongInt): LongInt; cdecl;
 var ppa: TBytes; stored: Boolean; why: string;
 begin
   if (output = nil) or (outSize = nil) then Exit(PPA_E_ARG);
   output^ := nil; outSize^ := 0;
   if (input = nil) and (size > 0) then Exit(PPA_E_ARG);
+  if (level < LEVEL_FAST) or (level > LEVEL_MAX) then Exit(PPA_E_ARG);
   threads := Threads1to64(threads);
   try
     try
       { not taken, empty, not made smaller, or (a bug) not given back: the
         caller keeps the bytes its own way }
-      if not Pack(InBytes(input, size), '', True, ppa, stored, why, threads) or stored then
+      if not Pack(InBytes(input, size), '', True, ppa, stored, why, threads, level) or stored then
         Exit(PPA_E_NOT_TAKEN);
       if Hand(ppa, output^, outSize^) then Result := PPA_OK else Result := PPA_E_MEMORY;
     finally
@@ -415,6 +419,12 @@ begin
   except
     Result := PPA_E_MEMORY;
   end;
+end;
+
+function ppa_compress(input: PByte; size: SizeUInt; output: PPByte; outSize: PSizeUInt;
+                      threads: LongInt): LongInt; cdecl;
+begin
+  Result := ppa_compress_level(input, size, output, outSize, threads, LEVEL_DEFAULT);
 end;
 
 function ppa_decompress(input: PByte; size: SizeUInt; output: PPByte; outSize: PSizeUInt;
@@ -452,11 +462,22 @@ begin
   FreeMem(p);
 end;
 
+function ppa_filter_encode_level(read: TReadFn; readCtx: Pointer; write: TWriteFn; writeCtx: Pointer;
+                                 threads, level: LongInt): LongInt; cdecl;
+begin
+  if (level < LEVEL_FAST) or (level > LEVEL_MAX) then Exit(PPA_E_ARG);
+  try
+    Result := ppafilter_encode(read, readCtx, write, writeCtx, Threads1to64(threads), level);
+  except
+    Result := PPA_E_MEMORY;
+  end;
+end;
+
 function ppa_filter_encode(read: TReadFn; readCtx: Pointer; write: TWriteFn; writeCtx: Pointer;
                            threads: LongInt): LongInt; cdecl;
 begin
   try
-    Result := ppafilter_encode(read, readCtx, write, writeCtx, Threads1to64(threads));
+    Result := ppafilter_encode(read, readCtx, write, writeCtx, Threads1to64(threads), LEVEL_DEFAULT);
   except
     Result := PPA_E_MEMORY;
   end;
@@ -506,7 +527,8 @@ end;
 var host: THost; host7z: THost7z;
 
 exports
-  ppa_version, ppa_compress, ppa_decompress, ppa_free, ppa_filter_encode, ppa_filter_decode,
+  ppa_version, ppa_compress, ppa_compress_level, ppa_decompress, ppa_free, ppa_filter_encode,
+  ppa_filter_encode_level, ppa_filter_decode,
   GetNumberOfMethods, GetMethodProperty, CreateDecoder, CreateEncoder, CreateObject, GetModuleProp;
 
 begin
