@@ -27,7 +27,7 @@ program ppa;
 uses
   {$ifdef UNIX} cthreads, BaseUnix, {$endif}
   {$ifdef MSWINDOWS} Windows, {$endif}
-  SysUtils, Classes, ppablake3, ppaformat, ppacodec, ppafs, ppathreads, ppajoin,
+  SysUtils, Classes, pjablake3, ppaformat, ppacodec, ppafs, ppathreads, ppajoin,
   { the commands for reporting and checking (doc/CLI.md) }
   ppastage, ppainfo, ppasysinfo, ppareport, ppabench, ppaselftest, ppamodel,
   ppaconsole;
@@ -47,6 +47,9 @@ var
   outDir: string;          { --output-dir }
   force, keepCorrupt, dryRun, quiet, noVerify, cleanTemps: Boolean;
   threads: Integer;
+  { -1, -2, -3 (--fast, --max): Compress's level, and whether one was given }
+  level: Integer;
+  levelGiven: Boolean;
   { --stats, --json; report's --with-file; bench's -r }
   stats, jsonOut, withFile: Boolean;
   runs: Integer;
@@ -238,9 +241,13 @@ begin
   Writeln('  -f, --force          replace an existing output (only with something that verified)');
   Writeln('  -th N, --threads=N   threads (default: the processors, up to 8): several');
   Writeln('                       files at once, and spare ones to a large file''s images');
-  Writeln('  --max                a: the slow model for every image: smaller still (a tenth on');
+  Writeln('  -1, --fast           a: the level: no image with the slow model where the fast');
+  Writeln('                       or static one takes it: extracts quicker, a little larger');
+  Writeln('  -2                   a: the default: the slow model too where it gains much');
+  Writeln('                       (drawings)');
+  Writeln('  -3, --max            a: the slow model for every image: smaller still (a tenth on');
   Writeln('                       photographs, more on drawings), ten to forty times slower to');
-  Writeln('                       extract; x needs no switch');
+  Writeln('                       extract; x needs no level (info and bench take one too)');
   Writeln('  --no-verify          a: do not decompress the stream to check it before writing:');
   Writeln('                       faster, but a codec bug would only show when extracting');
   Writeln('                       (the hash catches it then)');
@@ -312,7 +319,7 @@ begin
 end;
 
 procedure ParseArgs;
-var i: Integer; a, v: string; n: Integer; onlyFiles: Boolean;
+var i: Integer; a, a1, v: string; n: Integer; onlyFiles: Boolean;
 
   function NextValue: string;
   begin
@@ -321,12 +328,20 @@ var i: Integer; a, v: string; n: Integer; onlyFiles: Boolean;
     Result := args[i];
   end;
 
+  { one level, however often it is given }
+  procedure TakeLevel(l: Integer);
+  begin
+    if levelGiven and (l <> level) then UsageError(a1 + ' and ' + a + ': two levels');
+    level := l; levelGiven := True; a1 := a;
+  end;
+
 begin
   command := cmNone; inputs := TStringList.Create;
   outArg := ''; outDir := ''; force := False; keepCorrupt := False; dryRun := False; quiet := False;
   noVerify := False; cleanTemps := False;
   stats := False; jsonOut := False; withFile := False; runs := 3; runsGiven := False; thGiven := False;
   pathGiven := False;
+  level := LEVEL_DEFAULT; levelGiven := False;
   threads := DefaultThreads;
   maxOutput := DEFAULT_MAX_OUTPUT;
   ReadArgs;
@@ -370,7 +385,9 @@ begin
     else if (a = '-n') or (a = '--dry-run') then dryRun := True
     else if (a = '-q') or (a = '--quiet') then quiet := True
     else if a = '--keep-corrupt' then keepCorrupt := True
-    else if a = '--max' then FastModel := False
+    else if (a = '-1') or (a = '--fast') then TakeLevel(LEVEL_FAST)
+    else if a = '-2' then TakeLevel(LEVEL_DEFAULT)
+    else if (a = '-3') or (a = '--max') then TakeLevel(LEVEL_MAX)
     else if a = '--no-verify' then noVerify := True
     else if a = '--clean-temps' then cleanTemps := True
     else if a = '--no-sync' then SyncToDisk := False
@@ -403,7 +420,7 @@ begin
   if (outArg <> '') and (outDir <> '') then UsageError('-o and --output-dir together');
   if (command in [cmList, cmTest, cmInfo, cmBench, cmSelftest]) and ((outArg <> '') or (outDir <> '')) then
     UsageError(args[CommandIndex] + ' writes nothing');
-  if not FastModel and (command <> cmCompress) then UsageError('--max is for a');
+  if levelGiven and not (command in [cmCompress, cmInfo, cmBench]) then UsageError(a1 + ' is for a, info and bench');
   if noVerify and (command <> cmCompress) then UsageError('--no-verify is for a');
   if stats and not (command in [cmCompress, cmExtract, cmTest]) then UsageError('--stats is for a, x and t');
   if jsonOut and not (command in [cmCompress, cmExtract, cmTest, cmInfo, cmList]) then
@@ -793,7 +810,7 @@ begin
   if not ReadWhole(f, d) then Exit;
   if IsPpa(d) then begin Fail(f + ': already a .ppa'); Exit; end;
   { the extension, as it is written, for x to give it back }
-  ok := Pack(d, Copy(ExtractFileExt(f), 2, MaxInt), not noVerify, pp, stored, why, st, CurJob^.threads);
+  ok := Pack(d, Copy(ExtractFileExt(f), 2, MaxInt), not noVerify, pp, stored, why, st, CurJob^.threads, level);
   CurJob^.bands := st.bands;
   if not ok then begin Fail(f + ': ' + why); Exit; end;
   note := '';
@@ -871,7 +888,7 @@ procedure InfoOne(const f: string);
 var d: TBytes; n, bug: TInfoNode; sl: TStringList;
 begin
   if not ReadWhole(f, d) then Exit;
-  n := DescribeFile(f, d, False, CurJob^.threads, maxOutput, True);
+  n := DescribeFile(f, d, False, CurJob^.threads, maxOutput, True, level);
   bug := n.Find('internal_error');
   if bug <> nil then begin
     CurJob^.bug := True;
@@ -1239,7 +1256,7 @@ begin
   StagesOn := stats;
   case command of
     cmReport: Finish(DoReport);
-    cmBench: Finish(RunBench(inputs, runs, threads));
+    cmBench: Finish(RunBench(inputs, runs, threads, level));
     { --path: that path alone }
     cmSelftest: Finish(RunSelftest(quiet, pathGiven, pathWanted));
   end;

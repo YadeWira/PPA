@@ -24,7 +24,7 @@ function RunSelftest(quiet: Boolean; onePath: Boolean = False; only: TCodePath =
 
 implementation
 
-uses SysUtils, ppablake3, ppaformat, ppacodec, ppainfo;
+uses SysUtils, pjablake3, ppaformat, ppacodec, ppainfo;
 
 {$I ppaselftest.inc}
 
@@ -36,11 +36,10 @@ end;
 function RunSelftest(quiet: Boolean; onePath: Boolean; only: TCodePath): Integer;
 const THREAD_COUNTS: array[0..1] of Integer = (1, 2);
 var was, p: TCodePath; k, t, checks, failed, pathFailed, paths, wasModel: Integer; data, got, back: TBytes;
-    stored, wasFast, wasKeep: Boolean; why, detail, names: string; desc: TDescriptor; e: TFormatError;
+    stored, wasKeep: Boolean; why, detail, names: string; desc: TDescriptor; e: TFormatError;
 begin
   was := CurrentCodePath;
   wasModel := TestModel;
-  wasFast := FastModel;
   wasKeep := TestKeepStream;
   checks := 0; failed := 0; paths := 0; names := '';
   if not quiet then begin
@@ -57,8 +56,6 @@ begin
     end;
   end;
   try
-    { the default model choice, whatever the command line said (--max) }
-    FastModel := True;
     { each sample's stream, even where it is no smaller than the sample }
     TestKeepStream := True;
     for p := Low(TCodePath) to High(TCodePath) do begin
@@ -99,7 +96,6 @@ begin
   finally
     SetCodePath(was);
     TestModel := wasModel;
-    FastModel := wasFast;
     TestKeepStream := wasKeep;
   end;
   if failed = 0 then begin

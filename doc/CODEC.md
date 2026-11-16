@@ -25,14 +25,15 @@ over a large corpus, is the oracle for the whole project.
 | 2 | `ppapreflate` | one deflate stream's API, independent of PNG (for PDA too): stream ↔ its bytes + a recipe (the framing, and how the deflate data is made: kind 0, zlib's parameters; kind 1, and zlib's flushes and parameter changes; kind 2, miniz's flags; kind 3, a predictor and its corrections; `PREFLATE.md`), checked bit for bit; the codec keeps each image stream's recipe | kind 0 (zlib's parameters exact), written as stream version 2 writes it; kinds 1 (zlib's flushes), 2 (miniz exact) and 3 (a zlib-like predictor and corrections: any stream) in codec stream version 3 |
 | 3 | `ppapixels` | filtered scanlines ↔ pixels + each line's filter, interlaced or not | done |
 | 4 | `ppaarith` | binary arithmetic coder, adaptive bit counters, stretch and squash | done |
-| 5 | `ppastatic`, `ppafast`, `ppamodel` | modelling the pixels (three models, chosen by image; the slow one for all with `--max`), the deflate corrections and the raw bytes | static and fast models; slow one, second version |
+| 5 | `ppastatic`, `ppafast`, `ppamodel` | modelling the pixels (three models, chosen by image and level: never the slow one for an image the others take with `-1`, the slow one for all with `-3`), the deflate corrections and the raw bytes | static and fast models; slow one, second version |
 | 6 | `ppacodec` | the compressed stream, verified at compress time | done |
 | 7 | `ppaformat`, `ppacli` | the `.ppa` file (`FORMAT.md`) and the `ppa` command (`CLI.md`) | done |
 
 A JNG's JPEG (JDAT, and JDAA for its alpha) goes to PJA's codec: its Pascal
 units and C, vendored unmodified from PJA's release tarball (`vendor/pja`,
 as zpaq-std, PMPA and POA vendor it): PJA 0.6.1 until 0.1.1, PJA 0.9.8
-since (12/11/2026; it reads every stream 0.6.1 wrote). The JPEG is
+from 0.2.0 to 0.3.0, PJA 0.9.13 since (16/11/2026; each reads every
+stream 0.6.1 wrote). The JPEG is
 kept as its bytes when PJA does not take it or does not make it smaller.
 
 Each layer has its test in `pas/tests/`, and nothing moves up to the next
@@ -231,7 +232,7 @@ And each image stream kept as an **image** follows, band by band, a
 substream each: for the images of 8-bit samples that are not a palette,
 `EncodeImageStatic` (its own bytes, below), `CodeImageFast` or
 `CodeImageBand`, as the choice below says; `CodeImageBand` for the others,
-and for every image with `--max`. A non-interlaced image goes in horizontal
+and for every image with `-3` (`--max`). A non-interlaced image goes in horizontal
 bands of at least 2 MB unfiltered (`BAND_BYTES`), at most 16; an
 interlaced one in one. Each band has its own model and reads nothing
 before its own first line (its first line has none above, its match model
@@ -404,7 +405,11 @@ of them) or all of it when smaller, and the slow model takes the image
 when it is at least 10% smaller there. Photographs stay with the fast one;
 the corpus goes from 57.37% (every image fast) to 55.02% (the slow model
 everywhere: 51.03%). The sample costs about 0.3 s a photo when
-compressing. `--max` takes the slow model for every image.
+compressing. The levels (`ppa -1`, `-2`, `-3`, `Compress`'s `level`,
+written nowhere: the stream keeps each image's model) change only this
+choice: `-1` skips the slow model's trial (the static or the fast one
+takes the image), `-2` is the choice above, `-3` (`--max`) takes the slow
+model for every image.
 
 **Decompressing the 20 photos, one thread** (116 MB of pixels): 116 s to
 27.5 s. The model was 90% of it; then zlib's choices rebuilt, the filters,
@@ -496,7 +501,8 @@ choices took 7.6 s, the skip links half of it.
 - **The verification**: each image's deflate stream is not written again;
   what the decoder refilters is compared with the inflated bytes, whose
   stream the parameters were checked to give when planned.
-- **BLAKE3**: PJA's C (four chunks at a time in SSE2) for `ppablake3` too.
+- **BLAKE3**: PJA's C (four chunks at a time in SSE2); since 0.4.0 pBLAKE3's
+  (`pjablake3` and `b3chunks.c`, 4, 8 or 16 chunks at a time as the CPU allows).
 - **The deflate streams rebuilt on several threads** (levels 4 to 9,
   default or filtered strategy), the same tokens and blocks: each segment
   is parsed on its own from its start, the window before it inserted first

@@ -45,8 +45,10 @@ A file the codec does not take (not of the family) or does not make
 smaller is stored as it is: 37 bytes more than the original, and its
 extension. Then `orig_size` has to be the payload's length exactly.
 
-The hash is BLAKE3 truncated to 128 bits, in Pascal (`pas/ppablake3.pas`,
-PJA's), checked against the official vectors (`pas/tests/kat.txt`).
+The hash is BLAKE3 truncated to 128 bits, from pBLAKE3
+(https://github.com/YadeWira/pBLAKE3, `pjablake3` and `b3chunks.c`, as
+PJA vendors it in `vendor/pja`; PPA's own copy of PJA's code until 0.3.0,
+the same hash), checked against the official vectors (`pas/tests/kat.txt`).
 
 ## Limits
 

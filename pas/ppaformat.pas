@@ -28,7 +28,7 @@ unit ppaformat;
 
 interface
 
-uses SysUtils, ppablake3, ppacodec;
+uses SysUtils, pjablake3, ppacodec;
 
 const
   FORMAT_VERSION = 1;
@@ -73,12 +73,14 @@ function ValidExtension(const ext: string): Boolean;
 
 { original -> .ppa. ext: the original's extension (left out if not valid).
   stored when the codec does not take the file or does not make it smaller;
-  why says why it was stored ('' when it was not). threads: the codec's
-  (ppacodec.Compress); stats: what the codec did with it. }
+  why says why it was stored ('' when it was not). threads and level: the
+  codec's (ppacodec.Compress); stats: what the codec did with it. }
 function Pack(const original: TBytes; const ext: string; verify: Boolean;
-  out ppa: TBytes; out stored: Boolean; out why: string; threads: Integer = 1): Boolean;
+  out ppa: TBytes; out stored: Boolean; out why: string; threads: Integer = 1;
+  level: Integer = LEVEL_DEFAULT): Boolean;
 function Pack(const original: TBytes; const ext: string; verify: Boolean;
-  out ppa: TBytes; out stored: Boolean; out why: string; out stats: TCodecStats; threads: Integer): Boolean;
+  out ppa: TBytes; out stored: Boolean; out why: string; out stats: TCodecStats; threads: Integer;
+  level: Integer = LEVEL_DEFAULT): Boolean;
 { The header and descriptor, validated }
 function Inspect(const ppa: TBytes; out d: TDescriptor): TFormatError;
 { .ppa -> original. maxOut: the caller's cap (0 = none). detail: the
@@ -183,14 +185,14 @@ begin
 end;
 
 function Pack(const original: TBytes; const ext: string; verify: Boolean;
-  out ppa: TBytes; out stored: Boolean; out why: string; threads: Integer): Boolean;
+  out ppa: TBytes; out stored: Boolean; out why: string; threads, level: Integer): Boolean;
 var stats: TCodecStats;
 begin
-  Result := Pack(original, ext, verify, ppa, stored, why, stats, threads);
+  Result := Pack(original, ext, verify, ppa, stored, why, stats, threads, level);
 end;
 
 function Pack(const original: TBytes; const ext: string; verify: Boolean;
-  out ppa: TBytes; out stored: Boolean; out why: string; out stats: TCodecStats; threads: Integer): Boolean;
+  out ppa: TBytes; out stored: Boolean; out why: string; out stats: TCodecStats; threads, level: Integer): Boolean;
 var
   stream, payload: TBytes; e: string; h: THash16;
   pos, i: SizeInt; check: LongWord;
@@ -199,7 +201,7 @@ begin
   ppa := nil; why := ''; stored := False;
   stats := Default(TCodecStats);
   if Length(original) = 0 then begin why := 'empty file'; Exit; end;
-  stored := not Compress(original, stream, why, stats, verify, threads);
+  stored := not Compress(original, stream, why, stats, verify, threads, -1, STREAM_VERSION, level);
   if not stored and (Length(stream) >= Length(original)) and not TestKeepStream then begin
     stored := True; why := 'the codec does not make it smaller';
   end;

@@ -19,7 +19,7 @@ unit ppainfo;
 
 interface
 
-uses SysUtils, Classes;
+uses SysUtils, Classes, ppacodec;
 
 type
   TInfoKind = (ikObject, ikList, ikText, ikNumber, ikBool);
@@ -67,12 +67,13 @@ procedure DescribeData(const d: TBytes; n: TInfoNode);
   it is. dryRun False: no dry run (a file above REPORT_ESTIMATE_MAX in a
   report), a note instead. One line of text in `line`. }
 procedure DescribeAction(const d: TBytes; const ext: string; verify: Boolean; threads: Integer;
-                         maxOutput: QWord; dryRun: Boolean; n: TInfoNode; out line: string);
+                         maxOutput: QWord; dryRun: Boolean; n: TInfoNode; out line: string;
+                         level: Integer = LEVEL_DEFAULT);
 { A file for `ppa info` and `ppa report`: its name, then its structure
   (DescribeData), then what PPA does with it, as "ppa" (DescribeAction).
   The caller frees it. }
 function DescribeFile(const name: string; const d: TBytes; verify: Boolean; threads: Integer;
-                      maxOutput: QWord; dryRun: Boolean): TInfoNode;
+                      maxOutput: QWord; dryRun: Boolean; level: Integer = LEVEL_DEFAULT): TInfoNode;
 { a string for JSON, quoted; bytes that are not UTF-8 go as \u00XX }
 function JsonString(const s: string): string;
 { bytes as hex digits }
@@ -84,7 +85,7 @@ function DotNumber(v: Double; digits: Integer): string;
 
 implementation
 
-uses ppablake3, ppaformat, ppacodec, ppapng, ppapixels;
+uses pjablake3, ppaformat, ppapng, ppapixels;
 
 function DotNumber(v: Double; digits: Integer): string;
 var fs: TFormatSettings;
@@ -556,7 +557,7 @@ begin
 end;
 
 procedure DescribeAction(const d: TBytes; const ext: string; verify: Boolean; threads: Integer;
-                         maxOutput: QWord; dryRun: Boolean; n: TInfoNode; out line: string);
+                         maxOutput: QWord; dryRun: Boolean; n: TInfoNode; out line: string; level: Integer);
 var ppa, orig: TBytes; desc: TDescriptor; e: TFormatError; detail, why, models: string; stored, ok: Boolean;
     st: TCodecStats; m: Integer; o: TInfoNode; cap: QWord;
 begin
@@ -585,7 +586,7 @@ begin
     Exit;
   end;
   n.Bool('estimated', True);
-  ok := Pack(d, ext, verify, ppa, stored, why, st, threads);
+  ok := Pack(d, ext, verify, ppa, stored, why, st, threads, level);
   n.Bool('ok', ok);
   if not ok then begin
     n.Bool('takes', False);
@@ -622,7 +623,7 @@ begin
 end;
 
 function DescribeFile(const name: string; const d: TBytes; verify: Boolean; threads: Integer;
-                      maxOutput: QWord; dryRun: Boolean): TInfoNode;
+                      maxOutput: QWord; dryRun: Boolean; level: Integer): TInfoNode;
 var act, bug: TInfoNode; summary, ext: string;
 begin
   Result := TInfoNode.Create(ikObject);
@@ -638,7 +639,7 @@ begin
   ext := ExtractFileExt(name);
   if ext <> '' then Delete(ext, 1, 1);
   try
-    DescribeAction(d, ext, verify, threads, maxOutput, dryRun, act, summary);
+    DescribeAction(d, ext, verify, threads, maxOutput, dryRun, act, summary, level);
   except
     on e: Exception do begin
       summary := 'internal error: ' + e.ClassName + ': ' + e.Message;

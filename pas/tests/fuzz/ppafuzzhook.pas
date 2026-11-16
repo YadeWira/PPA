@@ -6,7 +6,7 @@
   it hides from a fuzzer the exceptions that are bugs: a range or overflow
   check (-Cr -Co, or the units' own $R+ $Q+), an access violation that
   FreePascal turned into EAccessViolation, an explicit ERangeError of a
-  bounds check (ppacrc, ppablake3), an invalid pointer.
+  bounds check (ppacrc, pjablake3), an invalid pointer.
 
   This unit hooks RaiseProc, which the RTL calls on every raise before any
   handler runs: an exception of any class but the plain Exception (what

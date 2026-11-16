@@ -30,7 +30,7 @@ unit ppafs;
 interface
 
 uses
-  SysUtils, ppablake3;
+  SysUtils, pjablake3;
 
 
 type

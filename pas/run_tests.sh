@@ -155,8 +155,11 @@ echo "== layer 6: the codec (every file compressed, verified, decompressed)"
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png3" 5 | tail -1
 # bands: 4 KB ones, so that the samples have several, decoded last first
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
-# --max: every image with the slow model
+# --max (-3): every image with the slow model
 PPA_TEST_MAX=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
+# --fast (-1): no image with the slow model that the fast or the static one takes
+PPA_TEST_LEVEL=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
+PPA_TEST_LEVEL=1 "$OUT/test_codec" "$PPA/tests/png3" 5 | tail -1
 # each deflate stream rebuilt in segments on 4 threads (ppazlib's ParallelSlow), the small samples too
 PPA_TEST_PAR_BYTES=512 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 PPA_TEST_MAX=1 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1

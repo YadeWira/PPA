@@ -1,10 +1,12 @@
-{ ppablake3 against the vectors of the official implementation (kat.txt, the
-  "b3" lines): every size there, whole, split into two ranges, and fed in
-  pieces of several sizes, which have to give the same hash. A range
-  outside the buffer has to be refused. From PJA's test. }
+{ pBLAKE3 (pjablake3, as PJA vendors it) against the vectors of the
+  official implementation (kat.txt, the "b3" lines): every size there,
+  whole, split into two ranges, and fed in pieces of several sizes, which
+  have to give the same hash; in Pascal, then with the C chunk routine
+  (b3chunks.c, which pjav7 installs). A range outside the buffer has to be
+  refused. From PJA's test. }
 program test_blake3;
 {$I ../ppa.inc}
-uses SysUtils, Classes, ppablake3;
+uses SysUtils, Classes, pjablake3, pjav7;
 var cells, failures: Integer;
 procedure Check(ok: Boolean; const what: string);
 begin Inc(cells); if ok then Writeln('  ', what:58, '  ok') else begin Inc(failures); Writeln('  ', what:58, '  FAIL'); end; end;
@@ -33,13 +35,17 @@ begin
   Result := h.Final;
 end;
 
-var kat: TStringList; l, how: string; fields: TStringArray; n, nb3, cut, s: Integer;
-    d, x: TBytes; h: THash16; raised, same: Boolean;
+var kat: TStringList; l, how: string; fields: TStringArray; n, nb3, cut, s, pass: Integer;
+    d, x: TBytes; h: THash16; raised, same: Boolean; chunks: TBlake3Chunks;
 const STEPS: array[0..5] of Integer = (1, 7, 63, 64, 65, 1024);
 begin
   cells := 0; failures := 0; nb3 := 0;
   kat := TStringList.Create; kat.LoadFromFile(ParamStr(1));
-  how := '';
+  chunks := Blake3Chunks;
+  Check(Assigned(chunks), 'the C chunk routine is installed');
+  for pass := 0 to 1 do begin
+  if pass = 0 then begin Blake3Chunks := nil; how := ' (Pascal)'; end
+  else begin Blake3Chunks := chunks; how := ' (C chunks)'; end;
   for l in kat do begin
     if (l = '') or (l[1] = '#') then Continue;
     fields := l.Split(' ');
@@ -58,8 +64,9 @@ begin
         if Hex(InPieces(d, s)) <> fields[2] then same := False;
     Check(same, '  fed in pieces of 1, 7, 63, 64, 65, 1024 B');
   end;
+  end;
   kat.Free;
-  Check(nb3 >= 12, Format('vectors read: %d', [nb3]));
+  Check(nb3 >= 24, Format('vectors read: %d', [nb3]));
 
   x := nil;
   h := Blake3_128(x, 0, 0, nil, 0, 0);
@@ -72,5 +79,5 @@ begin
   Check(raised, 'a negative start is refused');
 
   Writeln(cells, ' cells, ', failures, ' failures');
-  if (failures > 0) or (cells < 36) then Halt(1);
+  if (failures > 0) or (cells < 72) then Halt(1);
 end.

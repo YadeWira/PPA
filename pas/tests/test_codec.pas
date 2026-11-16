@@ -20,11 +20,13 @@ var
   files: TStringList; sr: TSearchRec; dir, name, why: string;
   i, minimum: Integer; verbose: Boolean;
   d, st, back: TBytes; stats: TCodecStats;
-  taken, failures, inBytes, outBytes, notTaken, images, raws: Int64; th: Integer;
+  taken, failures, inBytes, outBytes, notTaken, images, raws: Int64; th, level: Integer;
   t0: TDateTime;
 begin
-  { PPA_TEST_MAX=1: every image with the slow model (ppa --max) }
-  if GetEnvironmentVariable('PPA_TEST_MAX') = '1' then FastModel := False;
+  { PPA_TEST_MAX=1: every image with the slow model (ppa --max, -3);
+    PPA_TEST_LEVEL=1, 2 or 3: that level }
+  level := StrToIntDef(GetEnvironmentVariable('PPA_TEST_LEVEL'), LEVEL_DEFAULT);
+  if GetEnvironmentVariable('PPA_TEST_MAX') = '1' then level := LEVEL_MAX;
   th := StrToIntDef(GetEnvironmentVariable('PPA_TEST_THREADS'), 1);
   dir := ParamStr(1); minimum := StrToIntDef(ParamStr(2), 1); verbose := ParamStr(3) = '-v';
   files := TStringList.Create; files.Sorted := True;
@@ -38,7 +40,7 @@ begin
     d := ReadFile(files[i]);
     name := ExtractFileName(files[i]);
     try
-      if not Compress(d, st, why, stats, True, th) then begin
+      if not Compress(d, st, why, stats, True, th, -1, STREAM_VERSION, level) then begin
         Inc(notTaken);
         if Pos('bug', why) > 0 then begin Inc(failures); Writeln('  FAIL ', why, '  ', name); end
         else if verbose then Writeln('  not taken: ', why, '  ', name);

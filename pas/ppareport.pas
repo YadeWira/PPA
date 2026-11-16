@@ -43,7 +43,7 @@ function CopyBeside(const fileName: string; const data: TBytes; const dir: strin
 
 implementation
 
-uses Classes, ppablake3, ppainfo, ppasysinfo, ppafs;
+uses Classes, pjablake3, ppainfo, ppasysinfo, ppafs;
 
 function UrlEncode(const s: string): string;
 var i: Integer; c: Char;

@@ -1,8 +1,102 @@
-# PJA 0.9.8: the zpaq-std plugin, vendored
+# PJA 0.9.13: the zpaq-std plugin, vendored
 
-PJA (https://github.com/YadeWira/PJA), tag `v0.9.8`, commit `e89a500`:
+PJA (https://github.com/YadeWira/PJA), tag `v0.9.13`, commit `978faeb`:
 only the sources the zpaq-std plugin is built from. MIT (`LICENSE`);
 `NOTICE` has the third-party notes.
+
+## What is new in 0.9.13
+
+The 31 codecs write and read the same streams with the same ZPAQL, and
+take what 0.9.12's took. 0.9.13's change is in the command and libpja: the
+samples of a JPEG-LS file or of a lossless JPEG may go with blended
+predictors, version 5's byte 1 = 2 (MODEL_BLEND), only in a `.pja`. The
+plugin compresses without parts, so it never writes it, and `pjals`,
+`pjalsx` and `pjall` (and their z, o and 8 codecs) now also refuse a
+stream with byte 1 other than 0 when asked for their ZPAQL's arguments,
+so that such a stream could never reach their frozen ZPAQL.
+
+Checked: built from this directory alone, the plugin lists the thirty-one
+codecs, pja2k at 30, and PJA's plugin probe passes on `tests/j2k`,
+`tests/jpg` and `tests/jls`.
+
+## What is new in 0.9.12
+
+The 31 codecs write and read the same streams with the same ZPAQL. What
+they take changes at the edges, from the parser they share with the
+command:
+
+- `pja`, `pjax` and theirs may now take a JPEG whose sequential scan has
+  Ss or Se other than 0 and 63 (a DICOM encoder writes Se = 0): libjpeg
+  ignores them, and so does the parser now. The ZPAQL never read them.
+- `pjall` and theirs refuse a lossless JPEG with subsampled components
+  (the parser now reads them, the ZPAQL does not) and one whose encoder
+  wraps predictor 5 or 6 (the command keeps that in stream version 6).
+  Detect answers 2 for them, so `+rcmd` takes them.
+
+Checked: built from this directory alone, the plugin lists the thirty-one
+codecs, pja2k at 30, and PJA's plugin probe passes on `tests/j2k`,
+`tests/jpg` (with the new samples `sos_se_zero.jpg` and
+`lossless_{wrap,sub,subscans}.jpg`) and `tests/jls`; pjax7's ZPAQL
+decodes `sos_se_zero.jpg` in PJA's interpreter.
+
+## What is new in 0.9.11
+
+The 31 codecs, their streams, ZPAQL and detect (1 and 2) are 0.9.9's. One
+change in the cards: the JPEG-LS and JPEG 2000 `fallback_ma` lists name
+`lz6hc:15` where they had `lz6:15`, the same codec and level, as zpaq-std
+2.10.0 calls it (its `lz6` is now another engine, levels 1 to 13, where
+`lz6:15` would be skipped as out of range). zpaq-std 2.9.0 skips `lz6hc`;
+the entries before it (`flzma2:10`, `zstd:19`) come first in either. The
+rest of 0.9.11 is in the `pja` command (what it prints on Windows is
+UTF-8), which the plugin does not use.
+
+Checked: built from this directory alone, the plugin lists the thirty-one
+codecs, pja2k at 30, and PJA's plugin probe passes on `tests/j2k`,
+`tests/jpg` and `tests/jls`.
+
+## What is new in 0.9.10
+
+Nothing for the plugin: its 31 codecs, their streams, ZPAQL, detect (1 and
+2) and fallback lists are 0.9.9's. The only change in these sources is
+`PJA_VERSION` in `pas/pjacodec.pas` (the cards' `version=`). 0.9.10's
+change is in libpja's 7-Zip plugin (it follows `-mmt` when extracting),
+which zpaq-std's plugin does not use. Rebuilding is optional.
+
+Checked: built from this directory alone, the plugin lists the thirty-one
+codecs, pja2k at 30, and PJA's plugin probe passes on `tests/j2k`,
+`tests/jpg` and `tests/jls`.
+
+## What is new in 0.9.9: +rcmd, and BLAKE3 from pBLAKE3
+
+The 31 codecs write and read the same streams with the same ZPAQL; what
+each takes (detect = 1) is 0.9.8's.
+
+- **zpaq-std 2.9.0's `+rcmd`**: `zpaqstd_detect_v1` answers **2** for a file
+  of the codec's format that it does not take: a JPEG (`FF D8 FF`, not
+  JPEG-LS) for the JPEG codecs (pja, pjax, pja7, pjax7, pjall and their z,
+  o and 8), a JPEG-LS file for pjals and pjalsx (and theirs), a JPEG 2000
+  file for pja2k. Each codec's card (`ZS_DATA_INFO`) has two more keys:
+
+      JPEG       fallback_ma=flzma2:10,uflzma2:11,lzma:9,lz:9,zstd:19   fallback_m=3,4,5,2,1
+      JPEG-LS    fallback_ma=flzma2:10,uflzma2:11,lz6:15,zstd:19,lzma:9 fallback_m=3,4,5,2,1
+      JPEG 2000  fallback_ma=zstd:19,deflate:12,zxc:7,flzma2:10,lz6:15  fallback_m=1,2,3,4,5
+
+  How they were measured: PJA's `doc/CODEC.md`, "zpaq-std +rcmd". zpaq-std
+  before 2.9.0 reads 2 as 0: 2.7.2 and 2.8.0 write the same archive, byte
+  for byte, with this plugin as with 0.9.8's.
+- **BLAKE3** (the plugin's verdict cache keys files by size and BLAKE3) now
+  comes from pBLAKE3 v0.2.0 (https://github.com/YadeWira/pBLAKE3), a fixed
+  copy: `pas/pjablake3.pas` and the new **`pas/b3chunks.c`**, which
+  `pas/build_c.sh` compiles and `pjav7.pas` links (`{$L b3chunks.o}`). The
+  same hash; its chunks 4 at a time (SSE2, NEON), 8 (AVX2) or 16
+  (AVX-512), chosen at run time. `pjasysc.c` no longer has BLAKE3.
+- The plugin now uses `pas/pjaj2k.pas` directly (`J2kKind`, for detect 2).
+
+Checked: built from this directory alone, the plugin lists the thirty-one
+codecs, pja2k at 30, and PJA's plugin probe passes on `tests/j2k`,
+`tests/jpg` and `tests/jls` (detect 1, 2 and 0 as above). With zpaq-std
+2.9.0-rc4 and rc5, `-sa -rcmd` on a mixed folder: every file back with the
+plugin, without it, with zpaq 7.15, and on Windows 10 x64 and x86.
 
 ## What is new in 0.9.8
 
@@ -186,10 +280,10 @@ FreePascal 3.2.2 and a C compiler (clang, the faster, or gcc) for the same
 target. The C first (`pas/build_c.sh <dir> [flags]`: `-O3 -fwrapv
 -ffp-contract=off -fno-stack-protector`, and `-fno-builtin` with clang or
 `-fno-tree-loop-distribute-patterns` with gcc), then fpc with `-Fo<dir>` so `pjav7.pas`'s `{$L pjav7c.o}` and
-`{$L pjasysc.o}` find the objects. From this directory:
+`{$L pjasysc.o}` and `{$L b3chunks.o}` find the objects. From this directory:
 
 ```sh
-export PJA_COMMIT=e89a500
+export PJA_COMMIT=9b4f04a
 ```
 
 Linux x86_64 (position-independent C, `-fPIC`, and `-Cg`):

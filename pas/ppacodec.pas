@@ -48,11 +48,21 @@ const
     give back is a version 2 stream also when newer versions exist. }
   OLDEST_WRITTEN_VERSION = 2;
 
+const
+  { Compress's levels (ppa -1, -2, -3): how the model of each image is
+    chosen. None is written in the stream (each image's model is), so any
+    PPA reads a file of any level. LEVEL_FAST: an image ppafast takes
+    (8-bit samples, not a palette) goes with the static or the fast model,
+    never the slow one, so it extracts about ten times as quick as with
+    the slow one; LEVEL_DEFAULT: also the slow one where a sample of the
+    image shows it gains much (drawings); LEVEL_MAX: every image with the
+    slow model, a few percent smaller still (ppa --max). }
+  LEVEL_FAST = 1;
+  LEVEL_DEFAULT = 2;
+  LEVEL_MAX = 3;
+  LEVEL_NAMES: array[LEVEL_FAST..LEVEL_MAX] of string = ('fast', 'default', 'max');
+
 var
-  { the images ppafast takes (8-bit samples, not a palette) with it, about
-    ten times as quick to decompress; False: every image with ppamodel's
-    slower model, a few percent smaller (ppa --max) }
-  FastModel: Boolean = True;
   { For the tests and ppa selftest only: every image a model can take goes
     with MODE_IMAGE, MODE_FAST or MODE_STATIC instead of the one
     ChooseModel picks (-1), so small samples run each model (the stream
@@ -99,10 +109,12 @@ type
   not change. maxVersion: the newest stream version it may write (from
   OLDEST_WRITTEN_VERSION to STREAM_VERSION); an image stream whose recipe
   needs a newer one goes as bytes. ppa1 (the zpaq-std plugin) passes 2: its
-  ZPAQL decodes version 2 only. }
+  ZPAQL decodes version 2 only. level: LEVEL_FAST to LEVEL_MAX, how the
+  model of an image is chosen when model is -1 (a parameter too, for the
+  library's threads). }
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
   out stats: TCodecStats; verify: Boolean = True; threads: Integer = 1; model: Integer = -1;
-  maxVersion: Integer = STREAM_VERSION): Boolean;
+  maxVersion: Integer = STREAM_VERSION; level: Integer = LEVEL_DEFAULT): Boolean;
 { stream -> data; maxOut caps the file. False (with why) on any damage.
   threads: the bands decoded and the deflate streams rebuilt on as many. }
 function Decompress(const stream: TBytes; maxOut: Int64; out data: TBytes; out why: string;
@@ -116,7 +128,7 @@ type
 
 { The settings the tests read from the environment (PPA_TEST_BAND_BYTES,
   PPA_TEST_BANDS_REVERSE, PPA_TEST_MODEL, PPA_TEST_PAR_BYTES) back to their
-  defaults, and FastModel on: a library loaded into another program
+  defaults: a library loaded into another program
   (libppa) must not take them from that program's environment, where
   PPA_TEST_BAND_BYTES would even make streams others cannot read. }
 procedure ResetTestSettings;
@@ -128,7 +140,7 @@ function DecompressEx(const stream: TBytes; maxOut: Int64; out data: TBytes; out
 implementation
 
 uses Math, ppapng, ppadeflate, ppazlib, ppapreflate, ppapixels, ppaarith, ppamodel, ppafast, ppastatic, ppathreads, ppastage,
-  ppablake3, pjablake3, pjacodec, pjamodel, pjav7;
+  pjablake3, pjacodec, pjamodel, pjav7;
 
 const
   IMAGE_MODES = [MODE_IMAGE, MODE_FAST, MODE_STATIC];
@@ -344,7 +356,7 @@ end;
   more than STATIC_LOSS percent larger than the fast one (drawings); then
   the slow one if it is SLOW_GAIN percent smaller than the fast one, else
   the fast one. Photographs take the static model. }
-function ChooseModel(var px: TPixels): Integer;
+function ChooseModel(var px: TPixels; slow: Boolean): Integer;
 var y0, rows, rb, h: SizeInt; e: TArithEncoder; sStatic, sFast, sSlow: SizeInt;
 begin
   Result := MODE_FAST;
@@ -365,6 +377,7 @@ begin
     sStatic := Length(EncodeImageStatic(px, y0, rows));
     if Int64(sStatic) * 100 <= Int64(sFast) * (100 + STATIC_LOSS) then Exit(MODE_STATIC);
   end;
+  if not slow then Exit;
   e.Init; CodeImageBand(px, y0, rows, @e, nil); sSlow := Length(e.Finish);
   if Int64(sSlow) * 100 < Int64(sFast) * (100 - SLOW_GAIN) then Result := MODE_IMAGE;
 end;
@@ -388,7 +401,7 @@ end;
   (-1: TestModel's, which is -1 outside the tests); maxVersion: the newest
   stream version Compress may write; threads: the recipe search's (the same
   plan with any) }
-function PlanImage(const p: TPng; s: SizeInt; model, maxVersion, threads: Integer; out plan: TStreamPlan): Boolean;
+function PlanImage(const p: TPng; s: SizeInt; model, maxVersion, threads, level: Integer; out plan: TStreamPlan): Boolean;
 var info: TImageInfo; a: TBytes;
 begin
   if model < 0 then model := TestModel;
@@ -409,7 +422,7 @@ begin
   { a model given takes every image it can (ChooseModel's trials skipped) }
   if (model = MODE_IMAGE) or ((model in [MODE_FAST, MODE_STATIC]) and FastEligible(info)) then
     plan.mode := model
-  else if FastModel and FastEligible(info) then plan.mode := ChooseModel(plan.px)
+  else if (level <> LEVEL_MAX) and FastEligible(info) then plan.mode := ChooseModel(plan.px, level <> LEVEL_FAST)
   else plan.mode := MODE_IMAGE;
   Result := True;
 end;
@@ -428,7 +441,7 @@ type
   PKnownStreams = ^TKnownStreams;
 
 function CompressRaw(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; threads, model, maxVersion: Integer; out known: TKnownStreams): Boolean;
+  out stats: TCodecStats; threads, model, maxVersion, level: Integer; out known: TKnownStreams): Boolean;
 var
   p: TPng; r: TPngResult; w: TWriter; meta: TBytes;
   plans: array of TStreamPlan;
@@ -443,7 +456,7 @@ var
   procedure PlanOne(k: SizeInt);
   begin
     if p.streams[k].kind in [skJdat, skJdaa] then PlanJpeg(p, k, 1, plans[k])
-    else PlanImage(p, k, model, maxVersion, planThreads, plans[k]);
+    else PlanImage(p, k, model, maxVersion, planThreads, level, plans[k]);
   end;
 
   procedure CodeBand(k: SizeInt);
@@ -756,7 +769,7 @@ function DecompressSafe(const stream: TBytes; maxOut: Int64; out data: TBytes; o
   threads: Integer; stages: Boolean; known: PKnownStreams; out failure: TDecodeFailure): Boolean; forward;
 
 function Compress(const data: TBytes; out stream: TBytes; out why: string;
-  out stats: TCodecStats; verify: Boolean; threads, model, maxVersion: Integer): Boolean;
+  out stats: TCodecStats; verify: Boolean; threads, model, maxVersion, level: Integer): Boolean;
 var back: TBytes; why2: string; was: TStage; known: TKnownStreams; fail: TDecodeFailure;
 begin
   why := '';
@@ -767,12 +780,16 @@ begin
       [maxVersion, OLDEST_WRITTEN_VERSION, STREAM_VERSION]);
     Exit(False);
   end;
+  if (level < LEVEL_FAST) or (level > LEVEL_MAX) then begin
+    why := Format('level %d is not one of %d to %d', [level, LEVEL_FAST, LEVEL_MAX]);
+    Exit(False);
+  end;
   was := StageEnter(stNone);
   StageEnter(was);
   { the slow model's tables kept from band to band (ppamodel's pool) }
   ModelPoolHold;
   try
-  Result := CompressRaw(data, stream, why, stats, threads, model, maxVersion, known);
+  Result := CompressRaw(data, stream, why, stats, threads, model, maxVersion, level, known);
   if not Result or not verify then begin StageEnter(was); Exit; end;
   { The stream decompressed and compared with the file, whole. An image's
     deflate stream of a kind-0 recipe is not written again: what the decoder
@@ -1149,7 +1166,6 @@ begin
   BandBytes := BAND_BYTES;
   BandsReverse := False;
   TestModel := -1;
-  FastModel := True;
   ppazlib.PAR_MIN_BYTES := 1024 * 1024;
   ppazlib.PAR_SEG_MIN := 256 * 1024;
 end;
@@ -1157,10 +1173,6 @@ end;
 initialization
   { PJA's codec, called from the codec's threads, keeps models in threadvars }
   OnThreadEnd := @ReleaseThreadModels;
-  { BLAKE3's chunks four at a time in SSE2: PJA's C (pjasysc.c), which
-    pjav7 gives pjablake3 and which ppablake3, the same code, takes too
-    (the same hash; tests/test_blake3 checks the vectors) }
-  ppablake3.Blake3Chunks := ppablake3.TBlake3Chunks(pjablake3.Blake3Chunks);
   BandBytes := StrToInt64Def(GetEnvironmentVariable('PPA_TEST_BAND_BYTES'), BAND_BYTES);
   if BandBytes < 1 then BandBytes := BAND_BYTES;
   BandsReverse := GetEnvironmentVariable('PPA_TEST_BANDS_REVERSE') = '1';

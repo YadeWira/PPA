@@ -32,6 +32,16 @@ if "$PPA" a -q "$W/in/rgb8.png" 2>/dev/null; then fail "replaced an existing out
 rm -f "$W/in/gray8.ppa"
 "$PPA" a -q -n "$W/in/gray8.png" || fail "-n"
 [ ! -e "$W/in/gray8.ppa" ] || fail "-n wrote a file"
+# the levels: -1 and -3 (--fast, --max) give files that come back
+mkdir -p "$W/lv"
+for lv in -1 --fast -2 -3 --max; do
+  "$PPA" a -q -f -o "$W/lv/rgb8$lv.ppa" "$W/in/rgb8.png" $lv || fail "a $lv"
+  "$PPA" x -q -f -o "$W/lv/rgb8$lv.png" "$W/lv/rgb8$lv.ppa" || fail "x of a $lv"
+  cmp -s "$W/in/rgb8.png" "$W/lv/rgb8$lv.png" || fail "a $lv: not the same bytes back"
+done
+cmp -s "$W/lv/rgb8-1.ppa" "$W/lv/rgb8--fast.ppa" || fail "-1 and --fast differ"
+cmp -s "$W/lv/rgb8-3.ppa" "$W/lv/rgb8--max.ppa" || fail "-3 and --max differ"
+cmp -s "$W/lv/rgb8-2.ppa" "$W/in/rgb8.ppa" || fail "-2 is not the default"
 # list
 "$PPA" list "$W/in/rgb8.ppa" | grep -q "blake3-128" || fail "list"
 # a damaged .ppa: refused, nothing written
@@ -134,6 +144,9 @@ set +e
 "$PPA" list --no-sync "$W/in/rgb8.ppa" > /dev/null 2>&1; u2=$?
 "$PPA" --path=simd selftest > /dev/null 2>&1; u3=$?
 "$PPA" x --max "$W/in/rgb8.ppa" > /dev/null 2>&1; u4=$?
+"$PPA" a -n -1 -3 "$W/in/rgb8.png" > /dev/null 2>&1; u5=$?
+"$PPA" t -1 "$W/in/rgb8.ppa" > /dev/null 2>&1; u6=$?
 set -e
-[ "$u1" -eq 2 ] && [ "$u2" -eq 2 ] && [ "$u3" -eq 2 ] && [ "$u4" -eq 2 ] || fail "usage errors give $u1 $u2 $u3 $u4"
-echo "cli: $n files back, 0.1.0's files, -f, -n, list, a damaged file, usage, t, info, --json, --stats, report, a bug, --keep-corrupt, leftovers and selftest: 0 failures"
+[ "$u1" -eq 2 ] && [ "$u2" -eq 2 ] && [ "$u3" -eq 2 ] && [ "$u4" -eq 2 ] && [ "$u5" -eq 2 ] && [ "$u6" -eq 2 ] \
+  || fail "usage errors give $u1 $u2 $u3 $u4 $u5 $u6"
+echo "cli: $n files back, 0.1.0's files, -f, -n, the levels, list, a damaged file, usage, t, info, --json, --stats, report, a bug, --keep-corrupt, leftovers and selftest: 0 failures"

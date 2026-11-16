@@ -9,7 +9,7 @@
     test_format <directory> }
 program test_format;
 {$I ../ppa.inc}
-uses SysUtils, Classes, ppaformat, ppablake3;
+uses SysUtils, Classes, ppaformat, pjablake3;
 
 function ReadFile(const f: string): TBytes; var s: TFileStream;
 begin s := TFileStream.Create(f, fmOpenRead or fmShareDenyNone); try Result := nil; SetLength(Result, s.Size);

@@ -13,14 +13,14 @@ unit ppabench;
 
 interface
 
-uses Classes;
+uses Classes, ppacodec;
 
 { 0 when every file went through, 1 if any failed }
-function RunBench(files: TStrings; runs, threads: Integer): Integer;
+function RunBench(files: TStrings; runs, threads: Integer; level: Integer = LEVEL_DEFAULT): Integer;
 
 implementation
 
-uses SysUtils, ppablake3, ppaformat, ppafs, ppastage, ppasysinfo, ppainfo;
+uses SysUtils, pjablake3, ppaformat, ppafs, ppastage, ppasysinfo, ppainfo;
 
 function Ms(t: Double): string;
 begin
@@ -65,7 +65,7 @@ begin
   end;
 end;
 
-function RunBench(files: TStrings; runs, threads: Integer): Integer;
+function RunBench(files: TStrings; runs, threads, level: Integer): Integer;
 var k, run: Integer; d, ppa, back: TBytes; ok, stored: Boolean; why, detail: string; desc: TDescriptor;
     e: TFormatError; msg, tmp, path: string;
     t0, best, bestNv, bestX, bestW, tw: Double; st, stBest, stX, stXBest: TStageTimes;
@@ -98,14 +98,14 @@ begin
         for run := 1 to runs do begin
           StageReset;
           t0 := Seconds;
-          ok := Pack(d, Copy(ExtractFileExt(files[k]), 2, MaxInt), True, ppa, stored, why, threads);
+          ok := Pack(d, Copy(ExtractFileExt(files[k]), 2, MaxInt), True, ppa, stored, why, threads, level);
           t0 := Seconds - t0;
           st := StageTimes;
           if not ok then Break;
           if (best < 0) or (t0 < best) then begin best := t0; stBest := st; end;
           StageReset;
           t0 := Seconds;
-          ok := Pack(d, Copy(ExtractFileExt(files[k]), 2, MaxInt), False, ppa, stored, why, threads);
+          ok := Pack(d, Copy(ExtractFileExt(files[k]), 2, MaxInt), False, ppa, stored, why, threads, level);
           t0 := Seconds - t0;
           if not ok then Break;
           if (bestNv < 0) or (t0 < bestNv) then bestNv := t0;
