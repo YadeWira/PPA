@@ -5,7 +5,8 @@
    - No C runtime, as the rest of PPA's C: malloc, realloc, calloc and free
      are the caller's memory, each block on a list kept for the call, so
      that a failure (zopfli's exit() where an allocation failed) jumps back
-     to ppa_zop_deflate (__builtin_setjmp, no library), which frees what
+     to ppa_zop_deflate (__builtin_setjmp, no library; macOS: the system's
+     _setjmp), which frees what
      was left and returns 0: the process (a 7-Zip host) never exits.
      memcpy, memmove, memset are ppamemc.c's; fprintf (zopfli's verbose
      output) is nothing.
@@ -99,19 +100,33 @@ static double ppa_zop_log(double x) {
 
 /* the call's memory: a list of blocks, each after a header that keeps the
    list and the size (32 bytes: doubles stay aligned) */
+/* the jump back on a failure: the compiler's own (__builtin_setjmp, no
+   library) where it has one; Apple's clang on arm64 has not, and there the
+   system library is always linked: its _setjmp (no signal mask) */
+#if defined(__APPLE__)
+#include <setjmp.h>
+typedef jmp_buf ppa_zop_jb;
+#define PPA_ZOP_SETJMP(b) _setjmp(b)
+#define PPA_ZOP_LONGJMP(b) _longjmp(b, 1)
+#else
+typedef void *ppa_zop_jb[5];
+#define PPA_ZOP_SETJMP(b) __builtin_setjmp(b)
+#define PPA_ZOP_LONGJMP(b) __builtin_longjmp(b, 1)
+#endif
+
 typedef struct ppa_zop_blk { struct ppa_zop_blk *prev, *next; size_t size; size_t pad; } ppa_zop_blk;
 typedef struct {
   void *(*alloc)(size_t);
   void (*release)(void *);
   ppa_zop_blk *list;
-  void *jb[5];
+  ppa_zop_jb jb;
 } ppa_zop_ctx;
 /* where the running call's context is: the caller's thread-local slot */
 static ppa_zop_ctx **(*ppa_zop_slot)(void);
 
 static void ppa_zop_fail(void) {
   ppa_zop_ctx *c = *ppa_zop_slot();
-  __builtin_longjmp(c->jb, 1);
+  PPA_ZOP_LONGJMP(c->jb);
 }
 static void *ppa_zop_malloc(size_t n) {
   ppa_zop_ctx *c = *ppa_zop_slot();
@@ -215,7 +230,7 @@ size_t ppa_zop_deflate(int iterations, int blocksplitting, int blocksplittinglas
   c.alloc = alloc; c.release = release; c.list = 0;
   slot = ppa_zop_slot();
   *slot = &c;
-  if (__builtin_setjmp(c.jb) == 0) {
+  if (PPA_ZOP_SETJMP(c.jb) == 0) {
     ZopfliInitOptions(&o);
     o.numiterations = iterations;
     o.blocksplitting = blocksplitting;
@@ -246,7 +261,7 @@ size_t ppa_zop_split(int blocksplittingmax, const unsigned char *in, size_t n, s
   c.alloc = alloc; c.release = release; c.list = 0;
   slot = ppa_zop_slot();
   *slot = &c;
-  if (__builtin_setjmp(c.jb) == 0) {
+  if (PPA_ZOP_SETJMP(c.jb) == 0) {
     ZopfliInitOptions(&o);
     o.blocksplittingmax = blocksplittingmax;
     ZopfliBlockSplit(&o, in, 0, end, blocksplittingmax, &sp, &np);
@@ -274,7 +289,7 @@ size_t ppa_zop_piece(int iterations, const unsigned char *in, size_t start, size
   c.alloc = alloc; c.release = release; c.list = 0;
   slot = ppa_zop_slot();
   *slot = &c;
-  if (__builtin_setjmp(c.jb) == 0) {
+  if (PPA_ZOP_SETJMP(c.jb) == 0) {
     ZopfliInitOptions(&o);
     ZopfliInitLZ77Store(in, &st);
     ZopfliInitBlockState(&o, start, end, 1, &bs);
@@ -308,7 +323,7 @@ int ppa_zop_lengths(const unsigned short *litlens, const unsigned short *dists, 
   c.alloc = alloc; c.release = release; c.list = 0;
   slot = ppa_zop_slot();
   *slot = &c;
-  if (__builtin_setjmp(c.jb) == 0) {
+  if (PPA_ZOP_SETJMP(c.jb) == 0) {
     ZopfliInitLZ77Store(0, &st);
     for (size_t i = 0; i < n; i++) ZopfliStoreLitLenDist(litlens[i], dists[i], 0, &st);
     GetDynamicLengths(&st, 0, n, ll_lengths, d_lengths);
