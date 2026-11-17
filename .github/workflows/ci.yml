@@ -30,6 +30,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y fpc 7zip
       - name: Test
         run: sh .github/test.sh
+      # the release builds Linux's C with clang (release.yml): it must build
+      # here too, before a tag finds out (0.5.0's arm64 setjmp)
+      - name: The C part with clang, as the release builds it
+        run: sudo apt-get install -y clang && CC=clang sh pas/build_c.sh build/clang-c
       - uses: actions/upload-artifact@v4
         with:
           name: hash-linux-x64
@@ -53,6 +57,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y fpc
       - name: Test
         run: sh .github/test.sh
+      # the release builds Linux's C with clang (release.yml): it must build
+      # here too, before a tag finds out (0.5.0's arm64 setjmp)
+      - name: The C part with clang, as the release builds it
+        run: sudo apt-get install -y clang && CC=clang sh pas/build_c.sh build/clang-c
       - uses: actions/upload-artifact@v4
         with:
           name: hash-linux-arm64
