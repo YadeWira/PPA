@@ -46,7 +46,9 @@ comes back byte for byte, and nothing is written unless it verified.
   zlib's own parameters (every level, strategy, window and memLevel, its
   flushes too), since 0.3.0 miniz's from its flags and any other
   encoder's (zopfli, advpng, 7-Zip) from a predictor and a few
-  corrections, and since 0.4.0 libdeflate's and oxipng's from their level.
+  corrections, since 0.4.0 libdeflate's and oxipng's from their level, and
+  since 0.5.0 zopfli's (zopflipng, advpng -z4) from its iterations: for
+  images of up to 64 KiB at the default level, any at `-3`.
 - **APNG**: every frame's stream, the same way.
 - **MNG**: the PNG and JNG images it embeds.
 - **JNG**: its JPEG through [PJA](https://github.com/YadeWira/PJA)'s codec.
