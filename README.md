@@ -182,7 +182,9 @@ x86 for 32-bit) in the `Codecs` folder next to 7-Zip, and
 chain as a filter: it recompresses the PNG, MNG and JNG files of the solid
 block and passes every other byte on. Extracting needs the plugin too
 (7-Zip 23 or later on Linux and macOS; [details][wLib]). The
-same library is a C API (`ppa.h`) for any program.
+same library is a C API (`ppa.h`) for any program; since 0.7.0 also for
+loose deflate streams (a PDF's, a ZIP's): their bytes and a recipe, and
+back bit for bit (`ppa_deflate_*`).
 
 **[zpaq-std](https://github.com/YadeWira/zpaq-std)**: PPA's plugin (since
 0.2.0) has the codec `ppa1`: PNG, APNG and MNG whose images take PPA's

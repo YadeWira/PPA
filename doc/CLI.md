@@ -181,10 +181,10 @@ again, and `pas/run_tests.sh` fails while it is not current.
 ### `ppa --version`
 
 ```
-ppa 0.6.0
+ppa 0.7.0
 stream_version: 6
 format_version: 1
-commit: b0046ca
+commit: e197445
 built: 2026/11/16
 fpc: 3.2.2
 c_compiler: gcc 14.2.0
