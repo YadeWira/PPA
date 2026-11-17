@@ -1,7 +1,7 @@
 @echo off
 rem PPA on a real Windows: the command, libppa (test_lib) and the 7-Zip plugin.
 rem Folder layout (tools/vm/make_kit.sh makes it): ppa.exe ppa.dll test_lib.exe 7z\ s\ (every sample) lib\ (the small ones,
-rem for test_lib) README.md. Prints PASS or FAIL lines; the exit status is the count of FAILs.
+rem for test_lib) d\ (deflate streams, for test_lib --deflate) README.md. Prints PASS or FAIL lines; the exit status is the count of FAILs.
 setlocal enabledelayedexpansion
 cd /d %~dp0
 set L=
@@ -42,6 +42,11 @@ if errorlevel 1 (echo FAIL: -th 1 writes other bytes & set /a FAILS+=1) else (ec
 
 test_lib.exe %LL% README.md > test_lib.txt 2>&1
 if errorlevel 1 (type test_lib.txt & echo FAIL: test_lib & set /a FAILS+=1) else (echo PASS: test_lib & more +0 test_lib.txt | findstr /i "checks failures")
+
+set D=
+for %%f in (d\*.zlib d\*.raw) do set D=!D! %%f
+test_lib.exe --deflate -1 !D! > deflate.txt 2>&1
+if errorlevel 1 (type deflate.txt & echo FAIL: test_lib --deflate & set /a FAILS+=1) else (echo PASS: test_lib --deflate & findstr /c:"deflate: recipes" /c:"checks," deflate.txt)
 
 if not exist 7z\Codecs mkdir 7z\Codecs
 copy /y ppa.dll 7z\Codecs\ppa.dll > nul
