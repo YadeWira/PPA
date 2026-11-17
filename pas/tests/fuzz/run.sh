@@ -25,12 +25,12 @@ REL="-O3 -dPPA_FAST -dPJA_FAST"          # the release settings (pas/build.sh, p
 CHK="-O2 -Cr -Co"                         # range and overflow checks on everywhere
 
 # targets: name -> kind (lib: libFuzzer binary; afl: AFL++ qemu over fuzz_decode) and its corpus
-LIB_TARGETS="filter_c static_c lib_ppa_rel lib_ppa_chk lib_filter_rel"
-AFL_TARGETS="afl_ppa_rel afl_ppa_chk afl_ppa_chk_noc afl_filter_chk"
+LIB_TARGETS="filter_c static_c lib_ppa_rel lib_ppa_chk lib_filter_rel lib_deflate_rel lib_deflate_chk"
+AFL_TARGETS="afl_ppa_rel afl_ppa_chk afl_ppa_chk_noc afl_filter_chk afl_deflate_chk afl_deflate_chk_noc"
 corpus_of() {
   case $1 in
     filter_c) echo filter_c ;; static_c) echo static_c ;;
-    *filter*) echo filter ;; *) echo ppa ;;
+    *filter*) echo filter ;; *deflate*) echo deflate ;; *) echo ppa ;;
   esac
 }
 
@@ -52,9 +52,9 @@ build() {
     local pf=$REL; [ $v = chk ] && pf=$CHK
     $FPC $pf -Cg -gl -gw -Facmem,ppafuzzhook -Fu"$HERE" -Fu"$PAS" -Fi"$PAS" -Fu"$VEND" -Fi"$VEND" \
       -Fo"$o/c" -FU"$o/u" -o"$o/ppa.so" "$PAS/lib/ppalib.pas" > "$o/fpc.log" 2>&1 || { cat "$o/fpc.log"; exit 1; }
-    for m in ppa filter; do
+    for m in ppa filter deflate; do
       [ $v = chk ] && [ $m = filter ] && continue
-      local d=; [ $m = filter ] && d=-DFUZZ_FILTER
+      local d=; [ $m = filter ] && d=-DFUZZ_FILTER; [ $m = deflate ] && d=-DFUZZ_DEFLATE
       $CLANG -g -O1 -fsanitize=fuzzer $SAN $d "$HERE/fuzz_lib.c" "$o/ppa.so" -Wl,-rpath,"$o" -o "$W/bin/lib_${m}_$v"
     done
   done
@@ -81,7 +81,7 @@ seeds() {
     $FPC $REL -Fu"$PAS" -Fi"$PAS" -Fu"$VEND" -Fi"$VEND" -Fo"$o/c" -FU"$o/u" -o"$ppa" "$PAS/ppacli.pas" > "$o/fpc.log" 2>&1 \
       || { cat "$o/fpc.log"; exit 1; }
   fi
-  local S=$W/seeds; rm -rf "$S"; mkdir -p "$S/src" "$S/ppa" "$S/filter" "$S/filter_c" "$S/static_c"
+  local S=$W/seeds; rm -rf "$S"; mkdir -p "$S/src" "$S/ppa" "$S/filter" "$S/filter_c" "$S/static_c" "$S/deflate"
   find "$PPA/tests/png" -maxdepth 1 -type f -exec cp {} "$S/src/" \;
   cp "$PPA"/tests/ppa1/*.ppa "$S/ppa/"
   for d in "$@"; do
@@ -126,7 +126,19 @@ for i in range(32):
     st = (r.randrange(1 << 23, 1 << 31)).to_bytes(4, 'big')
     open(os.path.join(sys.argv[1], 's%02d' % i), 'wb').write(hdr + st + os.urandom(r.randrange(16, 4096)))
 EOF
-  for c in ppa filter filter_c static_c; do echo "$c: $(find "$S/$c" -type f | wc -l) seeds"; done
+  # ppa_deflate_*: each golden vector to analyze (its framing in the first
+  # byte), and as a rebuild input (its bytes and recipe) where it holds at
+  # most 2 KB; and so each stream of PDA_SEEDS (a folder of .z, zlib, and
+  # .raw streams; 40 of each of up to 16 KB)
+  local x fr
+  for f in "$PPA"/tests/recipes/*.zlib "$PPA"/tests/recipes/*.raw \
+           $(if [ -n "${PDA_SEEDS:-}" ]; then find "$PDA_SEEDS" -name '*.z' -size -16k | sort | head -40;
+             find "$PDA_SEEDS" -name '*.raw' -size -16k | sort | head -40; fi); do
+    b=$(basename "$f"); case $b in *.raw) x='\002'; fr=1 ;; *) x='\004'; fr=2 ;; esac
+    { printf "$x"; cat "$f"; } > "$S/deflate/a-$b"
+    [ -x "$W/bin/fuzz_decode_rel" ] && "$W/bin/fuzz_decode_rel" deflate-seed "$f" "$S/deflate/r-$b" $fr > /dev/null 2>&1 || true
+  done
+  for c in ppa filter filter_c static_c deflate; do echo "$c: $(find "$S/$c" -type f | wc -l) seeds"; done
 }
 
 fuzz() {
@@ -145,13 +157,16 @@ fuzz() {
     else "${run[@]}" > "$out/log" 2>&1 || true; fi ;;
   *" $t "*|*)
     case " $AFL_TARGETS " in *" $t "*) ;; *) echo "no target $t"; exit 1 ;; esac
-    local v=rel mode=ppa; case $t in *chk*) v=chk ;; esac; case $t in *filter*) mode=filter ;; esac
+    local v=rel mode=ppa; case $t in *chk*) v=chk ;; esac; case $t in *filter*) mode=filter ;; *deflate*) mode=deflate ;; esac
     local noc=0; case $t in *noc) noc=1 ;; esac
     ulimit -v 6000000
     export AFL_CRASH_EXITCODE=86 AFL_NO_UI=1 AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
       AFL_PATH="$AFL" PPA_NOC=$noc AFL_QEMU_INST_RANGES=${AFL_QEMU_INST_RANGES:-}
     rm -rf "$out/afl"
-    "$AFL/afl-fuzz" -Q -i "$W/seeds/$c" -o "$out/afl" -V "$secs" -t 5000 -m none -- \
+    # ppa_deflate_*: an analysis takes up to half a second natively (kind 3's
+    # search), ten times that in qemu
+    local tmo=5000; [ "$mode" = deflate ] && tmo=20000
+    "$AFL/afl-fuzz" -Q -i "$W/seeds/$c" -o "$out/afl" -V "$secs" -t $tmo -m none -- \
       "$W/bin/fuzz_decode_$v" "$mode" @@ > "$out/log" 2>&1 || true ;;
   esac
   echo "$t done: $out"
@@ -162,7 +177,7 @@ repro() {
   export ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=0:symbolize=1:allocator_may_return_null=1} UBSAN_OPTIONS=print_stacktrace=1
   case " $LIB_TARGETS " in
   *" $t "*) "$W/bin/$t" -rss_limit_mb=2048 -malloc_limit_mb=1024 "$f" ;;
-  *) local v=rel mode=ppa; case $t in *chk*) v=chk ;; esac; case $t in *filter*) mode=filter ;; esac
+  *) local v=rel mode=ppa; case $t in *chk*) v=chk ;; esac; case $t in *filter*) mode=filter ;; *deflate*) mode=deflate ;; esac
      case $t in *noc) export PPA_NOC=1 ;; esac
      ( ulimit -v 6000000; "$W/bin/fuzz_decode_$v" "$mode" "$f" ) ;;
   esac

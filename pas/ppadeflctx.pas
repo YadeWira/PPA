@@ -89,9 +89,14 @@ end;
 
 { a zlib header but for FDICT (a preset dictionary: not taken) }
 function IsFdictHeader(src: PByte; n: SizeUInt): Boolean;
+var b0, b1: Byte;
 begin
-  Result := (n >= 2) and ((src[0] and $0F) = 8) and ((src[0] shr 4) <= 7) and
-            ((src[1] and $20) <> 0) and (((LongWord(src[0]) shl 8) or src[1]) mod 31 = 0);
+  if n < 2 then Exit(False);
+  { the bytes into locals first: FreePascal widens `src[1] and $20` to a
+    4-byte load, past the caller's 2 bytes }
+  b0 := src[0]; b1 := src[1];
+  Result := ((b0 and $0F) = 8) and ((b0 shr 4) <= 7) and
+            ((b1 and $20) <> 0) and (((LongWord(b0) shl 8) or b1) mod 31 = 0);
 end;
 
 function TDeflCtx.Analyze(src: PByte; n: SizeUInt; flags: LongInt; out plain, recipe: TBytes;
@@ -153,12 +158,13 @@ end;
 
 function TDeflCtx.Rebuild(plain: PByte; plainSize: SizeUInt; rec: PByte; recSize: SizeUInt;
   maxOut: SizeUInt; out stream: TBytes; out errPos: SizeUInt): LongInt;
-var b, p: TBytes; pos: SizeInt; r: TDeflRecipe;
+var b, p: TBytes; pos: SizeInt; r: TDeflRecipe; ver: Byte;
 begin
   stream := nil; errPos := 0;
   if recSize = 0 then Exit(DC_DATA);
-  if rec[0] > STREAM_VERSION then Exit(DC_VERSION);
-  if rec[0] < 3 then Exit(DC_DATA);
+  ver := rec[0];
+  if ver > STREAM_VERSION then Exit(DC_VERSION);
+  if ver < 3 then Exit(DC_DATA);
   SetLength(b, recSize);
   Move(rec^, b[0], recSize);
   pos := 1;
@@ -166,7 +172,7 @@ begin
     errPos := 1;
     Exit(DC_DATA);
   end;
-  if (SizeUInt(pos) <> recSize) or (DeflRecipeVersion(r) <> rec[0]) then begin
+  if (SizeUInt(pos) <> recSize) or (DeflRecipeVersion(r) <> ver) then begin
     errPos := pos;
     Exit(DC_DATA);
   end;

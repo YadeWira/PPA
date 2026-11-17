@@ -190,9 +190,14 @@ begin
 end;
 
 function IsZlibHeader(const a: TBytes): Boolean;
+var b0, b1: Byte;
 begin
-  Result := (Length(a) >= 2) and ((a[0] and $0F) = 8) and ((a[0] shr 4) <= 7) and
-            ((a[1] and $20) = 0) and (((LongWord(a[0]) shl 8) or a[1]) mod 31 = 0);
+  if Length(a) < 2 then Exit(False);
+  { the bytes into locals first (FreePascal widens `a[1] and $20` to a
+    4-byte load: Encode's clenSeq) }
+  b0 := a[0]; b1 := a[1];
+  Result := ((b0 and $0F) = 8) and ((b0 shr 4) <= 7) and
+            ((b1 and $20) = 0) and (((LongWord(b0) shl 8) or b1) mod 31 = 0);
 end;
 
 { ---------------------------------------------------------------- Huffman }

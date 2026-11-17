@@ -15,6 +15,8 @@ feedback and with the memory errors made to crash:
 | `afl_ppa_chk` | AFL++, qemu mode | the same, `-O2 -Cr -Co` | and a check error |
 | `afl_ppa_chk_noc` | AFL++, qemu mode | the same with `PPA_NOC=1`: the Pascal pixel loops instead of the C ones | |
 | `afl_filter_chk` | AFL++, qemu mode | `fuzz_decode filter`: `ppafilter.c`'s decoder with each file through `DecompressEx` | |
+| `lib_deflate_rel`, `lib_deflate_chk` | libFuzzer | libppa's `ppa_deflate_*` (since 0.7.0). First byte even: the rest a deflate stream to analyze (bits 1-2 its framing; level 1, no zopfli). First byte odd: a length, bytes and a recipe to rebuild them with | as `lib_ppa_rel`; and a recipe the analysis gives must rebuild its stream (abort) |
+| `afl_deflate_chk`, `afl_deflate_chk_noc` | AFL++, qemu mode | `fuzz_decode deflate`: the same input, through `ppadeflctx` | as `afl_ppa_chk`; a recipe that does not rebuild its stream exits 86 |
 
 Every Pascal build has `ppafuzzhook` first in its uses (`-Fa`): the decoder
 catches every exception and calls it damage (`ppacodec.DecompressSafe`, the
@@ -30,7 +32,8 @@ the AFL++ ones see the whole program through qemu.
 
 ```sh
 pas/tests/fuzz/run.sh build                  # in $FUZZ_DIR/bin (/mnt/IA_LAB/agentes/ppa/fuzz)
-pas/tests/fuzz/run.sh seeds <png dir>...     # tests/png and those dirs as .ppa (each model), PPAF streams
+pas/tests/fuzz/run.sh seeds <png dir>...     # tests/png and those dirs as .ppa (each model), PPAF streams;
+                                             # the golden deflate vectors (and PDA_SEEDS' .z and .raw streams)
 pas/tests/fuzz/run.sh fuzz <target> <secs>   # one campaign; up to 4 at a time on this machine
 pas/tests/fuzz/run.sh repro <target> <file>  # one input, with its report
 ```
@@ -65,3 +68,16 @@ with and without `--no-sync`, without and with an old file under the
 output's name (`-f`). Each case must end in an error with nothing under the
 output's name (or the old file, whole), no temporary left, and a clean
 `e2fsck -fn`.
+
+A deflate stream's analysis takes up to half a second natively (kind 3's
+search on a stream no encoder made), so `afl_deflate_*` runs with `-t
+20000`; the libFuzzer target does a few runs a second.
+
+Found so far (17/11/2026, the first `afl_deflate_chk` campaign): 15
+over-reads, all one pattern. FreePascal compiles `w[i] and $1F` on an
+array of Word, or `b[i] and $20` on bytes, to a 4-byte load: past a block
+that ends where its memory does, a fault. These were `BlockBits`,
+`TreesAre`, `ChooseTree` and the explicit run-length sequence (each
+element into a local first, as `Encode` already did), `IsZlibHeader` and
+`ppadeflctx`'s FDICT check, which read the caller's own memory. Not one
+of them changed a bit of what PPA writes.

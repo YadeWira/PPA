@@ -972,6 +972,30 @@ zopfli" above), in codec stream version 5.
   recipe the hint does not give costs the search (PDA's set, its streams
   of 256 to 1023 B: a median of 348 µs to analyze, 106 µs to rebuild).
 
+## Status (M10a, 17/11/2026): fuzzing `ppa_deflate_*`, zopfli's memory
+
+- **Fuzzing**: `lib_deflate_rel`/`_chk` (libFuzzer, ASan and UBSan on the
+  C) and `afl_deflate_chk`/`_noc` (AFL++ in qemu, the Pascal guided too,
+  a guard page after each heap block) analyze any stream and rebuild any
+  recipe; a recipe the analysis gives must rebuild its stream. Seeds: the
+  golden vectors and PDA's streams, as streams and as rebuild inputs.
+  The first campaign found 15 over-reads, one pattern: FreePascal widens
+  `w[i] and $1F` (a Word) or `b[i] and $20` (a byte) to a 4-byte load
+  (`pas/tests/fuzz/README.md`). Fixed in `BlockBits`, `TreesAre`,
+  `ChooseTree`, the explicit run-length sequence, `IsZlibHeader` and the
+  FDICT check (which read the caller's memory); a second campaign (30
+  minutes each, the codec's target too): nothing. The same bits written
+  everywhere.
+- **zopfli's memory**: zopfli asks the same arrays again for each run and
+  block, tens of thousands of small ones in a search. FreePascal's heap
+  gave a chunk back to the system once all its blocks were free and took
+  it again: as much time in the system as in zopfli. `ppazopfli` now
+  keeps what zopfli gives back within one call (small blocks by size,
+  large ones by nearest size, at most 64 MB) and frees it when the call
+  ends. A zopfli golden vector through the API: 13.7 -> 10.1 s, the
+  system's 4.0 -> 0.2 s; the same recipes. The same streams with every
+  block filled with garbage first (zopfli reads none it did not write).
+
 ## Studied, not done yet (M7, 16/11/2026): zlib-ng
 
 zlib-ng 2.0.7, 2.1.8, 2.2.5 and 2.3.3 built with and without SIMD

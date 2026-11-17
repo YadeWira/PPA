@@ -1007,7 +1007,7 @@ end;
 { whether dynamic block bi of z has builder tb's code lengths and code-length code }
 function TreesAre(tb: Integer; const z: TZStream; bi: SizeInt): Boolean;
 var t, L, i: SizeInt; lf: array[0..285] of Integer; df: array[0..29] of Integer; sf: array[0..18] of Integer;
-  pb: TDeflateBlock; cl: array[0..18] of Byte;
+  pb: TDeflateBlock; cl: array[0..18] of Byte; w: Word;
 begin
   Result := False;
   if (bi < 0) or (bi > High(z.blocks)) then Exit;
@@ -1017,7 +1017,7 @@ begin
     lf[256] := 1;
     for t := firstToken to firstToken + nTokens - 1 do begin
       L := z.tokLen[t];
-      if L = 0 then Inc(lf[z.tokVal[t] and 255])
+      if L = 0 then begin w := z.tokVal[t]; Inc(lf[w and 255]); end
       else begin
         if L = LEN_258_AS_284 then Inc(lf[284]) else Inc(lf[LenSym[L]]);
         Inc(df[DistSym[z.tokVal[t]]]);
@@ -1028,7 +1028,8 @@ begin
     for i := 0 to 285 do if pb.litLen[i] <> litLen[i] then Exit;
     for i := 0 to 29 do if pb.distLen[i] <> distLen[i] then Exit;
     FillChar(sf, SizeOf(sf), 0);
-    for i := 0 to High(clenSeq) do Inc(sf[clenSeq[i] and $1F]);
+    { each element into a Word first: `clenSeq[i] and $1F` loads 4 bytes (ppadeflate's Encode) }
+    for i := 0 to High(clenSeq) do begin w := clenSeq[i]; Inc(sf[w and $1F]); end;
     ClenBy(TB_LIBDEFLATE, sf, cl);
     for i := 0 to 18 do if cl[i] <> clen[i] then Exit;
   end;
@@ -1572,7 +1573,7 @@ var
   { the explicit run-length coding of lens[0..total-1] }
   function DoSeqExplicit(const lens: array of Byte; total: Integer; var seq: array of Word; var nSeq: Integer;
     const rseq: array of Word): Boolean;
-  var i, v, zr, pr, cls, rcls, rcnt, ctx, cnt, lo, hi, prevCls, bits: Integer; a16, a17, a18: Boolean;
+  var i, v, zr, pr, cls, rcls, rcnt, ctx, cnt, lo, hi, prevCls, bits: Integer; a16, a17, a18: Boolean; rw: Word;
   begin
     Result := False;
     i := 0; nSeq := 0; prevCls := 0;
@@ -1586,12 +1587,14 @@ var
       rcls := 0; rcnt := 1;
       if c.enc then begin
         if nSeq > High(rseq) then Exit;
-        rcls := rseq[nSeq] and $1F;
+        { the element into a Word first (ppadeflate's Encode) }
+        rw := rseq[nSeq];
+        rcls := rw and $1F;
         if rcls < 16 then rcls := 0;
         case rcls of
-          16: rcnt := 3 + rseq[nSeq] shr 5;
-          17: rcnt := 3 + rseq[nSeq] shr 5;
-          18: rcnt := 11 + rseq[nSeq] shr 5;
+          16: rcnt := 3 + rw shr 5;
+          17: rcnt := 3 + rw shr 5;
+          18: rcnt := 11 + rw shr 5;
         end;
       end;
       cls := 0;
@@ -2026,7 +2029,7 @@ end;
 function ChooseTree(const z: TZStream): Integer;
 var score: array[0..PRED_TREE_LAST] of Int64; bi, t, L, nb, i, tb: SizeInt;
   lf: array[0..285] of Integer; df: array[0..29] of Integer; sf: array[0..18] of Integer;
-  pb: TDeflateBlock; cl: array[0..18] of Byte; fx: Boolean;
+  pb: TDeflateBlock; cl: array[0..18] of Byte; fx: Boolean; w: Word;
 begin
   FillChar(score, SizeOf(score), 0);
   nb := 0;
@@ -2039,14 +2042,15 @@ begin
       lf[256] := 1;
       for t := firstToken to firstToken + nTokens - 1 do begin
         L := z.tokLen[t];
-        if L = 0 then Inc(lf[z.tokVal[t] and 255])
+        if L = 0 then begin w := z.tokVal[t]; Inc(lf[w and 255]); end
         else begin
           if L = LEN_258_AS_284 then Inc(lf[284]) else Inc(lf[LenSym[L]]);
           Inc(df[DistSym[z.tokVal[t]]]);
         end;
       end;
       FillChar(sf, SizeOf(sf), 0);
-      for i := 0 to High(clenSeq) do Inc(sf[clenSeq[i] and $1F]);
+      { each element into a Word first: `clenSeq[i] and $1F` loads 4 bytes (ppadeflate's Encode) }
+    for i := 0 to High(clenSeq) do begin w := clenSeq[i]; Inc(sf[w and $1F]); end;
       for tb := 0 to PRED_TREE_LAST do begin
         pb := Default(TDeflateBlock);
         if tb = TB_ZLIB then ZlibTrees(lf, df, pb, fx) else TreesBy(tb, lf, df, pb);

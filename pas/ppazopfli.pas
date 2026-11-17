@@ -117,19 +117,115 @@ begin
   Result := @ZopCtx;
 end;
 
-{ zopfli's memory: FreePascal's heap (thread-safe), nil when there is none }
+{ zopfli's memory: FreePascal's heap (thread-safe), nil when there is
+  none. A block given back during a call (ZopEnter .. ZopLeave) is kept
+  for the next one: zopfli asks the same arrays again for each run and
+  block (tens of thousands of small ones a search, and large ones), and
+  FreePascal's heap gives a chunk back to the system once all its blocks
+  are free, and takes it again: a page fault a page, as much time in the
+  system as in zopfli. Small blocks are kept by size (rounded up to
+  ZC_GRAIN), on a list each; large ones (ZC_MIN on) in ZC_SLOTS, taken by
+  the nearest size up to half again. Each block carries its size before
+  it. What is kept (at most ZC_MAX_BYTES) goes back when the outer call
+  ends. }
+const
+  ZC_HEAD = 16;
+  ZC_GRAIN = 64;
+  ZC_MIN = 64 * 1024;
+  ZC_SLOTS = 32;
+  ZC_MAX_BYTES = 64 * 1024 * 1024;
+  ZC_BUCKETS = ZC_MIN div ZC_GRAIN;
+
+threadvar
+  ZcPtr: array[0..ZC_SLOTS - 1] of Pointer;
+  ZcSize: array[0..ZC_SLOTS - 1] of SizeUInt;
+  ZcList: array[0..ZC_BUCKETS - 1] of Pointer;
+  ZcCount, ZcDepth: Integer;
+  ZcBytes: SizeUInt;
+
 function ZopAlloc(n: SizeUInt): Pointer; cdecl;
+var i, best: Integer; q: PByte;
 begin
+  Result := nil;
   try
-    Result := GetMem(n);
+    if n < ZC_MIN then begin
+      { a small one: its size rounded up, from its list if one is kept }
+      n := (n + ZC_GRAIN - 1) and not SizeUInt(ZC_GRAIN - 1);
+      if n = 0 then n := ZC_GRAIN;
+      if n < ZC_MIN then begin
+        i := n div ZC_GRAIN;
+        q := ZcList[i];
+        if q <> nil then begin
+          ZcList[i] := PPointer(q + ZC_HEAD)^;
+          Dec(ZcBytes, n);
+          Exit(q + ZC_HEAD);
+        end;
+      end;
+    end else begin
+      best := -1;
+      for i := 0 to ZcCount - 1 do
+        if (ZcSize[i] >= n) and (ZcSize[i] - n <= n div 2) and ((best < 0) or (ZcSize[i] < ZcSize[best])) then best := i;
+      if best >= 0 then begin
+        q := ZcPtr[best];
+        Dec(ZcBytes, ZcSize[best]);
+        Dec(ZcCount);
+        ZcPtr[best] := ZcPtr[ZcCount]; ZcSize[best] := ZcSize[ZcCount];
+        Exit(q + ZC_HEAD);
+      end;
+    end;
+    if n > High(SizeUInt) - ZC_HEAD then Exit(nil);
+    q := GetMem(n + ZC_HEAD);
+    PSizeUInt(q)^ := n;
+    Result := q + ZC_HEAD;
   except
     Result := nil;
   end;
 end;
 
 procedure ZopRelease(p: Pointer); cdecl;
+var q: PByte; n: SizeUInt; i: Integer;
 begin
-  FreeMem(p);
+  if p = nil then Exit;
+  q := PByte(p) - ZC_HEAD;
+  n := PSizeUInt(q)^;
+  if (ZcDepth > 0) and (ZcBytes + n <= ZC_MAX_BYTES) then begin
+    if n < ZC_MIN then begin
+      i := n div ZC_GRAIN;
+      PPointer(p)^ := ZcList[i];
+      ZcList[i] := q;
+      Inc(ZcBytes, n);
+      Exit;
+    end;
+    if ZcCount < ZC_SLOTS then begin
+      ZcPtr[ZcCount] := q; ZcSize[ZcCount] := n;
+      Inc(ZcCount); Inc(ZcBytes, n);
+      Exit;
+    end;
+  end;
+  FreeMem(q);
+end;
+
+procedure ZopEnter;
+begin
+  Inc(ZcDepth);
+end;
+
+procedure ZopLeave;
+var i: Integer; q: PByte;
+begin
+  Dec(ZcDepth);
+  if ZcDepth > 0 then Exit;
+  while ZcCount > 0 do begin
+    Dec(ZcCount);
+    FreeMem(ZcPtr[ZcCount]);
+  end;
+  for i := 0 to ZC_BUCKETS - 1 do
+    while ZcList[i] <> nil do begin
+      q := ZcList[i];
+      ZcList[i] := PPointer(q + ZC_HEAD)^;
+      FreeMem(q);
+    end;
+  ZcBytes := 0;
 end;
 
 function ZopValid(const p: TZopParams): Boolean;
@@ -139,7 +235,7 @@ begin
     (p.bsMax <= ZOP_BSMAX_MAX);
 end;
 
-function ZopDeflate(const plain: TBytes; const p: TZopParams; out raw: TBytes): Boolean;
+function ZopDeflateIn(const plain: TBytes; const p: TZopParams; out raw: TBytes): Boolean;
 var cap, n: SizeUInt; src: PByte; empty: Byte;
 begin
   raw := nil;
@@ -154,6 +250,16 @@ begin
   if n = 0 then begin raw := nil; Exit(False); end;
   SetLength(raw, n);
   Result := True;
+end;
+
+function ZopDeflate(const plain: TBytes; const p: TZopParams; out raw: TBytes): Boolean;
+begin
+  ZopEnter;
+  try
+    Result := ZopDeflateIn(plain, p, raw);
+  finally
+    ZopLeave;
+  end;
 end;
 
 function ZopChoices(const plain: TBytes; const p: TZopParams; out e: TZStream): Boolean;
@@ -196,7 +302,7 @@ begin
   if z.adlerOk then Dec(len, 4);
 end;
 
-function FindZopParams(const a: TBytes; const z: TZStream; maxPlain: SizeInt; out p: TZopParams;
+function FindZopParamsIn(const a: TBytes; const z: TZStream; maxPlain: SizeInt; out p: TZopParams;
   out choices: TZStream; maxVariant: Integer): Boolean;
 const
   TRIES_SMALL: array[0..8] of Integer = (15, 60, 5, 20, 1, 10, 30, 50, 100);
@@ -286,6 +392,17 @@ begin
   if stop > n then stop := n;
   if (not tried or (stop <> 0)) and TryPiece(stop, Length(TRIES_SMALL)) then Exit(True);
   p := Default(TZopParams);
+end;
+
+function FindZopParams(const a: TBytes; const z: TZStream; maxPlain: SizeInt; out p: TZopParams;
+  out choices: TZStream; maxVariant: Integer): Boolean;
+begin
+  ZopEnter;
+  try
+    Result := FindZopParamsIn(a, z, maxPlain, p, choices, maxVariant);
+  finally
+    ZopLeave;
+  end;
 end;
 
 initialization

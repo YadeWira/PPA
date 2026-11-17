@@ -440,7 +440,7 @@ end;
 { ---------------------------------------------------------------- deflate.c }
 
 function BlockBits(const z: TZStream; const b: TDeflateBlock; bitPos: Int64): Int64;
-var i: SizeInt; l, c, v: Integer;
+var i: SizeInt; l, c, v: Integer; cs: Word;
 
   { a match's length code and extra bits: 258 as 284 is 284 with 5 }
   function LenBits(l: Integer; fixed: Boolean): Integer;
@@ -464,7 +464,10 @@ begin
   else begin
     Result := 3 + 5 + 5 + 4 + 3 * b.hclen + b.litLen[END_BLOCK];
     for i := 0 to High(b.clenSeq) do begin
-      c := b.clenSeq[i] and $1F;
+      { the element into a Word first: `clenSeq[i] and $1F` loads 4 bytes
+        (ppadeflate's Encode) }
+      cs := b.clenSeq[i];
+      c := cs and $1F;
       Inc(Result, b.clen[c] + EXTRA_BLBITS[c]);
     end;
     for i := b.firstToken to b.firstToken + b.nTokens - 1 do begin
