@@ -116,6 +116,45 @@ loads: a host's environment does not change its streams (CI runs the test
 with them set). PJA's own (`PJA_NOASM`, `PJA_NOAVX2`, `PJA_BANDS_REVERSE`)
 still apply to a JNG's JPEG; they change the speed only.
 
+### One deflate stream (since 0.7.0)
+
+For a program that meets deflate streams loose, as PDA does in PDFs and
+ZIPs, the library gives PPA's deflate recipes (`PREFLATE.md`) one stream
+at a time: the bytes a stream holds and a recipe, and back to the same
+stream, bit for bit.
+
+| function | does |
+|---|---|
+| `ppa_deflate_ctx_new(max_plain)` | a context, for one thread: the cap on a stream's bytes (0: 1 GiB) and the last stream's recipe |
+| `ppa_deflate_ctx_free(ctx)` | frees it |
+| `ppa_deflate_analyze(ctx, in, n, flags, &plain, &plain_size, &recipe, &recipe_size, &consumed, &err_pos)` | a stream → its bytes and a recipe; `PPA_E_NOT_TAKEN` when no recipe gives it back |
+| `ppa_deflate_rebuild(ctx, plain, plain_size, recipe, recipe_size, max_out, &out, &out_size, &err_pos)` | the bytes and the recipe → the stream (`ctx` may be `NULL`) |
+
+- **Flags:** the framing, `PPA_DEFLATE_RAW` (bare deflate),
+  `PPA_DEFLATE_ZLIB` or `PPA_DEFLATE_AUTO` (zlib when the first two bytes
+  are a zlib header), or'ed with a level, `PPA_DEFLATE_LEVEL_FAST`,
+  `_DEFAULT` (none given) or `_MAX`: how far the search tries zopfli, the
+  slow encoder (never; streams of up to 64 KiB; every stream), as the
+  command's `-1`, `-2` and `-3` do for an image's.
+- **`consumed`:** where the stream ended (the Adler-32 counted when it is
+  the right one). The bytes after it are not in the recipe: they are the
+  caller's (a PDF's `/Length` may be too long).
+- **The hint:** the context tries the last stream's recipe first (zlib's
+  parameters, miniz, libdeflate), so a file whose streams are made alike
+  costs one encode a stream. A recipe does not depend on the context: any
+  context, or none, rebuilds it. Which recipe is found, when several give
+  the same stream, may.
+- **A recipe's bytes:** a version byte, the codec stream version that holds
+  its encoder (3 to 6 in 0.7.0), then `RecipeBytes` (`PREFLATE.md`). A
+  recipe of a version above the library's is `PPA_E_VERSION`; a damaged one
+  is `PPA_E_DATA`, or may give another stream. So may the wrong bytes: the
+  caller checks the stream against what it keeps (a hash).
+- **Worth keeping?** That is the caller's to weigh: the recipe of most
+  streams is a few bytes, a recipe of corrections (kind 3) can be long.
+- **Not handled:** gzip's framing (the caller takes it off), streams one
+  after another (one a call: `consumed`), a zlib preset dictionary
+  (`PPA_E_NOT_TAKEN`).
+
 `pas/lib/test_lib.c` is the test, and an example: each file through
 `ppa_compress`/`ppa_decompress` (the same bytes on one thread and two),
 four threads compressing at once and forty short-lived ones (the same

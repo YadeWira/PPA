@@ -37,6 +37,10 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
   port (oxipng's `--zopfli`): written only for such an image, so 0.5.0
   refuses it as a newer PPA's. A version 5 stream holding variant 1 is
   damage.
+- **libppa's `ppa_deflate_*`** (M8, PPA 0.7.0): one stream at a time,
+  for PDA. A recipe there is a byte, the codec stream version that holds
+  its encoder (`RecipeVersion`, 3 at least), and `RecipeBytes` with no
+  tail: the bytes after the stream are the caller's (`consumed`).
 
 ## Kinds
 
@@ -937,6 +941,36 @@ zopfli" above), in codec stream version 5.
   in version 6. 4 golden vectors of variant 1 (`mkgolden.py
   --zopfli-rs`: runs of one byte, text and noise, where 1.0.3 parts from
   the port at 10, 15 and 20 iterations): 85 in all.
+
+## Status (M8, 17/11/2026): libppa's `ppa_deflate_*`, for PDA
+
+- **The API** (`pas/lib/ppa.h`, `LIBRARY.md`; `pas/ppadeflctx.pas`): a
+  context per thread (the size cap, zlib's tables kept from one stream to
+  the next, the last stream's recipe tried first: PDA's batch),
+  `ppa_deflate_analyze` (a stream, raw, zlib or either, and a level ->
+  its bytes, a recipe and where the stream ended) and
+  `ppa_deflate_rebuild`. The recipe: `RecipeVersion` (3 at least) and
+  `RecipeBytes`, no tail.
+- **PDA's set** (`preflate/corpus/pda`: 467 zlib streams of PDFs, 275 raw
+  of ZIPs, 18,955,136 B holding 141,235,742 B): `test_lib --deflate`
+  rebuilds all 742 through the C interface, with one context and with a
+  fresh one each; 38,714 B of recipes; 4 threads with a context each give
+  the same recipes; bytes after a stream left out (`consumed`); recipe
+  versions 7 to 255 `PPA_E_VERSION`; damaged recipes and cut streams an
+  error or other bytes, never a crash. The 85 golden vectors too, at the
+  default level (zopfli's searched: 48 minutes; CI runs them at level 1
+  and two of zopfli's at the default).
+- **The time a stream costs**: a 39-byte stream (847 B, zlib level 6,
+  the hint right) 62 µs to analyze (the parse and one encode to check)
+  and 45 µs to rebuild, from about 130 µs each: zlib's tables kept in the
+  context (no allocation a stream), the positions' arrays as long as the
+  input when it is shorter than the window, and `BuildEnc`'s bit reversal
+  by table (the same bits: the suite's hashes). The rest is the encode
+  itself (ppazlibc's skip tables, about 150 instructions a byte on short
+  inputs), clearing zlib's hash table (128 KB at memLevel 8) and the
+  parse. The design's 50 µs is not reached for analysis; a stream whose
+  recipe the hint does not give costs the search (PDA's set, its streams
+  of 256 to 1023 B: a median of 348 µs to analyze, 106 µs to rebuild).
 
 ## Studied, not done yet (M7, 16/11/2026): zlib-ng
 

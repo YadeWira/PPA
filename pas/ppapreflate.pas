@@ -130,9 +130,11 @@ function RecipeValid(const recipe: TDeflRecipe): Boolean;
 
 { The bytes and their recipe -> the stream. threads: one stream's rebuild
   cut into segments on as many (ppazlib's parallel rebuild, kind 0 only;
-  the same bits whatever the threads). False, and no stream, on a recipe
+  the same bits whatever the threads; scratch: zlib's tables, kept by a
+  caller that rebuilds many streams, ppazlib's). False, and no stream, on a recipe
   RecipeValid refuses or whose flow does not fit the bytes. }
-function Rebuild(const plain: TBytes; const recipe: TDeflRecipe; out stream: TBytes; threads: Integer = 1): Boolean;
+function Rebuild(const plain: TBytes; const recipe: TDeflRecipe; out stream: TBytes; threads: Integer = 1;
+  scratch: PZlibScratch = nil): Boolean;
 
 { A kind-0 recipe as codec stream version 2 writes an image stream's
   deflate part: level, strategy, memLevel, windowBits, a byte of flags (1:
@@ -153,6 +155,12 @@ function ReadRecipeV2(const b: TBytes; var pos: SizeInt; maxTail: QWord; out rec
 function RecipeBytes(const recipe: TDeflRecipe): TBytes;
 function ReadRecipe(const b: TBytes; var pos: SizeInt; plainLen: SizeInt; maxTail: QWord;
   out recipe: TDeflRecipe): TRecipeRead;
+
+{ The codec stream version a recipe needs (2: kind 0, zlib's parameters;
+  3: kinds 1 to 3 in RecipeBytes; 4: libdeflate; 5: zopfli 1.0.3; 6:
+  zopfli's Rust port). libppa's ppa_deflate_* write it as a recipe's first
+  byte. }
+function RecipeVersion(const recipe: TDeflRecipe): Integer;
 
 { The flow search (kind 1) alone, for the tools: zlib's parameters and a
   flow whose choices are z's blocks and tokens, the choices in choices }
@@ -892,7 +900,19 @@ begin
          ((kind = ZE_PARAMS) and ((level < 1) or (level > 9) or (strategy > Z_FIXED))) then Exit(False);
 end;
 
-function Rebuild(const plain: TBytes; const recipe: TDeflRecipe; out stream: TBytes; threads: Integer): Boolean;
+function RecipeVersion(const recipe: TDeflRecipe): Integer;
+begin
+  if recipe.kind = RECIPE_ZLIB then Result := 2
+  else if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_ZOPFLI) and (recipe.zop.variant >= ZOPV_RS08) then
+    Result := 6
+  else if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_ZOPFLI) then Result := 5
+  else if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_LIBDEFLATE) then Result := 4
+  else if recipe.kind in [RECIPE_ZLIB_FLOW, RECIPE_ENCODER, RECIPE_CORR] then Result := 3
+  else Result := High(Integer);
+end;
+
+function Rebuild(const plain: TBytes; const recipe: TDeflRecipe; out stream: TBytes; threads: Integer;
+  scratch: PZlibScratch): Boolean;
 var e: TZStream; good: SizeInt;
 begin
   stream := nil;
@@ -921,10 +941,10 @@ begin
     Exit(True);
   end;
   if recipe.kind = RECIPE_ZLIB then
-    ZlibChoices(plain, recipe.prm, nil, e, threads)
+    ZlibChoices(plain, recipe.prm, nil, e, threads, scratch)
   else begin
     if not ZlibFlowValid(recipe.flow, recipe.prm, Length(plain)) then Exit(False);
-    ZlibChoicesFlow(plain, recipe.prm, recipe.flow, nil, e, good, threads);
+    ZlibChoicesFlow(plain, recipe.prm, recipe.flow, nil, e, good, threads, scratch);
   end;
   PutFraming(recipe, e);
   stream := Encode(e);

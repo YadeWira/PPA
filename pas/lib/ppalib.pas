@@ -22,7 +22,7 @@ library ppa;
 
 uses
   {$ifdef unix}cthreads,{$endif}{$ifdef windows}ppaheap,{$endif}
-  Classes, SysUtils, ppacpu, ppaformat, ppacodec, ppasysinfo, ppastage, pjamodel;
+  Classes, SysUtils, ppacpu, ppaformat, ppacodec, ppasysinfo, ppastage, pjamodel, ppadeflctx;
 
 {$L ppafilter.o}
 {$L ppa7z.o}
@@ -493,6 +493,79 @@ begin
   end;
 end;
 
+{ ---------------------------------------------------------------- one deflate stream (ppadeflctx) }
+
+function ppa_deflate_ctx_new(maxPlain: SizeUInt): Pointer; cdecl;
+begin
+  try
+    Result := TDeflCtx.Create(maxPlain);
+  except
+    Result := nil;
+  end;
+end;
+
+procedure ppa_deflate_ctx_free(ctx: Pointer); cdecl;
+begin
+  try
+    TDeflCtx(ctx).Free;
+  except
+  end;
+end;
+
+function ppa_deflate_analyze(ctx: Pointer; input: PByte; size: SizeUInt; flags: LongInt;
+  plain: PPByte; plainSize: PSizeUInt; recipe: PPByte; recipeSize: PSizeUInt;
+  consumed, errPos: PSizeUInt): LongInt; cdecl;
+var pl, rc: TBytes; cons, ep: SizeUInt;
+begin
+  if (ctx = nil) or (plain = nil) or (plainSize = nil) or (recipe = nil) or (recipeSize = nil) then
+    Exit(PPA_E_ARG);
+  plain^ := nil; plainSize^ := 0; recipe^ := nil; recipeSize^ := 0;
+  if consumed <> nil then consumed^ := 0;
+  if errPos <> nil then errPos^ := 0;
+  if (input = nil) and (size > 0) then Exit(PPA_E_ARG);
+  cons := 0; ep := 0;
+  try
+    Result := TDeflCtx(ctx).Analyze(input, size, flags, pl, rc, cons, ep);
+    if consumed <> nil then consumed^ := cons;
+    if errPos <> nil then errPos^ := ep;
+    if Result <> PPA_OK then Exit;
+    if not Hand(pl, plain^, plainSize^) then Exit(PPA_E_MEMORY);
+    if not Hand(rc, recipe^, recipeSize^) then begin
+      FreeMem(plain^); plain^ := nil; plainSize^ := 0;
+      Exit(PPA_E_MEMORY);
+    end;
+  except
+    if plain^ <> nil then FreeMem(plain^);
+    plain^ := nil; plainSize^ := 0;
+    Result := PPA_E_MEMORY;
+  end;
+end;
+
+function ppa_deflate_rebuild(ctx: Pointer; plain: PByte; plainSize: SizeUInt; recipe: PByte; recipeSize: SizeUInt;
+  maxOut: SizeUInt; output: PPByte; outSize: PSizeUInt; errPos: PSizeUInt): LongInt; cdecl;
+var st: TBytes; ep: SizeUInt; c: TDeflCtx;
+begin
+  if (output = nil) or (outSize = nil) then Exit(PPA_E_ARG);
+  output^ := nil; outSize^ := 0;
+  if errPos <> nil then errPos^ := 0;
+  if ((plain = nil) and (plainSize > 0)) or ((recipe = nil) and (recipeSize > 0)) then Exit(PPA_E_ARG);
+  ep := 0;
+  c := nil;
+  try
+    try
+      { the context holds nothing a rebuild needs: none is fine }
+      if ctx = nil then begin c := TDeflCtx.Create(0); ctx := c; end;
+      Result := TDeflCtx(ctx).Rebuild(plain, plainSize, recipe, recipeSize, maxOut, st, ep);
+      if errPos <> nil then errPos^ := ep;
+      if (Result = PPA_OK) and not Hand(st, output^, outSize^) then Result := PPA_E_MEMORY;
+    finally
+      c.Free;
+    end;
+  except
+    Result := PPA_E_MEMORY;
+  end;
+end;
+
 { the 7-Zip plugin's exports: STDAPI, __stdcall on Windows x86 }
 function GetNumberOfMethods(n: PLongWord): HRESULT; {$ifdef windows}stdcall{$else}cdecl{$endif};
 begin
@@ -529,6 +602,7 @@ var host: THost; host7z: THost7z;
 exports
   ppa_version, ppa_compress, ppa_compress_level, ppa_decompress, ppa_free, ppa_filter_encode,
   ppa_filter_encode_level, ppa_filter_decode,
+  ppa_deflate_ctx_new, ppa_deflate_ctx_free, ppa_deflate_analyze, ppa_deflate_rebuild,
   GetNumberOfMethods, GetMethodProperty, CreateDecoder, CreateEncoder, CreateObject, GetModuleProp;
 
 begin

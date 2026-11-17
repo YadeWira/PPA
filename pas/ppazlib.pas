@@ -121,7 +121,7 @@ type
   at the first block that differs from ref's and returns False; True means
   every block was the same (z then holds them all). }
 function ZlibChoices(const plain: TBytes; const prm: TZlibParams; ref: PZStream;
-  out z: TZStream; threads: Integer = 1): Boolean;
+  out z: TZStream; threads: Integer = 1; scratch: PZlibScratch = nil): Boolean;
 
 { The zlib parameters that give z's blocks and tokens, if there are any:
   levels from the header's FLEVEL (any with a bare deflate stream), the
@@ -542,11 +542,11 @@ begin
 end;
 
 function ZlibChoices(const plain: TBytes; const prm: TZlibParams; ref: PZStream;
-  out z: TZStream; threads: Integer): Boolean;
+  out z: TZStream; threads: Integer; scratch: PZlibScratch): Boolean;
 var flow: TZlibFlow; good: SizeInt;
 begin
   flow := Default(TZlibFlow);
-  Result := ZlibChoicesFlow(plain, prm, flow, ref, z, good, threads);
+  Result := ZlibChoicesFlow(plain, prm, flow, ref, z, good, threads, scratch);
 end;
 
 function ZlibChoicesFlow(const plain: TBytes; const prm: TZlibParams; const flow: TZlibFlow; ref: PZStream;
@@ -1014,7 +1014,7 @@ var
     where every loop with chains is a filtered deflate_slow, the 16 bytes'
     links where any is a level of chains of 1024 or more }
   procedure SetupC;
-  var k: SizeInt; key, room, reach: SizeInt; long16: Boolean; lv, sg: Integer;
+  var k: SizeInt; key, room, reach, wz: SizeInt; long16: Boolean; lv, sg: Integer;
   begin
     key := Key1(prm.level <= 3);
     long16 := CONFIG[prm.level, 3] >= 1024;
@@ -1030,13 +1030,18 @@ var
         end;
       end;
     if key = 0 then key := 4;
+    { the positions' arrays: as many as there are positions when fewer
+      than the window (each is at str and wmask, str < n: a short input's
+      run clears and touches no more) }
+    wz := wsize;
+    if n + 8 < wz then wz := n + 8;
     if scratch <> nil then begin
       Zeroed32(scratch^.head32, hashSize); head32 := scratch^.head32;
-      Zeroed64(scratch^.posC, wsize); posC := scratch^.posC;
+      Zeroed64(scratch^.posC, wz); posC := scratch^.posC;
       Zeroed16(scratch^.cnt, hashSize); cnt := scratch^.cnt;
     end else begin
       head32 := nil; SetLength(head32, hashSize);
-      posC := nil; SetLength(posC, wsize); cnt := nil; SetLength(cnt, hashSize);
+      posC := nil; SetLength(posC, wz); cnt := nil; SetLength(cnt, hashSize);
     end;
     { the skip tables' size only changes how often a collision makes the
       search walk zlib's chain, never the choices: sized by what the run
@@ -1050,14 +1055,14 @@ var
       Zeroed32(scratch^.t4, 1 shl skipBits); t4 := scratch^.t4;
       Zeroed32(scratch^.t8, 1 shl skipBits); t8 := scratch^.t8;
       if long16 then begin
-        Zeroed16(scratch^.d16, wsize); d16 := scratch^.d16;
+        Zeroed16(scratch^.d16, wz); d16 := scratch^.d16;
         Zeroed32(scratch^.t16, 1 shl skipBits); t16 := scratch^.t16;
       end;
     end else begin
       t4 := nil; SetLength(t4, 1 shl skipBits);
       t8 := nil; SetLength(t8, 1 shl skipBits);
       if long16 then begin
-        SetLength(d16, wsize); SetLength(t16, 1 shl skipBits);
+        SetLength(d16, wz); SetLength(t16, 1 shl skipBits);
       end;
     end;
     { room for every token; against ref, for ref's and a block's more

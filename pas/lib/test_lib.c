@@ -14,7 +14,17 @@
    through the filter in read sizes of 1 byte to 1 MiB, and back: the same
    bytes, every time. A damaged filter stream must give an error or other
    bytes, never a crash. Prints a line per check that fails and "N checks,
-   M failures" at the end. */
+   M failures" at the end.
+
+     test_lib --deflate [-1|-2|-3] FILE...
+
+   Each file a deflate stream (.raw: bare; .zlib: zlib; else either),
+   through ppa_deflate_analyze and ppa_deflate_rebuild: the same stream
+   back, with one context for all (the hint) and with a fresh one each;
+   bytes after the stream left out of it; a newer recipe PPA_E_VERSION;
+   damaged streams and recipes an error or other bytes, never a crash; 4
+   threads, a context each, the same recipes; -1 to -3, the level. Prints
+   the time a stream takes, by size. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +34,7 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <time.h>
 #endif
 
 static int checks, failures;
@@ -176,9 +187,271 @@ static void threads_test(const unsigned char *d, size_t n, const void *want, siz
   printf("threads (%s): 4 at once, 3 rounds, and 40 one after another: %s\n", name, bad ? "FAILED" : "the same bytes");
 }
 
+/* ---------- one deflate stream at a time (ppa_deflate_*) ---------- */
+
+static double now_us(void) {
+#ifdef _WIN32
+  LARGE_INTEGER f, c;
+  QueryPerformanceFrequency(&f);
+  QueryPerformanceCounter(&c);
+  return (double)c.QuadPart * 1e6 / (double)f.QuadPart;
+#else
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
+#endif
+}
+
+static int framing_of(const char *name) {
+  size_t l = strlen(name);
+  if (l > 4 && strcmp(name + l - 4, ".raw") == 0) return PPA_DEFLATE_RAW;
+  if (l > 5 && strcmp(name + l - 5, ".zlib") == 0) return PPA_DEFLATE_ZLIB;
+  return PPA_DEFLATE_AUTO;
+}
+
+typedef struct { const unsigned char *d; size_t n; int flags; void *rc; size_t rn; int r; } dstream_t;
+
+/* every stream, in order, through one context: the result and recipe of each */
+static void analyze_all(dstream_t *s, int ns) {
+  ppa_deflate_ctx *c = ppa_deflate_ctx_new(0);
+  for (int k = 0; k < ns; k++) {
+    void *pl = 0;
+    size_t pn = 0;
+    s[k].rc = 0; s[k].rn = 0;
+    s[k].r = ppa_deflate_analyze(c, s[k].d, s[k].n, s[k].flags, &pl, &pn, &s[k].rc, &s[k].rn, NULL, NULL);
+    ppa_free(pl);
+  }
+  ppa_deflate_ctx_free(c);
+}
+
+typedef struct { dstream_t *s; int ns; } dwork_t;
+#ifdef _WIN32
+static DWORD WINAPI dworker(LPVOID arg) { dwork_t *w = arg; analyze_all(w->s, w->ns); return 0; }
+#else
+static void *dworker(void *arg) { dwork_t *w = arg; analyze_all(w->s, w->ns); return 0; }
+#endif
+
+static int cmp_double(const void *a, const void *b) {
+  double x = *(const double *)a, y = *(const double *)b;
+  return x < y ? -1 : x > y;
+}
+
+static int deflate_main(int argc, char **argv) {
+  /* -1, -2, -3: the level (the default's none) */
+  int level = 0;
+  if (argc > 2 && argv[2][0] == '-' && argv[2][1] >= '1' && argv[2][1] <= '3' && !argv[2][2]) {
+    level = (argv[2][1] - '0') << 4;
+    argv++; argc--;
+  }
+  int ns = argc - 2, ok = 0, notTaken = 0, data = 0, hinted = 0;
+  dstream_t *s = calloc(ns > 0 ? ns : 1, sizeof *s);
+  double *ta = calloc(ns > 0 ? ns : 1, sizeof *ta), *tr = calloc(ns > 0 ? ns : 1, sizeof *tr);
+  size_t *sz = calloc(ns > 0 ? ns : 1, sizeof *sz);
+  size_t in = 0, plainSum = 0, recipeSum = 0;
+  double tA = 0, tR = 0;
+  uint64_t fnv = 14695981039346656037u;          /* the recipes (the one context's), for CI's platforms */
+  ppa_deflate_ctx *batch = ppa_deflate_ctx_new(0);
+  check(batch != NULL, "a context", "");
+  for (int k = 0; k < ns; k++) {
+    const char *name = argv[k + 2];
+    size_t n;
+    unsigned char *d = slurp(name, &n);
+    if (!d) { check(0, "read", name); s[k].d = (unsigned char *)""; continue; }
+    s[k].d = d; s[k].n = n; s[k].flags = framing_of(name) | level;
+    void *pl = 0, *rc = 0, *back = 0;
+    size_t pn = 0, rn = 0, bn = 0, cons = 0, ep = 0;
+    double t0 = now_us();
+    int r = ppa_deflate_analyze(batch, d, n, s[k].flags, &pl, &pn, &rc, &rn, &cons, &ep);
+    double t1 = now_us();
+    sz[k] = n; ta[k] = t1 - t0;
+    tA += t1 - t0;
+    in += n;
+    if (r == PPA_E_NOT_TAKEN) { notTaken++; printf("  not taken: %s\n", name); continue; }
+    if (r != PPA_OK) { data++; check(0, "analyze", name); continue; }
+    check(cons > 0 && cons <= n, "consumed within the stream", name);
+    t0 = now_us();
+    r = ppa_deflate_rebuild(NULL, pl, pn, rc, rn, 0, &back, &bn, &ep);
+    t1 = now_us();
+    tr[k] = t1 - t0;
+    tR += t1 - t0;
+    check(r == PPA_OK && bn == cons && memcmp(back, d, cons) == 0, "rebuilt the same", name);
+    ok += r == PPA_OK && bn == cons && memcmp(back, d, cons) == 0;
+    plainSum += pn; recipeSum += rn;
+    for (size_t j = 0; j < rn; j++) fnv = (fnv ^ ((unsigned char *)rc)[j]) * 1099511628211u;
+    ppa_free(back); back = 0;
+    /* a fresh context (no hint): a recipe that gives the same stream */
+    {
+      ppa_deflate_ctx *c = ppa_deflate_ctx_new(0);
+      void *pl2 = 0, *rc2 = 0;
+      size_t pn2 = 0, rn2 = 0;
+      r = ppa_deflate_analyze(c, d, n, s[k].flags, &pl2, &pn2, &rc2, &rn2, NULL, NULL);
+      check(r == PPA_OK && pn2 == pn && memcmp(pl2, pl, pn) == 0, "a fresh context: taken, the same bytes", name);
+      hinted += r == PPA_OK && (rn2 != rn || memcmp(rc2, rc, rn) != 0);
+      if (r == PPA_OK) {
+        r = ppa_deflate_rebuild(c, pl2, pn2, rc2, rn2, 0, &back, &bn, NULL);
+        check(r == PPA_OK && bn == cons && memcmp(back, d, cons) == 0, "a fresh context: rebuilt the same", name);
+        ppa_free(back); back = 0;
+      }
+      /* the stream with bytes after it: left out, the same recipe */
+      if (k < 40) {
+        unsigned char *d2 = malloc(n + 9);
+        memcpy(d2, d, n);
+        memcpy(d2 + n, "TRAILING!", 9);
+        void *pl3 = 0, *rc3 = 0;
+        size_t pn3 = 0, rn3 = 0, cons3 = 0;
+        ppa_deflate_ctx *c3 = ppa_deflate_ctx_new(0);
+        r = ppa_deflate_analyze(c3, d2, n + 9, s[k].flags, &pl3, &pn3, &rc3, &rn3, &cons3, NULL);
+        check(r == PPA_OK && cons3 == cons && rn3 == rn2 && memcmp(rc3, rc2, rn2) == 0,
+              "bytes after the stream: left out", name);
+        ppa_deflate_ctx_free(c3);
+        ppa_free(pl3); ppa_free(rc3); free(d2);
+      }
+      ppa_deflate_ctx_free(c);
+      ppa_free(pl2); ppa_free(rc2);
+    }
+    /* max_out below the stream: PPA_E_MEMORY */
+    if (k < 40) {
+      check(ppa_deflate_rebuild(NULL, pl, pn, rc, rn, cons - 1, &back, &bn, NULL) == PPA_E_MEMORY && back == NULL,
+            "rebuild, max_out below the stream: PPA_E_MEMORY", name);
+      /* a newer recipe: PPA_E_VERSION; version 0 to 2: PPA_E_DATA */
+      unsigned char *rv = malloc(rn);
+      memcpy(rv, rc, rn);
+      int bad = 0;
+      for (int v = 0; v < 256; v++) {
+        rv[0] = (unsigned char)v;
+        r = ppa_deflate_rebuild(NULL, pl, pn, rv, rn, 0, &back, &bn, NULL);
+        ppa_free(back); back = 0;
+        if (v > 6) bad += r != PPA_E_VERSION;
+        else if (v < 3) bad += r != PPA_E_DATA;
+      }
+      check(bad == 0, "recipe versions: 7 to 255 PPA_E_VERSION, 0 to 2 PPA_E_DATA", name);
+      /* damaged recipes and bytes: an error or a stream, no crash */
+      memcpy(rv, rc, rn);
+      for (size_t j = 1; j < rn; j++) {
+        rv[j] ^= 0x5A;
+        r = ppa_deflate_rebuild(NULL, pl, pn, rv, rn, 0, &back, &bn, NULL);
+        ppa_free(back); back = 0;
+        rv[j] ^= 0x5A;
+        check(r == PPA_OK || r == PPA_E_DATA || r == PPA_E_VERSION, "a damaged recipe: an error or a stream", name);
+      }
+      r = ppa_deflate_rebuild(NULL, pl, pn, rc, rn - 1, 0, &back, &bn, NULL);
+      ppa_free(back); back = 0;
+      check(r == PPA_E_DATA, "a recipe cut short: PPA_E_DATA", name);
+      if (pn > 0) {
+        r = ppa_deflate_rebuild(NULL, pl, pn - 1, rc, rn, 0, &back, &bn, NULL);
+        ppa_free(back); back = 0;
+        check(r == PPA_OK || r == PPA_E_DATA, "a byte short: an error or a stream", name);
+      }
+      free(rv);
+      /* the stream cut short or damaged: an error or not taken, no crash */
+      for (size_t cut = 0; cut < n; cut += n / 5 + 1) {
+        void *p4 = 0, *r4 = 0;
+        size_t p4n = 0, r4n = 0;
+        ppa_deflate_ctx *c4 = ppa_deflate_ctx_new(0);
+        r = ppa_deflate_analyze(c4, d, cut, s[k].flags, &p4, &p4n, &r4, &r4n, NULL, NULL);
+        check(r == PPA_E_DATA || r == PPA_E_NOT_TAKEN || r == PPA_OK, "a stream cut short", name);
+        ppa_deflate_ctx_free(c4);
+        ppa_free(p4); ppa_free(r4);
+      }
+    }
+    ppa_free(pl); ppa_free(rc);
+  }
+  /* 4 threads, a context each, the streams in the same order: the same
+     recipes as one context on this thread */
+  if (ns > 0) {
+    dstream_t *one = malloc(ns * sizeof *one), *w4[4];
+    memcpy(one, s, ns * sizeof *one);
+    analyze_all(one, ns);
+    dwork_t dw[4];
+    for (int t = 0; t < 4; t++) {
+      w4[t] = malloc(ns * sizeof *w4[t]);
+      memcpy(w4[t], s, ns * sizeof *w4[t]);
+      dw[t].s = w4[t]; dw[t].ns = ns;
+    }
+#ifdef _WIN32
+    HANDLE h[4];
+    for (int t = 0; t < 4; t++) h[t] = CreateThread(NULL, 0, dworker, &dw[t], 0, NULL);
+    for (int t = 0; t < 4; t++) { WaitForSingleObject(h[t], INFINITE); CloseHandle(h[t]); }
+#else
+    pthread_t h[4];
+    for (int t = 0; t < 4; t++) pthread_create(&h[t], NULL, dworker, &dw[t]);
+    for (int t = 0; t < 4; t++) pthread_join(h[t], NULL);
+#endif
+    int bad = 0;
+    for (int t = 0; t < 4; t++) {
+      for (int k = 0; k < ns; k++) {
+        bad += w4[t][k].r != one[k].r || w4[t][k].rn != one[k].rn ||
+               (one[k].rn && memcmp(w4[t][k].rc, one[k].rc, one[k].rn) != 0);
+        ppa_free(w4[t][k].rc);
+      }
+      free(w4[t]);
+    }
+    for (int k = 0; k < ns; k++) ppa_free(one[k].rc);
+    free(one);
+    check(bad == 0, "4 threads, a context each: the same recipes", "");
+    printf("deflate, 4 threads with a context each: %s\n", bad ? "OTHER recipes" : "the same recipes");
+  }
+  {                                                /* bad arguments, and nothing */
+    void *p = 0, *q = 0;
+    size_t pn = 0, qn = 0, ep = 0;
+    static const unsigned char z[2] = {0x78, 0x9C}, fd[2] = {0x78, 0xBB};
+    check(ppa_deflate_analyze(NULL, z, 2, PPA_DEFLATE_ZLIB, &p, &pn, &q, &qn, NULL, NULL) == PPA_E_ARG, "analyze, no context", "");
+    check(ppa_deflate_analyze(batch, z, 2, 0, &p, &pn, &q, &qn, NULL, NULL) == PPA_E_ARG, "analyze, no framing", "");
+    check(ppa_deflate_analyze(batch, z, 2, PPA_DEFLATE_ZLIB | 0x100, &p, &pn, &q, &qn, NULL, NULL) == PPA_E_ARG,
+          "analyze, unknown flags", "");
+    check(ppa_deflate_analyze(batch, z, 2, PPA_DEFLATE_ZLIB, NULL, &pn, &q, &qn, NULL, NULL) == PPA_E_ARG, "analyze, null plain", "");
+    check(ppa_deflate_analyze(batch, NULL, 0, PPA_DEFLATE_ZLIB, &p, &pn, &q, &qn, NULL, &ep) == PPA_E_DATA, "analyze, nothing", "");
+    check(ppa_deflate_analyze(batch, z, 2, PPA_DEFLATE_ZLIB, &p, &pn, &q, &qn, NULL, &ep) == PPA_E_DATA,
+          "analyze, a header alone", "");
+    check(ppa_deflate_analyze(batch, fd, 2, PPA_DEFLATE_AUTO, &p, &pn, &q, &qn, NULL, NULL) == PPA_E_NOT_TAKEN,
+          "analyze, a preset dictionary: not taken", "");
+    check(ppa_deflate_rebuild(NULL, z, 2, NULL, 0, 0, &p, &pn, NULL) == PPA_E_DATA, "rebuild, no recipe", "");
+    check(ppa_deflate_rebuild(NULL, z, 2, z, 2, 0, NULL, &pn, NULL) == PPA_E_ARG, "rebuild, null out", "");
+    ppa_deflate_ctx *small = ppa_deflate_ctx_new(16);
+    for (int k = 0; k < ns; k++)
+      if (s[k].n > 64) {
+        size_t cons = 0;
+        int r = ppa_deflate_analyze(small, s[k].d, s[k].n, s[k].flags, &p, &pn, &q, &qn, &cons, NULL);
+        check(r == PPA_E_MEMORY || (r == PPA_OK && pn <= 16) || r == PPA_E_DATA, "over max_plain: PPA_E_MEMORY", argv[k + 2]);
+        ppa_free(p); ppa_free(q); p = q = 0;
+        break;
+      }
+    ppa_deflate_ctx_free(small);
+    ppa_deflate_ctx_free(NULL);
+  }
+  ppa_deflate_ctx_free(batch);
+  printf("deflate: %d streams, %d rebuilt the same, %d not taken, %d refused; %zu bytes -> %zu bytes "
+         "and %zu of recipes; %d recipes other with a fresh context\n",
+         ns, ok, notTaken, data, in, plainSum, recipeSum, hinted);
+  /* the time a stream takes: the median of each size class */
+  static const size_t lim[] = {256, 1024, 4096, 65536, (size_t)-1};
+  size_t lo = 0;
+  double *a = malloc((ns > 0 ? ns : 1) * sizeof *a), *b = malloc((ns > 0 ? ns : 1) * sizeof *b);
+  for (unsigned c = 0; c < sizeof lim / sizeof lim[0]; c++) {
+    int m = 0;
+    for (int k = 0; k < ns; k++)
+      if (sz[k] >= lo && sz[k] < lim[c] && tr[k] > 0) { a[m] = ta[k]; b[m] = tr[k]; m++; }
+    if (m > 0) {
+      qsort(a, m, sizeof *a, cmp_double);
+      qsort(b, m, sizeof *b, cmp_double);
+      printf("deflate, streams of %zu to %zu bytes: %d, median %.0f us to analyze, %.0f us to rebuild\n",
+             lo, lim[c] == (size_t)-1 ? (size_t)0 : lim[c] - 1, m, a[m / 2], b[m / 2]);
+    }
+    lo = lim[c];
+  }
+  printf("deflate: %.2f s to analyze, %.2f s to rebuild\n", tA / 1e6, tR / 1e6);
+  printf("deflate: recipes %016llx\n", (unsigned long long)fnv);
+  free(a); free(b);
+  for (int k = 0; k < ns; k++) if (s[k].n) free((void *)s[k].d);
+  free(s); free(ta); free(tr); free(sz);
+  printf("%d checks, %d failures\n", checks, failures);
+  return failures != 0;
+}
+
 int main(int argc, char **argv) {
   setvbuf(stdout, NULL, _IONBF, 0);   /* every line out at once, even if a check hangs */
   printf("%s\n", ppa_version());
+  if (argc > 1 && strcmp(argv[1], "--deflate") == 0) return deflate_main(argc, argv);
   unsigned char *all = 0;
   size_t alln = 0, taken = 0, insum = 0, outsum = 0;
   unsigned seed = 1;

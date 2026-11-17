@@ -390,19 +390,6 @@ begin
   if Int64(sSlow) * 100 < Int64(sFast) * (100 - SLOW_GAIN) then Result := MODE_IMAGE;
 end;
 
-{ The stream version a deflate recipe needs: kind 0's, zlib's parameters,
-  is version 2's; kinds 1 to 3 (RecipeBytes) version 3's }
-function RecipeVersion(const recipe: TDeflRecipe): Integer;
-begin
-  if recipe.kind = RECIPE_ZLIB then Result := 2
-  else if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_ZOPFLI) and (recipe.zop.variant >= ZOPV_RS08) then
-    Result := 6
-  else if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_ZOPFLI) then Result := 5
-  else if (recipe.kind = RECIPE_ENCODER) and (recipe.encoder = ENC_LIBDEFLATE) then Result := 4
-  else if recipe.kind in [RECIPE_ZLIB_FLOW, RECIPE_ENCODER, RECIPE_CORR] then Result := 3
-  else Result := High(Integer);
-end;
-
 { the recipe kinds a stream version holds }
 function MaxRecipeKind(streamVer: Integer): Integer;
 begin

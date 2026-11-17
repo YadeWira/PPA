@@ -108,6 +108,15 @@ ${CC:-cc} -O2 -Ipas/lib pas/lib/test_lib.c -o "$OUT/lib/test_lib$EXE" "$LIBF" $R
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_MODEL=slow PPA_NOC=1 "$OUT/lib/test_lib$EXE" tests/png/* README.md > "$OUT/lib/test.txt" \
   || { cat "$OUT/lib/test.txt"; echo "FAIL: libppa's test"; exit 1; }
 tail -3 "$OUT/lib/test.txt"
+# one deflate stream at a time (ppa_deflate_*): the golden vectors at level
+# 1 (no zopfli: its search takes seconds a stream), two of zopfli's at the
+# default (20 s); their recipes the same on every platform (hash.txt)
+PPA_NOC=1 "$OUT/lib/test_lib$EXE" --deflate -1 tests/recipes/*.zlib tests/recipes/*.raw > "$OUT/lib/deflate.txt" \
+  || { cat "$OUT/lib/deflate.txt"; echo "FAIL: libppa's deflate test"; exit 1; }
+PPA_NOC=1 "$OUT/lib/test_lib$EXE" --deflate tests/recipes/rgba8-zopfli.raw tests/recipes/drawing-zok2-i5.raw > "$OUT/lib/deflate2.txt" \
+  || { cat "$OUT/lib/deflate2.txt"; echo "FAIL: libppa's deflate test (zopfli)"; exit 1; }
+grep -h '^deflate: [0-9]* streams' "$OUT/lib/deflate.txt" "$OUT/lib/deflate2.txt"
+grep -h '^deflate: recipes' "$OUT/lib/deflate.txt" "$OUT/lib/deflate2.txt" > "$OUT/deflate.txt"
 # 7-Zip 23 or later (not p7zip, whose IUnknown differs): a copy with the
 # plugin in its Codecs folder (the same word size as the library), an
 # archive written and extracted. Linux: 7-Zip's package; Windows: the
@@ -201,7 +210,7 @@ cmp -s "$OUT/static.txt" "$OUT/static_pas.txt" || { echo "FAIL: the C and Pascal
 
 # each part's own hash too, to find which one differs when the job that
 # compares the platforms fails
-for part in streams zlib model fast static ppa v3; do echo "$part: $(tr -d '\r' < "$OUT/$part.txt" | $SHA | cut -c1-16)"; done
+for part in streams zlib model fast static ppa v3 deflate; do echo "$part: $(tr -d '\r' < "$OUT/$part.txt" | $SHA | cut -c1-16)"; done
 cat "$OUT/ppa.txt"
-cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" "$OUT/fast.txt" "$OUT/static.txt" "$OUT/ppa.txt" "$OUT/bands.txt" "$OUT/v3.txt" "$OUT/png3.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
+cat "$OUT/streams.txt" "$OUT/zlib.txt" "$OUT/model.txt" "$OUT/fast.txt" "$OUT/static.txt" "$OUT/ppa.txt" "$OUT/bands.txt" "$OUT/v3.txt" "$OUT/png3.txt" "$OUT/deflate.txt" | tr -d '\r' | $SHA | cut -d' ' -f1 > hash.txt
 echo "hash: $(cat hash.txt)"

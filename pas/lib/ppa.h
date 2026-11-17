@@ -113,6 +113,72 @@ int PPA_CALL ppa_filter_encode_level(ppa_read_fn read, void *read_ctx, ppa_write
 int PPA_CALL ppa_filter_decode(ppa_read_fn read, void *read_ctx, ppa_write_fn write, void *write_ctx,
                                int threads);
 
+/* One deflate stream at a time, for a program that meets them loose (PDA:
+   a PDF's or a ZIP's streams), since 0.7.0. ppa_deflate_analyze takes a
+   stream, zlib-framed or bare, and gives the bytes it holds and a recipe:
+   what the bytes alone do not say of how they were deflated, a few bytes
+   for most streams (doc/PREFLATE.md). ppa_deflate_rebuild gives the same
+   stream back, bit for bit, from the bytes and the recipe. A stream no
+   recipe gives back comes out as PPA_E_NOT_TAKEN; the caller keeps it as
+   it is. Whether the recipe and the bytes are worth more to the caller
+   than the stream (the bytes compress better; a recipe of corrections may
+   be long) is the caller's to weigh.
+
+   A context is one thread's (several threads: one each). It holds the
+   cap on a stream's bytes and the last stream's recipe, tried first on the
+   next one: a file's streams are mostly made alike, and the search is then
+   one encode. A recipe does not depend on the context that made it (any
+   context, or none, rebuilds it), only which recipe is found when several
+   give the same stream may.
+
+   Not handled: gzip's framing (the caller takes it off), members or
+   streams one after another (one stream a call: consumed says where it
+   ended), a zlib stream with a preset dictionary (FDICT: PPA_E_NOT_TAKEN).
+   A recipe begins with its version (a codec stream version, 3 to 6 in
+   0.7.0): a recipe a newer PPA wrote with an encoder this one does not know
+   is PPA_E_VERSION. */
+enum {
+  PPA_DEFLATE_RAW = 1,         /* bare deflate (RFC 1951) */
+  PPA_DEFLATE_ZLIB = 2,        /* zlib (RFC 1950): the 2-byte header, the data, the Adler-32 */
+  PPA_DEFLATE_AUTO = 3,        /* zlib when the first 2 bytes are a zlib header, bare otherwise */
+  /* the level, or'ed in (none: PPA_LEVEL_DEFAULT): how hard the search
+     tries zopfli's encoder, the slow one (fast: never; default: streams of
+     up to 64 KiB; max: every stream) */
+  PPA_DEFLATE_LEVEL_FAST = PPA_LEVEL_FAST << 4,
+  PPA_DEFLATE_LEVEL_DEFAULT = PPA_LEVEL_DEFAULT << 4,
+  PPA_DEFLATE_LEVEL_MAX = PPA_LEVEL_MAX << 4
+};
+typedef struct ppa_deflate_ctx ppa_deflate_ctx;
+
+/* max_plain: the most bytes a stream may hold (0, or more than 1 GiB: 1
+   GiB); a stream holding more is PPA_E_MEMORY. NULL: no memory. */
+ppa_deflate_ctx *PPA_CALL ppa_deflate_ctx_new(size_t max_plain);
+void PPA_CALL ppa_deflate_ctx_free(ppa_deflate_ctx *ctx);
+
+/* in[0..n) -> *plain (*plain_size bytes) and *recipe (*recipe_size), both
+   freed with ppa_free. flags: a framing and a level, above. *consumed (may
+   be NULL): where the stream ended, the Adler-32 included when zlib-framed
+   and it is the right one; the bytes after it are not in the recipe (the
+   caller keeps them: a PDF's /Length may be long). PPA_E_DATA: not a
+   deflate stream (cut short, a bad code...), *err_pos (may be NULL) the
+   byte where that showed; PPA_E_NOT_TAKEN: a stream no recipe gives back
+   (*consumed set); PPA_E_MEMORY: no memory, or over max_plain; PPA_E_ARG:
+   a null pointer or unknown flags. */
+int PPA_CALL ppa_deflate_analyze(ppa_deflate_ctx *ctx, const void *in, size_t n, int flags,
+                                 void **plain, size_t *plain_size, void **recipe, size_t *recipe_size,
+                                 size_t *consumed, size_t *err_pos);
+
+/* The bytes and their recipe -> the stream, in[0..consumed) of the
+   analysis, in *out (*out_size bytes; ppa_free). ctx may be NULL. max_out
+   caps the stream (0: no cap): over it, PPA_E_MEMORY. PPA_E_VERSION: a
+   newer PPA's recipe; PPA_E_DATA: a damaged recipe or one for other bytes
+   (*err_pos, may be NULL: about where in the recipe). A recipe with the
+   wrong bytes may also give a stream that is not the original: the caller
+   checks what it keeps a hash of. */
+int PPA_CALL ppa_deflate_rebuild(ppa_deflate_ctx *ctx, const void *plain, size_t plain_size,
+                                 const void *recipe, size_t recipe_size, size_t max_out,
+                                 void **out, size_t *out_size, size_t *err_pos);
+
 #ifdef __cplusplus
 }
 #endif

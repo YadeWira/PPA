@@ -173,6 +173,7 @@ var
   DistSym: array[1..32768] of Byte;  { the symbol of each distance }
   FixedLit: array[0..287] of Byte;
   FixedDist: array[0..31] of Byte;
+  Rev8: array[0..255] of Byte;       { each byte's bits reversed }
 
 { ---------------------------------------------------------------- results }
 
@@ -251,11 +252,8 @@ begin
     if lens[i] = 0 then Continue;
     c := next[lens[i]] and $FFFF;
     Inc(next[lens[i]]);
-    r := 0;
-    for b := 1 to lens[i] do begin
-      r := (r shl 1) or (c and 1);
-      c := c shr 1;
-    end;
+    { c's low lens[i] bits, reversed }
+    r := ((Integer(Rev8[c and $FF]) shl 8) or Rev8[c shr 8]) shr (16 - lens[i]);
     h.code[i] := r;
   end;
 end;
@@ -692,6 +690,12 @@ begin
   for i := 256 to 279 do FixedLit[i] := 7;
   for i := 280 to 287 do FixedLit[i] := 8;
   for i := 0 to 31 do FixedDist[i] := 5;
+  for i := 0 to 255 do begin
+    l := 0;
+    for s := 0 to 7 do
+      if (i shr s) and 1 <> 0 then l := l or (1 shl (7 - s));
+    Rev8[i] := l;
+  end;
 end;
 
 initialization

@@ -65,6 +65,13 @@ The C interface in `pas/lib/ppa.h` keeps its functions and their meaning;
 new functions may come, and new error codes: a caller treats a code it
 does not know as an error.
 
+The recipes of `ppa_deflate_analyze` (since 0.7.0, one deflate stream at a
+time): a version byte, the codec stream version that holds the recipe's
+encoder (3 to 6), then `RecipeBytes` (format 2, `PREFLATE.md`) with no
+tail. They follow the codec stream's rule: every later release rebuilds
+them bit for bit, and a recipe of a version past its own is
+`PPA_E_VERSION`.
+
 7-Zip method: `PPA`, one stream, today under 7-Zip's experimental ID
 `03 7F 11` (beside PJA's `03 7F 01` and `03 7F 02`). 1.0.0 brings an ID of
 PPA's own; archives written with the experimental one keep opening in
