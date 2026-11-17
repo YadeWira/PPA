@@ -5,8 +5,8 @@
    - No C runtime, as the rest of PPA's C: malloc, realloc, calloc and free
      are the caller's memory, each block on a list kept for the call, so
      that a failure (zopfli's exit() where an allocation failed) jumps back
-     to ppa_zop_deflate (__builtin_setjmp, no library; macOS: the system's
-     _setjmp), which frees what
+     to ppa_zop_deflate (__builtin_setjmp, no library; arm64: PPA's own
+     setjmp), which frees what
      was left and returns 0: the process (a 7-Zip host) never exits.
      memcpy, memmove, memset are ppamemc.c's; fprintf (zopfli's verbose
      output) is nothing.
@@ -101,13 +101,37 @@ static double ppa_zop_log(double x) {
 /* the call's memory: a list of blocks, each after a header that keeps the
    list and the size (32 bytes: doubles stay aligned) */
 /* the jump back on a failure: the compiler's own (__builtin_setjmp, no
-   library) where it has one; Apple's clang on arm64 has not, and there the
-   system library is always linked: its _setjmp (no signal mask) */
+   library) on x86; clang has none for arm64 (gcc has), so arm64 takes
+   PPA's own: it keeps the registers the AAPCS64 has a call preserve
+   (x19 to x30, sp, d8 to d15) and gives them back, as setjmp and longjmp
+   do without the signal mask */
+#if defined(__aarch64__)
+typedef unsigned long long ppa_zop_jb[22];
+int ppa_zop_setjmp(ppa_zop_jb b) __attribute__((returns_twice));
+void ppa_zop_longjmp(ppa_zop_jb b) __attribute__((noreturn));
 #if defined(__APPLE__)
-#include <setjmp.h>
-typedef jmp_buf ppa_zop_jb;
-#define PPA_ZOP_SETJMP(b) _setjmp(b)
-#define PPA_ZOP_LONGJMP(b) _longjmp(b, 1)
+#define PPA_ZOP_SYM(n) "_" n
+#else
+#define PPA_ZOP_SYM(n) n
+#endif
+__asm__(".text\n.p2align 2\n"
+#if !defined(__APPLE__)
+        ".hidden ppa_zop_setjmp\n.hidden ppa_zop_longjmp\n"
+#endif
+        ".globl " PPA_ZOP_SYM("ppa_zop_setjmp") "\n" PPA_ZOP_SYM("ppa_zop_setjmp") ":\n"
+        "  stp x19, x20, [x0, #0]\n  stp x21, x22, [x0, #16]\n  stp x23, x24, [x0, #32]\n"
+        "  stp x25, x26, [x0, #48]\n  stp x27, x28, [x0, #64]\n  stp x29, x30, [x0, #80]\n"
+        "  mov x9, sp\n  str x9, [x0, #96]\n"
+        "  stp d8, d9, [x0, #104]\n  stp d10, d11, [x0, #120]\n  stp d12, d13, [x0, #136]\n  stp d14, d15, [x0, #152]\n"
+        "  mov w0, #0\n  ret\n"
+        ".globl " PPA_ZOP_SYM("ppa_zop_longjmp") "\n" PPA_ZOP_SYM("ppa_zop_longjmp") ":\n"
+        "  ldp x19, x20, [x0, #0]\n  ldp x21, x22, [x0, #16]\n  ldp x23, x24, [x0, #32]\n"
+        "  ldp x25, x26, [x0, #48]\n  ldp x27, x28, [x0, #64]\n  ldp x29, x30, [x0, #80]\n"
+        "  ldr x9, [x0, #96]\n  mov sp, x9\n"
+        "  ldp d8, d9, [x0, #104]\n  ldp d10, d11, [x0, #120]\n  ldp d12, d13, [x0, #136]\n  ldp d14, d15, [x0, #152]\n"
+        "  mov w0, #1\n  ret\n");
+#define PPA_ZOP_SETJMP(b) ppa_zop_setjmp(b)
+#define PPA_ZOP_LONGJMP(b) ppa_zop_longjmp(b)
 #else
 typedef void *ppa_zop_jb[5];
 #define PPA_ZOP_SETJMP(b) __builtin_setjmp(b)
