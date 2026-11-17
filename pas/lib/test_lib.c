@@ -249,7 +249,7 @@ static int deflate_main(int argc, char **argv) {
   size_t *sz = calloc(ns > 0 ? ns : 1, sizeof *sz);
   size_t in = 0, plainSum = 0, recipeSum = 0;
   double tA = 0, tR = 0;
-  uint64_t fnv = 14695981039346656037u;          /* the recipes (the one context's), for CI's platforms */
+  uint64_t fnv = 0;                              /* the recipes (the one context's), for CI's platforms */
   ppa_deflate_ctx *batch = ppa_deflate_ctx_new(0);
   check(batch != NULL, "a context", "");
   for (int k = 0; k < ns; k++) {
@@ -277,7 +277,13 @@ static int deflate_main(int argc, char **argv) {
     check(r == PPA_OK && bn == cons && memcmp(back, d, cons) == 0, "rebuilt the same", name);
     ok += r == PPA_OK && bn == cons && memcmp(back, d, cons) == 0;
     plainSum += pn; recipeSum += rn;
-    for (size_t j = 0; j < rn; j++) fnv = (fnv ^ ((unsigned char *)rc)[j]) * 1099511628211u;
+    {                                            /* each recipe's hash, summed: the order of the files does not count */
+      uint64_t h = 14695981039346656037u;
+      for (size_t j = 0; j < rn; j++) h = (h ^ ((unsigned char *)rc)[j]) * 1099511628211u;
+      fnv += h;
+      const char *base = strrchr(name, '/');
+      printf("  recipe %016llx %s\n", (unsigned long long)h, base ? base + 1 : name);
+    }
     ppa_free(back); back = 0;
     /* a fresh context (no hint): a recipe that gives the same stream */
     {

@@ -117,6 +117,8 @@ PPA_NOC=1 "$OUT/lib/test_lib$EXE" --deflate tests/recipes/rgba8-zopfli.raw tests
   || { cat "$OUT/lib/deflate2.txt"; echo "FAIL: libppa's deflate test (zopfli)"; exit 1; }
 grep -h '^deflate: [0-9]* streams' "$OUT/lib/deflate.txt" "$OUT/lib/deflate2.txt"
 grep -h '^deflate: recipes' "$OUT/lib/deflate.txt" "$OUT/lib/deflate2.txt" > "$OUT/deflate.txt"
+# each recipe's hash, to find which one differs when the platforms do
+grep -h '^  recipe ' "$OUT/lib/deflate.txt" "$OUT/lib/deflate2.txt" | LC_ALL=C sort -k3
 # 7-Zip 23 or later (not p7zip, whose IUnknown differs): a copy with the
 # plugin in its Codecs folder (the same word size as the library), an
 # archive written and extracted. Linux: 7-Zip's package; Windows: the
