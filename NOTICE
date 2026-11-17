@@ -22,7 +22,9 @@ vendor/zopfli is zopfli 1.0.3 (https://github.com/google/zopfli, Copyright
 in vendor/zopfli/CONTRIBUTORS), its deflate's files unmodified, for the
 deflate recipes of kind 2's encoder 3; pas/ppazopc.c builds it, with PPA's
 own log() (correctly rounded) and memory functions in place of the C
-library's.
+library's. Its variant 1 (the optimal pass as the zopfli crate 0.8, the
+Rust port by the zopfli-rs contributors, Apache License 2.0, does it) is
+written in pas/ppazopc.c from zopfli's own code.
 
 pas/ppazlib.pas is a port to FreePascal of the parts of zlib 1.3's
 deflate.c and trees.c that decide deflate's choices (hash chains,

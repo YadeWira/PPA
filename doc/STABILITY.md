@@ -36,6 +36,7 @@ extension. A version past 1 is a newer PPA's.
 | 3 | 0.3.0 | 0.3.0 and later | each image's deflate recipe in `RecipeBytes`' format 2 (doc/PREFLATE.md): zlib with its flushes (kind 1), miniz by its flags (kind 2) and any deflate stream through a predictor and its corrections (kind 3); a file whose images are all zlib's alone is still written as version 2 |
 | 4 | 0.4.0 | 0.4.0 and later | version 3, and kind 2's libdeflate (encoder 2: oxipng's streams, rebuilt by libdeflate's own compressor at their level); written only when an image's recipe is libdeflate's, so 0.3.0 reads every other file 0.4.0 writes |
 | 5 | 0.5.0 | 0.5.0 and later | version 4, and kind 2's zopfli (encoder 3: zopflipng's and advpng -z4's streams, rebuilt by zopfli's own deflate with their options; at the default level only for images of up to 64 KiB of bytes); written only when an image's recipe is zopfli's, so 0.4.0 reads every other file |
+| 6 | 0.6.0 | 0.6.0 and later | version 5, and zopfli's variant 1, the Rust port (oxipng's `--zopfli`: the zopfli crate 0.8, whose optimal pass differs from 1.0.3's in three places); written only when an image's recipe is that variant, so 0.5.0 reads every other file |
 
 A recipe format, once a stream PPA wrote holds it, gives the same deflate
 stream for every recipe it accepts, forever: `tests/recipes/` holds

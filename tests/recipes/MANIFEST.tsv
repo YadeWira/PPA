@@ -80,3 +80,7 @@ zipf-zok2-i10.raw	zipf	20000	8976	zop zipf 10
 photo-zok2-i20.raw	photo	18496	8746	zop photo 20
 photo-zok2-i15-badadler-tail.zlib	photo	18496	8765	photo-zok2-i15.raw in a zlib frame, Adler-32 xor 1, 4 bytes after
 photo-zok2-i15-pad.raw	photo	18496	8755	photo-zok2-i15.raw with its last byte or 0x80 (pad bits)
+runs-zrk2-i15.zlib	runs	30000	7316	zoprs runs 15
+runs-zrk2-i10.raw	runs	30000	7310	zoprs runs 10 raw
+runs-zrk2-i20.raw	runs	30000	7308	zoprs runs 20 raw
+runs-zrk2-i10-badadler-tail.zlib	runs	30000	7320	runs-zrk2-i10.raw in a zlib frame, Adler-32 xor 1, 4 bytes after

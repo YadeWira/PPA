@@ -106,10 +106,11 @@ function Parse(const a: TBytes; framing: TDeflFraming; maxPlain: SizeInt; out z:
   with any). maxEncoder: kind 2's encoders up to it (codec stream version
   3 holds miniz's only, 4 libdeflate's too). zopMax: zopfli is tried for
   streams of at most this many bytes (0: never; its search and rebuild
-  cost a zopfli run, about 0.2 MB/s). }
+  cost a zopfli run, about 0.2 MB/s). zopVariants: zopfli's variants up to
+  it (codec stream version 5 holds 0, 1.0.3's, only). }
 function FindRecipe(const a: TBytes; const z: TZStream; out recipe: TDeflRecipe;
   maxKind: Integer = RECIPE_KIND_LAST; threads: Integer = 1; maxEncoder: Integer = ENC_LAST;
-  zopMax: SizeInt = 0): TDeflStatus;
+  zopMax: SizeInt = 0; zopVariants: Integer = ZOPV_LAST): TDeflStatus;
 
 { Parse and FindRecipe: a -> the bytes it holds and its recipe. zopMax:
   FindRecipe's (0 by default: zopfli not tried; AnalyzeZopMax for the
@@ -763,7 +764,7 @@ end;
 { ---------------------------------------------------------------- recipes }
 
 function FindRecipe(const a: TBytes; const z: TZStream; out recipe: TDeflRecipe; maxKind: Integer;
-  threads: Integer; maxEncoder: Integer; zopMax: SizeInt): TDeflStatus;
+  threads: Integer; maxEncoder: Integer; zopMax: SizeInt; zopVariants: Integer): TDeflStatus;
 var e: TZStream; back: TBytes; i: SizeInt; markers: Boolean; memo: TLongMemo;
 begin
   Result := dsNotTaken;
@@ -828,7 +829,7 @@ begin
     recipe.prm := Default(TZlibParams);
     recipe.flow := Default(TZlibFlow);
     recipe.encoder := ENC_ZOPFLI;
-    if FindZopParams(a, z, zopMax, recipe.zop, e) then begin
+    if FindZopParams(a, z, zopMax, recipe.zop, e, zopVariants) then begin
       PutFraming(recipe, e);
       back := Encode(e);
       if SameBytes(back, a) and Rebuild(z.plain, recipe, back, threads) and SameBytes(back, a) then Exit(dsOk);

@@ -17,6 +17,10 @@ that is checked.
                                                    kind 2's libdeflate (encoder 2,
                                                    codec stream version 4; M6,
                                                    16/11/2026)
+    python3 tools/preflate/mkgolden.py --zopfli-rs tests/recipes
+                                                   kind 2's zopfli variant 1 (the
+                                                   Rust port, zoprs; codec stream
+                                                   version 6; 17/11/2026)
     python3 tools/preflate/mkgolden.py --zopfli tests/recipes
                                                    kind 2's zopfli (encoder 3,
                                                    codec stream version 5; M9,
@@ -114,6 +118,25 @@ def png_gray(plain, w, h):
             chunk(b'IDAT', zlib.compress(plain, 9)) + chunk(b'IEND', b''))
 
 
+def runs(n, seed):
+    """runs of one byte (600 to 3,000), pieces of doc/CODEC.md and noise:
+    where the Rust port of zopfli parts from zopfli 1.0.3 (its costs
+    randomised an iteration earlier, its shortcut over long repetitions)"""
+    r = random.Random(seed)
+    text = open(os.path.join(REPO, 'doc', 'CODEC.md'), 'rb').read()
+    out = bytearray()
+    while len(out) < n:
+        k = r.randrange(3)
+        if k == 0:
+            out += bytes([r.randrange(256)]) * r.randrange(600, 3000)
+        elif k == 1:
+            s = r.randrange(len(text) - 3000)
+            out += text[s:s + r.randrange(200, 2000)]
+        else:
+            out += bytes(r.randrange(256) for _ in range(r.randrange(50, 500)))
+    return bytes(out[:n])
+
+
 def mixed(seed):
     """a photo, 40 KB of noise and text: miniz's blocks end where its code
     buffer fills and past 31 KB, and the noise's go stored"""
@@ -129,6 +152,8 @@ def main():
         return libdeflate(sys.argv[2])
     if sys.argv[1] == '--zopfli':
         return zopfli(sys.argv[2])
+    if sys.argv[1] == '--zopfli-rs':
+        return zopfli_rs(sys.argv[2])
     out = sys.argv[1]
     os.makedirs(out, exist_ok=True)
     tmp = os.path.join(out, '.plain')
@@ -416,5 +441,40 @@ def zopfli(out):
     os.rmdir(tmp)
     print('%d streams added in %s' % (len(man), out))
 
+
+def zopfli_rs(out):
+    """kind 2's zopfli variant 1 (ppazopfli ZOPV_RS08: the Rust port, the
+    zopfli crate 0.8.3 oxipng links, the study's zoprs) on bytes where it
+    parts from zopfli 1.0.3 (runs: tools/preflate's runs(), 30,000 bytes;
+    checked: 1.0.3 gives other bytes at each of these counts): 10, 15 and
+    20 iterations (counts the search tries), raw and zlib-framed, one with a wrong Adler-32 and
+    bytes after it. MANIFEST.tsv appended, then -writegolden -zop writes
+    the recipes"""
+    tmp = os.path.join(out, '.plain')
+    os.makedirs(tmp, exist_ok=True)
+    plains = {'runs': runs(30000, 11)}
+    for k, v in plains.items():
+        open(os.path.join(tmp, k), 'wb').write(v)
+    cases = [('runs', 15, True), ('runs', 10, False), ('runs', 20, False)]
+    man = []
+    for plain, it, zl in cases:
+        cmd = [os.path.join(BIN, 'zoprs'), os.path.join(tmp, plain), str(it)] + ([] if zl else ['raw'])
+        data = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+        name = '%s-zrk2-i%d' % (plain, it)
+        ext = 'zlib' if zl else 'raw'
+        open(os.path.join(out, name + '.' + ext), 'wb').write(data)
+        man.append((name + '.' + ext, plain, len(plains[plain]), len(data), 'zoprs %s %d%s' % (plain, it, '' if zl else ' raw')))
+    d = open(os.path.join(out, 'runs-zrk2-i10.raw'), 'rb').read()
+    z = b'\x78\xda' + d + struct.pack('>I', zlib.adler32(plains['runs']) ^ 1) + b'tail'
+    open(os.path.join(out, 'runs-zrk2-i10-badadler-tail.zlib'), 'wb').write(z)
+    man.append(('runs-zrk2-i10-badadler-tail.zlib', 'runs', len(plains['runs']), len(z),
+                'runs-zrk2-i10.raw in a zlib frame, Adler-32 xor 1, 4 bytes after'))
+    with open(os.path.join(out, 'MANIFEST.tsv'), 'a') as f:
+        for r in man:
+            f.write('\t'.join(str(x) for x in r) + '\n')
+    for k in plains:
+        os.remove(os.path.join(tmp, k))
+    os.rmdir(tmp)
+    print('%d streams added in %s' % (len(man), out))
 
 main()

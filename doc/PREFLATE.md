@@ -33,6 +33,10 @@ and the baselines are in `tools/preflate/` (README.md, BASELINE.md).
   level, images of up to 64 KiB of bytes; at `-3`, any), so 0.4.0 refuses
   such a file as a newer PPA's and reads every other. A version 4 stream
   holding encoder 3 is damage.
+- **Codec stream version 6** is version 5 and zopfli's variant 1, the Rust
+  port (oxipng's `--zopfli`): written only for such an image, so 0.5.0
+  refuses it as a newer PPA's. A version 5 stream holding variant 1 is
+  damage.
 
 ## Kinds
 
@@ -240,7 +244,7 @@ and so that every platform gives the same bits:
 | field | values | meaning |
 |---|---|---|
 | `encoder` | 3 `ENC_ZOPFLI` | zopfli's deflate (`ZopfliDeflate`, btype 2, final) |
-| `zop.variant` | 0 `ZOPV_103` | zopfli 1.0.3 with a correctly rounded log |
+| `zop.variant` | 0 `ZOPV_103`, 1 `ZOPV_RS08` | zopfli 1.0.3 with a correctly rounded log; the Rust port (the zopfli crate 0.8, oxipng's `--zopfli`) with a correctly rounded log2 (codec stream version 6) |
 | `zop.iterations` | 1 to 1000 | `numiterations` |
 | `zop.flags` | bit 0 block splitting, bit 1 splitting last | `blocksplitting`, `blocksplittinglast` |
 | `zop.bsMax` | 0 to 1000 | `blocksplittingmax` (zopfli's default 15) |
@@ -248,6 +252,27 @@ and so that every platform gives the same bits:
 zopflipng writes with it: 15 iterations for images under 200,000 bytes,
 5 over (60 and 20 with `-m`), splitting first, at most 15 blocks;
 advpng `-z4` with 5 iterations; zopfli's command 15.
+
+**Variant 1, the Rust port.** oxipng 10's `--zopfli` links the zopfli
+crate 0.8.3 (its `Cargo.lock`), a port of zopfli to Rust: the same block
+splitting, trees and LZ77, but an optimal pass that parts from 1.0.3's in
+three places, which `ppazopc.c` writes again from zopfli's own (variant 1
+of `ZopfliLZ77Optimal` and `ZopfliLZ77OptimalFixed`, chosen by the call's
+variant; zopfli's files stay as they are):
+
+- the costs are randomised once the cost stops falling one iteration
+  earlier (its counter counts the run just made: `i + 1 > 5`, not
+  `i > 5`);
+- the shortcut over long repetitions adds the cost in single precision
+  (the cost rounded to a float first, where 1.0.3 adds in double and
+  rounds the sum);
+- the entropy of a symbol is `log2` itself (1.0.3: `log` times a constant
+  of 13 digits), and not clamped at zero: a correctly rounded log2 here.
+
+The two give the same stream on most inputs (8 of the 9 oxipng `--zopfli`
+images of up to 64 KiB of png-synth are variant 0's too); where they part
+(long runs, 7 iterations or more), only variant 1 gives oxipng's. The
+search tries each candidate in variant 0, then 1.
 
 **The search** (`FindZopParams`). zopfli splits a master block (1,000,000
 bytes) before it iterates, optimises each piece on its own and writes the
@@ -895,6 +920,23 @@ zopfli" above), in codec stream version 5.
 - **Fuzzing**, seeds with version 5 streams: 30 minutes each of
   `lib_ppa_chk` (libFuzzer, 84,938 runs) and `afl_ppa_chk` (AFL++, 40,900):
   nothing.
+
+## Status (17/11/2026): zopfli's variant 1, the Rust port
+
+- **oxipng's `--zopfli`** (oxipng 10.1.1, the zopfli crate 0.8.3, checksum
+  as its `Cargo.lock`): the study's harness `zoprs`
+  (`tools/preflate/enc/zoprs`, the crate called as oxipng calls it) gives
+  its IDAT byte for byte. Variant 1 gives all 34 of png-synth's
+  `oxipng -o 2 -z` streams back (25 at 15 iterations, 9 at `--zi 1`, up to
+  6.9 MB in 7 master blocks); zopfli 1.0.3 gives 11 of the 14 up to 300
+  KB, and not s02 at one iteration.
+- **The corpora**: png-synth's 9 oxipng `--zopfli` images of up to 64 KiB
+  are kind 2 at the default level (s23 the one in variant 1: its `.ppa`
+  20,888 -> 18,651 B); `tests/png3/gray8-oxipng-zopfli.png` (oxipng `-o2
+  -z --force --nx` of a gray image of long runs and noise rows) is written
+  in version 6. 4 golden vectors of variant 1 (`mkgolden.py
+  --zopfli-rs`: runs of one byte, text and noise, where 1.0.3 parts from
+  the port at 10, 15 and 20 iterations): 85 in all.
 
 ## Studied, not done yet (M7, 16/11/2026): zlib-ng
 

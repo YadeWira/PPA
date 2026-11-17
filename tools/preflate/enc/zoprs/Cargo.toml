@@ -1,0 +1,9 @@
+[package]
+name = "zoprs"
+version = "0.1.0"
+edition = "2021"
+
+# zopfli 0.8.3, the crate oxipng 10.1.1 links (its Cargo.lock), as oxipng
+# builds it: std and zlib, no default features
+[dependencies]
+zopfli = { version = "=0.8.3", default-features = false, features = ["std", "zlib"] }

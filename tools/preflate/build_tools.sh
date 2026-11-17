@@ -80,6 +80,11 @@ if [ ! -x "$B/zopflipng" ]; then
   (cd "$S/zopfli" && make -j4 zopfli zopflipng > /dev/null) && cp "$S/zopfli/zopfli" "$S/zopfli/zopflipng" "$B/"
 fi
 gcc -O2 -I"$S/zopfli/src" "$REPO/tools/preflate/enc/zop.c" $(ls "$S"/zopfli/src/zopfli/*.c | grep -v zopfli_bin) -lm -o "$B/zop"
+echo "== zopfli 0.8.3, the Rust port (zoprs: oxipng's --zopfli; needs cargo)"
+if command -v cargo > /dev/null; then
+  (cd "$REPO/tools/preflate/enc/zoprs" && CARGO_TARGET_DIR="$S/zoprs-target" cargo build --release -q) &&
+    cp "$S/zoprs-target/release/zoprs" "$B/"
+fi
 
 echo "== libdeflate 7e66210 (1.26-dev; ldf: raw deflate at levels 0-12)"
 clone libdeflate "$STUDY/algorithm/dl/libdeflate" https://github.com/ebiggers/libdeflate.git 7e66210

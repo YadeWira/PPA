@@ -1,6 +1,10 @@
 /* zopfli's deflate (vendor/zopfli: zopfli 1.0.3's src/zopfli, unmodified)
    for PPA's deflate recipes of kind 2, encoder 3: one call,
-   ppa_zop_deflate, and the same bits on every platform.
+   ppa_zop_deflate, and the same bits on every platform. Two variants:
+   0, zopfli 1.0.3 itself; 1, the Rust port (the zopfli crate 0.8, which
+   oxipng's --zopfli links), whose optimal pass differs in three places
+   (ppa_zop_optimal_v1 below: written here from zopfli's own, as the
+   crate does it).
 
    - No C runtime, as the rest of PPA's C: malloc, realloc, calloc and free
      are the caller's memory, each block on a list kept for the call, so
@@ -78,11 +82,11 @@ static ppa_dd ppa_dd_div(ppa_dd a, ppa_dd b) {
   double q2 = r.hi / b.hi; r = ppa_dd_add(r, ppa_dd_mul(b, (ppa_dd){-q2, 0}));
   double q3 = r.hi / b.hi; ppa_dd q = ppa_dd_quick(q1, q2); return ppa_dd_add(q, (ppa_dd){q3, 0});
 }
-static double ppa_zop_log(double x) {
+static ppa_dd ppa_zop_ln_dd(double x) {
   /* x = m * 2^e, m in [sqrt(1/2), sqrt(2)) */
   static const ppa_dd LN2 = {6.93147180559945286e-01, 2.31904681384629956e-17};
   int e = 0; double m = x;
-  if (!(x > 0)) return x == 0 ? -1.0 / 0.0 : 0.0 / 0.0;
+
   while (m >= 1.4142135623730951) { m *= 0.5; e++; }
   while (m < 0.70710678118654757) { m *= 2.0; e--; }
   /* log(m) = 2 atanh(s), s = (m - 1) / (m + 1), |s| < 0.1716 */
@@ -95,7 +99,17 @@ static double ppa_zop_log(double x) {
     if (t.hi == 0 || (t.hi < 0 ? -t.hi : t.hi) < 1e-36) break;
   }
   ppa_dd r = ppa_dd_add(ppa_dd_mul((ppa_dd){2.0, 0}, sum), ppa_dd_mul(LN2, (ppa_dd){(double)e, 0}));
-  return r.hi + r.lo;
+  return r;
+}
+static double ppa_zop_log(double x) {
+  if (!(x > 0)) return x == 0 ? -1.0 / 0.0 : 0.0 / 0.0;
+  ppa_dd r = ppa_zop_ln_dd(x); return r.hi + r.lo;
+}
+/* log2, correctly rounded: ln in double-double over ln 2 in double-double */
+static double ppa_zop_log2(double x) {
+  static const ppa_dd LN2 = {6.93147180559945286e-01, 2.31904681384629956e-17};
+  if (!(x > 0)) return x == 0 ? -1.0 / 0.0 : 0.0 / 0.0;
+  ppa_dd r = ppa_dd_div(ppa_zop_ln_dd(x), LN2); return r.hi + r.lo;
 }
 
 /* the call's memory: a list of blocks, each after a header that keeps the
@@ -144,6 +158,7 @@ typedef struct {
   void (*release)(void *);
   ppa_zop_blk *list;
   ppa_zop_jb jb;
+  int variant;      /* 0: zopfli 1.0.3; 1: the Rust port (zopfli crate 0.8) */
 } ppa_zop_ctx;
 /* where the running call's context is: the caller's thread-local slot */
 static ppa_zop_ctx **(*ppa_zop_slot)(void);
@@ -212,9 +227,173 @@ static void ppa_zop_qsort(void *base, size_t n, size_t size, int (*cmp)(const vo
 #include "src/zopfli/hash.c"
 #include "src/zopfli/cache.c"
 #include "src/zopfli/katajainen.c"
+#define ZopfliCalculateEntropy ppa_zop_entropy_103
 #include "src/zopfli/tree.c"
+#undef ZopfliCalculateEntropy
+/* variant 1 (the Rust port, zopfli 0.8): log2 directly, no clamp */
+void ZopfliCalculateEntropy(const size_t* count, size_t n, double* bitlengths) {
+  if ((*ppa_zop_slot())->variant == 0) { ppa_zop_entropy_103(count, n, bitlengths); return; }
+  size_t sum = 0, i;
+  for (i = 0; i < n; ++i) sum += count[i];
+  double log2sum = ppa_zop_log2((double)(sum == 0 ? n : sum));
+  for (i = 0; i < n; ++i) bitlengths[i] = count[i] == 0 ? log2sum : log2sum - ppa_zop_log2((double)count[i]);
+}
 #include "src/zopfli/lz77.c"
+#define ZopfliLZ77Optimal ppa_zop_optimal_103
+#define ZopfliLZ77OptimalFixed ppa_zop_optimal_fixed_103
 #include "src/zopfli/squeeze.c"
+#undef ZopfliLZ77Optimal
+#undef ZopfliLZ77OptimalFixed
+
+/* Variant 1: the Rust port (the zopfli crate 0.8, oxipng's --zopfli). Its
+   optimal pass differs from zopfli 1.0.3's in three places: the shortcut
+   over long repetitions adds the cost in single precision (the cost rounded
+   to a float first); the costs are randomised one iteration earlier (its
+   counter counts the run just made); and the entropy is log2 itself
+   (ZopfliCalculateEntropy above). */
+static double ppa_zop_best_lengths_v1(ZopfliBlockState *s, const unsigned char* in, size_t instart, size_t inend,
+                                      CostModelFun* costmodel, void* costcontext, unsigned short* length_array,
+                                      ZopfliHash* h, float* costs) {
+  size_t blocksize = inend - instart;
+  size_t i = 0, k, kend;
+  unsigned short leng, dist, sublen[259];
+  size_t windowstart = instart > ZOPFLI_WINDOW_SIZE ? instart - ZOPFLI_WINDOW_SIZE : 0;
+  double mincost = GetCostModelMinCost(costmodel, costcontext), mincostaddcostj;
+  if (instart == inend) return 0;
+  ZopfliResetHash(ZOPFLI_WINDOW_SIZE, h);
+  ZopfliWarmupHash(in, windowstart, inend, h);
+  for (i = windowstart; i < instart; i++) ZopfliUpdateHash(in, i, inend, h);
+  for (i = 1; i < blocksize + 1; i++) costs[i] = ZOPFLI_LARGE_FLOAT;
+  costs[0] = 0;
+  length_array[0] = 0;
+  for (i = instart; i < inend; i++) {
+    size_t j = i - instart;
+    ZopfliUpdateHash(in, i, inend, h);
+    if (h->same[i & ZOPFLI_WINDOW_MASK] > ZOPFLI_MAX_MATCH * 2
+        && i > instart + ZOPFLI_MAX_MATCH + 1
+        && i + ZOPFLI_MAX_MATCH * 2 + 1 < inend
+        && h->same[(i - ZOPFLI_MAX_MATCH) & ZOPFLI_WINDOW_MASK] > ZOPFLI_MAX_MATCH) {
+      float symbolcost = (float)costmodel(ZOPFLI_MAX_MATCH, 1, costcontext);
+      for (k = 0; k < ZOPFLI_MAX_MATCH; k++) {
+        costs[j + ZOPFLI_MAX_MATCH] = costs[j] + symbolcost;
+        length_array[j + ZOPFLI_MAX_MATCH] = ZOPFLI_MAX_MATCH;
+        i++; j++;
+        ZopfliUpdateHash(in, i, inend, h);
+      }
+    }
+    ZopfliFindLongestMatch(s, h, in, i, inend, ZOPFLI_MAX_MATCH, sublen, &dist, &leng);
+    if (i + 1 <= inend) {
+      double newCost = costmodel(in[i], 0, costcontext) + costs[j];
+      if (newCost < costs[j + 1]) { costs[j + 1] = newCost; length_array[j + 1] = 1; }
+    }
+    kend = zopfli_min(leng, inend - i);
+    mincostaddcostj = mincost + costs[j];
+    for (k = 3; k <= kend; k++) {
+      double newCost;
+      if (costs[j + k] <= mincostaddcostj) continue;
+      newCost = costmodel(k, sublen[k], costcontext) + costs[j];
+      if (newCost < costs[j + k]) { costs[j + k] = newCost; length_array[j + k] = k; }
+    }
+  }
+  return costs[blocksize];
+}
+
+static double ppa_zop_optimal_run_v1(ZopfliBlockState* s, const unsigned char* in, size_t instart, size_t inend,
+                                     unsigned short** path, size_t* pathsize, unsigned short* length_array,
+                                     CostModelFun* costmodel, void* costcontext, ZopfliLZ77Store* store,
+                                     ZopfliHash* h, float* costs) {
+  double cost = ppa_zop_best_lengths_v1(s, in, instart, inend, costmodel, costcontext, length_array, h, costs);
+  free(*path);
+  *path = 0;
+  *pathsize = 0;
+  TraceBackwards(inend - instart, length_array, path, pathsize);
+  FollowPath(s, in, instart, inend, *path, *pathsize, store, h);
+  return cost;
+}
+
+static void ppa_zop_optimal_v1(ZopfliBlockState *s, const unsigned char* in, size_t instart, size_t inend,
+                               int numiterations, ZopfliLZ77Store* store) {
+  size_t blocksize = inend - instart;
+  unsigned short* length_array = (unsigned short*)malloc(sizeof(unsigned short) * (blocksize + 1));
+  unsigned short* path = 0;
+  size_t pathsize = 0;
+  ZopfliLZ77Store currentstore;
+  ZopfliHash hash, *h = &hash;
+  SymbolStats stats, beststats, laststats;
+  int i;
+  float* costs = (float*)malloc(sizeof(float) * (blocksize + 1));
+  double cost, bestcost = ZOPFLI_LARGE_FLOAT, lastcost = 0;
+  RanState ran_state;
+  int lastrandomstep = -1;
+  if (!costs || !length_array) exit(-1);
+  InitRanState(&ran_state);
+  InitStats(&stats);
+  ZopfliInitLZ77Store(in, &currentstore);
+  ZopfliAllocHash(ZOPFLI_WINDOW_SIZE, h);
+  ZopfliLZ77Greedy(s, in, instart, inend, &currentstore, h);
+  GetStatistics(&currentstore, &stats);
+  for (i = 0; i < numiterations; i++) {
+    ZopfliCleanLZ77Store(&currentstore);
+    ZopfliInitLZ77Store(in, &currentstore);
+    ppa_zop_optimal_run_v1(s, in, instart, inend, &path, &pathsize, length_array, GetCostStat, (void*)&stats,
+                           &currentstore, h, costs);
+    cost = ZopfliCalculateBlockSize(&currentstore, 0, currentstore.size, 2);
+    if (cost < bestcost) {
+      ZopfliCopyLZ77Store(&currentstore, store);
+      CopyStats(&stats, &beststats);
+      bestcost = cost;
+    }
+    CopyStats(&stats, &laststats);
+    ClearStatFreqs(&stats);
+    GetStatistics(&currentstore, &stats);
+    if (lastrandomstep != -1) {
+      AddWeighedStatFreqs(&stats, 1.0, &laststats, 0.5, &stats);
+      CalculateStatistics(&stats);
+    }
+    if (i + 1 > 5 && cost == lastcost) {
+      CopyStats(&beststats, &stats);
+      RandomizeStatFreqs(&ran_state, &stats);
+      CalculateStatistics(&stats);
+      lastrandomstep = i;
+    }
+    lastcost = cost;
+  }
+  free(length_array);
+  free(path);
+  free(costs);
+  ZopfliCleanLZ77Store(&currentstore);
+  ZopfliCleanHash(h);
+}
+
+static void ppa_zop_optimal_fixed_v1(ZopfliBlockState *s, const unsigned char* in, size_t instart, size_t inend,
+                                     ZopfliLZ77Store* store) {
+  size_t blocksize = inend - instart;
+  unsigned short* length_array = (unsigned short*)malloc(sizeof(unsigned short) * (blocksize + 1));
+  unsigned short* path = 0;
+  size_t pathsize = 0;
+  ZopfliHash hash, *h = &hash;
+  float* costs = (float*)malloc(sizeof(float) * (blocksize + 1));
+  if (!costs || !length_array) exit(-1);
+  ZopfliAllocHash(ZOPFLI_WINDOW_SIZE, h);
+  s->blockstart = instart;
+  s->blockend = inend;
+  ppa_zop_optimal_run_v1(s, in, instart, inend, &path, &pathsize, length_array, GetCostFixed, 0, store, h, costs);
+  free(length_array);
+  free(path);
+  free(costs);
+  ZopfliCleanHash(h);
+}
+
+void ZopfliLZ77Optimal(ZopfliBlockState *s, const unsigned char* in, size_t instart, size_t inend,
+                       int numiterations, ZopfliLZ77Store* store) {
+  if ((*ppa_zop_slot())->variant == 0) ppa_zop_optimal_103(s, in, instart, inend, numiterations, store);
+  else ppa_zop_optimal_v1(s, in, instart, inend, numiterations, store);
+}
+void ZopfliLZ77OptimalFixed(ZopfliBlockState *s, const unsigned char* in, size_t instart, size_t inend,
+                            ZopfliLZ77Store* store) {
+  if ((*ppa_zop_slot())->variant == 0) ppa_zop_optimal_fixed_103(s, in, instart, inend, store);
+  else ppa_zop_optimal_fixed_v1(s, in, instart, inend, store);
+}
 #include "src/zopfli/blocksplitter.c"
 #include "src/zopfli/deflate.c"
 
@@ -243,15 +422,16 @@ void ppa_zop_init(ppa_zop_ctx **(*slot)(void)) { ppa_zop_slot = slot ? slot : pp
    zopflipng's and zopfli's own zlib and gzip containers write it) with
    the options given, at out (cap bytes): its length, or 0 when cap is
    short, an option is out of range or there was no memory. */
-size_t ppa_zop_deflate(int iterations, int blocksplitting, int blocksplittinglast, int blocksplittingmax,
+size_t ppa_zop_deflate(int variant, int iterations, int blocksplitting, int blocksplittinglast, int blocksplittingmax,
                        const unsigned char *in, size_t n, unsigned char *out, size_t cap,
                        void *(*alloc)(size_t), void (*release)(void *)) {
   ppa_zop_ctx c, **slot;
   ZopfliOptions o;
   unsigned char bp = 0, *res = 0;
   size_t len = 0, r = 0;
-  if (!ppa_zop_cpu_ok() || !ppa_zop_slot || !alloc || !release || iterations < 1 || blocksplittingmax < 0) return 0;
-  c.alloc = alloc; c.release = release; c.list = 0;
+  if (!ppa_zop_cpu_ok() || !ppa_zop_slot || !alloc || !release || iterations < 1 || blocksplittingmax < 0 ||
+      variant < 0 || variant > 1) return 0;
+  c.alloc = alloc; c.release = release; c.list = 0; c.variant = variant;
   slot = ppa_zop_slot();
   *slot = &c;
   if (PPA_ZOP_SETJMP(c.jb) == 0) {
@@ -282,7 +462,7 @@ size_t ppa_zop_split(int blocksplittingmax, const unsigned char *in, size_t n, s
   ZopfliOptions o;
   size_t *sp = 0, np = 0, r = (size_t)-1, end = n < ZOPFLI_MASTER_BLOCK_SIZE ? n : ZOPFLI_MASTER_BLOCK_SIZE;
   if (!ppa_zop_cpu_ok() || !ppa_zop_slot || !alloc || !release || blocksplittingmax < 0) return r;
-  c.alloc = alloc; c.release = release; c.list = 0;
+  c.alloc = alloc; c.release = release; c.list = 0; c.variant = 0;
   slot = ppa_zop_slot();
   *slot = &c;
   if (PPA_ZOP_SETJMP(c.jb) == 0) {
@@ -301,7 +481,7 @@ size_t ppa_zop_split(int blocksplittingmax, const unsigned char *in, size_t n, s
    iterations (litlen: a literal byte when dist is 0, else a length):
    how many (at most cap), or (size_t)-1 when there was no memory or more
    than cap. */
-size_t ppa_zop_piece(int iterations, const unsigned char *in, size_t start, size_t end,
+size_t ppa_zop_piece(int variant, int iterations, const unsigned char *in, size_t start, size_t end,
                      unsigned short *litlens, unsigned short *dists, size_t cap,
                      void *(*alloc)(size_t), void (*release)(void *)) {
   ppa_zop_ctx c, **slot;
@@ -309,8 +489,9 @@ size_t ppa_zop_piece(int iterations, const unsigned char *in, size_t start, size
   ZopfliBlockState bs;
   ZopfliLZ77Store st;
   size_t r = (size_t)-1;
-  if (!ppa_zop_cpu_ok() || !ppa_zop_slot || !alloc || !release || iterations < 1 || start > end) return r;
-  c.alloc = alloc; c.release = release; c.list = 0;
+  if (!ppa_zop_cpu_ok() || !ppa_zop_slot || !alloc || !release || iterations < 1 || start > end ||
+      variant < 0 || variant > 1) return r;
+  c.alloc = alloc; c.release = release; c.list = 0; c.variant = variant;
   slot = ppa_zop_slot();
   *slot = &c;
   if (PPA_ZOP_SETJMP(c.jb) == 0) {
@@ -344,7 +525,7 @@ int ppa_zop_lengths(const unsigned short *litlens, const unsigned short *dists, 
   if (!ppa_zop_cpu_ok() || !ppa_zop_slot || !alloc || !release) return 0;
   for (size_t i = 0; i < n; i++)
     if (dists[i] ? litlens[i] < 3 || litlens[i] > 258 || dists[i] > 32768 : litlens[i] > 255) return 0;
-  c.alloc = alloc; c.release = release; c.list = 0;
+  c.alloc = alloc; c.release = release; c.list = 0; c.variant = 0;
   slot = ppa_zop_slot();
   *slot = &c;
   if (PPA_ZOP_SETJMP(c.jb) == 0) {

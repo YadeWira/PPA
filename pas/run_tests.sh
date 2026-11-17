@@ -71,13 +71,14 @@ same_recipes "$OUT/pf_c.txt" "$OUT/pf_pas.txt"
 # the golden vectors (tests/recipes, tools/preflate/mkgolden.py): each
 # committed recipe gives its stream back, C and Pascal (.github/test.sh: on
 # every platform, 32 and 64 bits)
-"$OUT/test_preflate" "$PPA/tests/recipes" 81 -golden | tail -1
-PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/recipes" 81 -golden | tail -1
-# codec stream versions 3 to 5 (tests/png3: images other encoders wrote):
-# 2 of the 6 files are written in version 3, 1 (oxipng's: libdeflate) in
-# version 4, 1 (zopfli's) in version 5, each back, and in versions 2 to 4
-# too; zopfli tried up to 64 KiB, as the default level does
-"$OUT/test_preflate" "$PPA/tests/png3" 6 -none0 -all013 -codec -minv3 2 -minv4 1 -minv5 1 -zop 65536 | tail -1
+"$OUT/test_preflate" "$PPA/tests/recipes" 85 -golden | tail -1
+PPA_NOC=1 "$OUT/test_preflate" "$PPA/tests/recipes" 85 -golden | tail -1
+# codec stream versions 3 to 6 (tests/png3: images other encoders wrote):
+# 2 of the 7 files are written in version 3, 1 (oxipng's: libdeflate) in
+# version 4, 1 (zopflipng's) in version 5, 1 (oxipng --zopfli's: the Rust
+# port) in version 6, each back, and in versions 2 to 5 too; zopfli tried
+# up to 64 KiB, as the default level does
+"$OUT/test_preflate" "$PPA/tests/png3" 7 -none0 -all013 -codec -minv3 2 -minv4 1 -minv5 1 -minv6 1 -zop 65536 | tail -1
 PF_CORPUS=${PREFLATE_CORPUS-/mnt/IA_LAB/agentes/ppa/preflate/corpus}
 if [ -d "$PF_CORPUS/png-zlib" ]; then
   # the regression set: all 392 streams kind 0; zlib alone does not write the
@@ -114,6 +115,9 @@ if [ -d "$PF_CORPUS/zflow" ]; then
   # every PNG zopflipng wrote (15 iterations, 5 over 200,000 bytes), zopfli
   # tried up to 64 KiB as the default level does: those 8 kind 2's zopfli (M9)
   "$OUT/test_preflate" "$PF_CORPUS/png-synth" 34 -min2 8 -all013 -only .zopflipng. -zop 65536 | tail -1
+  # every PNG oxipng -o2 --zopfli wrote (the Rust port of zopfli), zopfli
+  # tried up to 64 KiB: those 9 kind 2 (one, s23, its variant 1)
+  "$OUT/test_preflate" "$PF_CORPUS/png-synth" 34 -min2 9 -all013 -only .oxipng-o2-zopfli. -zop 65536 | tail -1
   # the PDA sample: at least the 568 streams the census's zlib with flushes
   # rebuilt kind 0 or 1 (595), all 742 with a recipe (one miniz's and two
   # libdeflate's kind 2, kind 3 the rest)
@@ -164,15 +168,15 @@ for d in "${dirs[@]}"; do "$OUT/measure_static" "$d" | tail -1; done
 echo "== layer 6: the codec (every file compressed, verified, decompressed)"
 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 # codec stream version 3: images other encoders wrote (tests/png3)
-"$OUT/test_codec" "$PPA/tests/png3" 6 | tail -1
-PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png3" 6 | tail -1
+"$OUT/test_codec" "$PPA/tests/png3" 7 | tail -1
+PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png3" 7 | tail -1
 # bands: 4 KB ones, so that the samples have several, decoded last first
 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 # --max (-3): every image with the slow model
 PPA_TEST_MAX=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 # --fast (-1): no image with the slow model that the fast or the static one takes
 PPA_TEST_LEVEL=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
-PPA_TEST_LEVEL=1 "$OUT/test_codec" "$PPA/tests/png3" 6 | tail -1
+PPA_TEST_LEVEL=1 "$OUT/test_codec" "$PPA/tests/png3" 7 | tail -1
 # each deflate stream rebuilt in segments on 4 threads (ppazlib's ParallelSlow), the small samples too
 PPA_TEST_PAR_BYTES=512 PPA_TEST_THREADS=4 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1
 PPA_TEST_MAX=1 PPA_TEST_BAND_BYTES=4096 PPA_TEST_BANDS_REVERSE=1 "$OUT/test_codec" "$PPA/tests/png" 14 | tail -1

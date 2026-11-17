@@ -266,7 +266,7 @@ follows the deflate data) and how the deflate data is made from the bytes:
   own compressor at the stream's level: oxipng's streams), version 4,
   only in a file with such an image; **kind 2's zopfli** (zopfli's own
   deflate with the stream's options: zopflipng's, advpng -z4's), version
-  5, at the default level only for images of up to 64 KiB of bytes (its
+  5, and its variant 1, the Rust port (oxipng's `--zopfli`), version 6, at the default level only for images of up to 64 KiB of bytes (its
   rebuild is a zopfli run, about 0.2 MB/s), at `-3` for any. Every image's
   recipe is then written in `RecipeBytes`' format, after its length, and
   read once the image's size is known (a flow's events are checked against

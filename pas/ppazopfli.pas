@@ -7,7 +7,10 @@
 
   Variant ZOPV_103: zopfli 1.0.3 (and its master branch, the same deflate)
   with PPA's correctly rounded log(): the same bits on every platform
-  (ppazopc.c). The compressor is C only: zopfli itself is the reference
+  (ppazopc.c). Variant ZOPV_RS08: the Rust port, the zopfli crate 0.8
+  (oxipng 10's --zopfli: 15 iterations unless --zi says), whose optimal
+  pass differs from 1.0.3's in three places (ppazopc.c), with a correctly
+  rounded log2; since codec stream version 6. The compressor is C only: zopfli itself is the reference
   (PPA_NOC does not change it). One call with all the bytes (ZopfliDeflate,
   btype 2, final), as zopflipng and zopfli's containers make it.
 
@@ -25,9 +28,13 @@ interface
 uses SysUtils, ppadeflate;
 
 const
-  { the variants: zopfli 1.0.3 with a correctly rounded log }
+  { the variants: zopfli 1.0.3 with a correctly rounded log; the Rust port
+    (the zopfli crate 0.8, which oxipng's --zopfli links: its optimal pass
+    differs in three places, ppazopc.c), with a correctly rounded log2;
+    since codec stream version 6 }
   ZOPV_103 = 0;
-  ZOPV_LAST = ZOPV_103;
+  ZOPV_RS08 = 1;
+  ZOPV_LAST = ZOPV_RS08;
   { the options' range a recipe may hold: iterations (a recipe of more
     would take too long to rebuild to be a stream anyone wrote) and the
     most blocks a split makes (zopfli's default 15; 0, no limit) }
@@ -66,10 +73,12 @@ function ZopChoices(const plain: TBytes; const p: TZopParams; out e: TZStream): 
   cheap): every candidate when one of its first dynamic blocks has the
   code lengths zopfli itself gives its tokens (its GetDynamicLengths),
   else zopflipng's two (15 or 5, by size, and the other); then, with
-  zopfli's trees, on the first piece of zopfli's own split. Splitting first with 15 blocks at most, its
-  default. choices: ZopChoices of it. }
+  zopfli's trees, on the first piece of zopfli's own split. Splitting
+  first with 15 blocks at most, its default. Each candidate in each
+  variant up to maxVariant (codec stream version 5 holds variant 0 only).
+  choices: ZopChoices of it. }
 function FindZopParams(const a: TBytes; const z: TZStream; maxPlain: SizeInt; out p: TZopParams;
-  out choices: TZStream): Boolean;
+  out choices: TZStream; maxVariant: Integer = ZOPV_LAST): Boolean;
 
 const
   { the first dynamic blocks one of which must have zopfli's trees }
@@ -90,11 +99,11 @@ type
   TSlotFn = function: PPointer; cdecl;
 
 procedure ppa_zop_init(slot: TSlotFn); cdecl; external name 'ppa_zop_init';
-function ppa_zop_deflate(iterations, split, splitLast, bsMax: LongInt; input: PByte; n: SizeUInt;
+function ppa_zop_deflate(variant, iterations, split, splitLast, bsMax: LongInt; input: PByte; n: SizeUInt;
   output: PByte; cap: SizeUInt; alloc: TAllocFn; release: TReleaseFn): SizeUInt; cdecl; external name 'ppa_zop_deflate';
 function ppa_zop_split(bsMax: LongInt; input: PByte; n: SizeUInt; pts: PSizeUInt; max: SizeUInt;
   alloc: TAllocFn; release: TReleaseFn): SizeUInt; cdecl; external name 'ppa_zop_split';
-function ppa_zop_piece(iterations: LongInt; input: PByte; start, stop: SizeUInt; litlens, dists: PWord;
+function ppa_zop_piece(variant, iterations: LongInt; input: PByte; start, stop: SizeUInt; litlens, dists: PWord;
   cap: SizeUInt; alloc: TAllocFn; release: TReleaseFn): SizeUInt; cdecl; external name 'ppa_zop_piece';
 function ppa_zop_lengths(litlens, dists: PWord; n: SizeUInt; llLengths, dLengths: PLongWord;
   alloc: TAllocFn; release: TReleaseFn): LongInt; cdecl; external name 'ppa_zop_lengths';
@@ -140,7 +149,7 @@ begin
   SetLength(raw, cap);
   empty := 0;
   if Length(plain) > 0 then src := @plain[0] else src := @empty;
-  n := ppa_zop_deflate(p.iterations, Ord(p.flags and ZOPF_SPLIT <> 0), Ord(p.flags and ZOPF_SPLIT_LAST <> 0),
+  n := ppa_zop_deflate(p.variant, p.iterations, Ord(p.flags and ZOPF_SPLIT <> 0), Ord(p.flags and ZOPF_SPLIT_LAST <> 0),
     p.bsMax, src, Length(plain), @raw[0], cap, @ZopAlloc, @ZopRelease);
   if n = 0 then begin raw := nil; Exit(False); end;
   SetLength(raw, n);
@@ -188,7 +197,7 @@ begin
 end;
 
 function FindZopParams(const a: TBytes; const z: TZStream; maxPlain: SizeInt; out p: TZopParams;
-  out choices: TZStream): Boolean;
+  out choices: TZStream; maxVariant: Integer): Boolean;
 const
   TRIES_SMALL: array[0..8] of Integer = (15, 60, 5, 20, 1, 10, 30, 50, 100);
   TRIES_LARGE: array[0..8] of Integer = (5, 20, 15, 60, 1, 10, 30, 50, 100);
@@ -213,15 +222,17 @@ var
   { each candidate number of iterations on plain[0..stop) against the
     stream's first tokens; the one that gives them, run whole and compared }
   function TryPiece(stop: SizeUInt; tries: Integer): Boolean;
-  var cnt, k, at: SizeUInt; ll, dd: array of Word; it: Integer; same: Boolean; raw: TBytes;
+  var cnt, k, at: SizeUInt; ll, dd: array of Word; it, v: Integer; same: Boolean; raw: TBytes;
   begin
     Result := False;
     cnt := TokensTo(stop);
     if cnt = 0 then Exit;
     SetLength(ll, cnt + 1); SetLength(dd, cnt + 1);
-    for k := 0 to tries - 1 do begin
+    for k := 0 to tries - 1 do
+    for v := 0 to maxVariant do begin
       if n < ZOP_LARGE then it := TRIES_SMALL[k] else it := TRIES_LARGE[k];
-      if ppa_zop_piece(it, @z.plain[0], 0, stop, @ll[0], @dd[0], cnt, @ZopAlloc, @ZopRelease) <> cnt then Continue;
+      p.variant := v;
+      if ppa_zop_piece(v, it, @z.plain[0], 0, stop, @ll[0], @dd[0], cnt, @ZopAlloc, @ZopRelease) <> cnt then Continue;
       same := True;
       for at := 0 to cnt - 1 do
         if dd[at] = 0 then begin
