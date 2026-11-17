@@ -79,7 +79,7 @@ The command's manual is [doc/CLI.md](doc/CLI.md).
 
 ## Against other compressors
 
-The published PPA 0.4.0, one file at a time, against the other
+The published PPA 0.5.0, one file at a time, against the other
 recompressors that give a PNG back byte for byte (16/11/2026; packPNG and
 precomp measured on 13/11/2026, on the same machine):
 [packPNG](https://github.com/YadeWira/packPNG) 2.0l (its default: preflate
@@ -88,7 +88,7 @@ and WebP-lossless) and [precomp](https://github.com/schnaader/precomp-cpp)
 file extracted and compared (every tool took and gave back every file;
 [how, and the details][wComp]).
 
-| set | files | size | packPNG 2.0l | precomp 0.4.7 | PPA 0.4.0 |
+| set | files | size | packPNG 2.0l | precomp 0.4.7 | PPA 0.5.0 |
 |---|---|---|---|---|---|
 | the PNG family of a sample corpus (PNG, APNG, MNG, JNG, CgBI) | 70 | 32.9 MB | 76.99% | 97.81% | **56.22%** |
 | photos as PNG (1.3 to 2.9 MP) | 20 | 40.3 MB | 73.92% | 103.62% | **60.51%** |
@@ -97,20 +97,21 @@ file extracted and compared (every tool took and gave back every file;
 Speed on the 20 photos (two Xeon E5-2697A v4; "8 at once": `ppa -th 8`,
 the others 8 processes; the best of three runs):
 
-| | packPNG 2.0l | precomp 0.4.7 | PPA 0.4.0 |
+| | packPNG 2.0l | precomp 0.4.7 | PPA 0.5.0 |
 |---|---|---|---|
-| compress, 1 thread | 75.5 s | **16.8 s** | 28.9 s |
-| decompress, 1 thread | **8.0 s** | 11.6 s | 11.4 s |
-| compress, 8 at once | 12.3 s | **2.6 s** | 5.1 s |
+| compress, 1 thread | 75.5 s | **16.8 s** | 28.3 s |
+| decompress, 1 thread | **8.0 s** | 11.6 s | 11.5 s |
+| compress, 8 at once | 12.3 s | **2.6 s** | 4.9 s |
 | decompress, 8 at once | **1.3 s** | 1.8 s | 2.0 s |
 
 PPA is the smallest on every set, 18 to 27% smaller than packPNG, and
-compresses 2.6 times as fast as it; it is slower to decompress (1.4 times
+compresses 2.7 times as fast as it; it is slower to decompress (1.4 times
 on one thread), as rebuilding the encoder's choices costs about as much as
-packPNG's whole decompression. One photo extracts in 0.24 s on 8 threads.
+packPNG's whole decompression. One photo extracts in 0.26 s on 8 threads.
 0.3.0 rebuilds the streams zlib did not write (oxipng, miniz) instead of
 keeping them as bytes: generated 58.86% -> 57.52%, corpus 56.30% -> 56.22%;
-0.4.0 rebuilds oxipng's exactly (libdeflate's own compressor): 57.10%.
+0.4.0 rebuilds oxipng's exactly (libdeflate's own compressor): 57.10%;
+0.5.0 zopflipng's (zopfli's own deflate), none of which the three sets hold.
 Three levels since 0.4.0 (8 at once; corpus, photos, generated): `-1`
 (`--fast`, no slow model where another takes the image) 58.79%, 60.51%,
 58.46%, extracting in 6.0, 2.1, 4.0 s; `-2`, the default, 56.22%, 60.51%,
@@ -151,15 +152,15 @@ hash catches accidents, not tampering).
 
 One archive per set, 8 threads, every file extracted and compared; size,
 then the best of three times to write / extract (7-Zip + PPA on
-16/11/2026, the rest on 13/11/2026). 7-Zip 25.01 with PPA 0.4.0's plugin, `-m0=PPA -m1=LZMA2`; zpaq-std 2.9.0 `-m5`, with
+16/11/2026, the rest on 13/11/2026). 7-Zip 25.01 with PPA 0.5.0's plugin, `-m0=PPA -m1=LZMA2`; zpaq-std 2.9.0 `-m5`, with
 `-sa` (PPA 0.2.0's `ppa1`) and without; [Aqueous](https://github.com/lifthrasiir/aqueous)
 0.0.20261101 at its default level and 7-Zip alone (`-mx=9`) for reference.
 
 | set | 7-Zip + PPA | zpaq-std -sa -m5 | zpaq-std -m5 | Aqueous | 7-Zip |
 |---|---|---|---|---|---|
-| corpus (70) | **41.98%**, 65.3 / 29.2 s | 83.33%, 63.3 / 61.6 s | 83.26%, 119.2 / 123.4 s | 94.18%, 2.0 / 0.3 s | 84.36%, 3.1 / 0.5 s |
+| corpus (70) | **41.98%**, 61.5 / 27.7 s | 83.33%, 63.3 / 61.6 s | 83.26%, 119.2 / 123.4 s | 94.18%, 2.0 / 0.3 s | 84.36%, 3.1 / 0.5 s |
 | photos (20) | **60.51%**, 5.8 / 2.3 s | 66.17%, 15.7 / 13.3 s | 96.31%, 170.2 / 168.9 s | 81.42%, 1.2 / 0.4 s | 99.11%, 3.6 / 1.0 s |
-| generated (75) | **25.71%**, 16.9 / 7.3 s | 60.43%, 7.4 / 6.8 s | 69.53%, 46.5 / 45.1 s | 52.27%, 0.9 / 0.2 s | 70.69%, 1.1 / 0.2 s |
+| generated (75) | **25.71%**, 17.3 / 7.3 s | 60.43%, 7.4 / 6.8 s | 69.53%, 46.5 / 45.1 s | 52.27%, 0.9 / 0.2 s | 70.69%, 1.1 / 0.2 s |
 
 7-Zip + PPA is the smallest on every set, by far where files repeat an
 image (the corpus holds the same pictures in several files, the generated
