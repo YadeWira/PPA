@@ -112,7 +112,10 @@ packPNG's whole decompression. One photo extracts in 0.26 s on 8 threads.
 0.3.0 rebuilds the streams zlib did not write (oxipng, miniz) instead of
 keeping them as bytes: generated 58.86% -> 57.52%, corpus 56.30% -> 56.22%;
 0.4.0 rebuilds oxipng's exactly (libdeflate's own compressor): 57.10%;
-0.5.0 zopflipng's (zopfli's own deflate), none of which the three sets hold.
+0.5.0 zopflipng's (zopfli's own deflate), none of which the three sets hold;
+0.6.0 oxipng --zopfli's. The published 0.6.0 gives 0.5.0's `.ppa` on all
+three sets; its times on 17/11/2026 met a load of 10 to 25 (other jobs) and
+are not comparable: the tables keep 0.5.0's.
 Three levels since 0.4.0 (8 at once; corpus, photos, generated): `-1`
 (`--fast`, no slow model where another takes the image) 58.79%, 60.51%,
 58.46%, extracting in 6.0, 2.1, 4.0 s; `-2`, the default, 56.22%, 60.51%,
