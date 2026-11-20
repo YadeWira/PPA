@@ -220,6 +220,8 @@ const
   PAR_MIN_BYTES_DEFAULT = 1024 * 1024;
   PAR_OVERLAP = 32 * 1024;
   PAR_SKIP_BITS = 19;   { as SKIP_BITS_MAX: fewer slots cost more in collisions than they save }
+  { the tokens' arrays at first (DeflateC grows them): 4 bytes a token }
+  TOK_ROOM = 1 shl 20;
 
 function ppaz_deflate(var s: TZDeflate): SizeInt; cdecl; external name 'ppaz_deflate';
 procedure ppaz_preinsert(var s: TZDeflate; from, upTo: SizeInt); cdecl; external name 'ppaz_preinsert';
@@ -993,6 +995,31 @@ var
     up by SetupC), which comes back here to flush each block }
   procedure DeflateC(fast: Boolean);
   var r: SizeInt;
+
+    { room for the tokens the next call may write: the block's symbols
+      left, or the input's bytes left (a token takes one at least), and the
+      literal a pending match leaves (a few more for safety);
+      the arrays grow by doubling, never past the input's tokens. The
+      pointers are set again each call: the Pascal loops grow the arrays
+      their own way. }
+    procedure Room;
+    var need, len: SizeInt;
+    begin
+      need := symEnd - symNext;
+      if need > n - strstart then need := n - strstart;
+      Inc(need, nTok + 16);
+      if Length(z.tokLen) < need then begin
+        len := 2 * Length(z.tokLen);
+        if len > n + 8 then len := n + 8;
+        if len < need then len := need;
+        SetLength(z.tokLen, len); SetLength(z.tokVal, len);
+        if scratch <> nil then begin
+          scratch^.tokLen := z.tokLen; scratch^.tokVal := z.tokVal;
+        end;
+      end;
+      st.tokLen := @z.tokLen[0]; st.tokVal := @z.tokVal[0];
+    end;
+
   begin
     st.strstart := strstart; st.matchStart := matchStart; st.prevMatch := prevMatch; st.winBase := winBase;
     st.matchLength := matchLength; st.prevLength := prevLength; st.matchAvailable := matchAvailable;
@@ -1002,6 +1029,7 @@ var
     st.lim := lim; st.lo := lo; st.stopAt := stopAt; st.pending := 0; st.tooFar := tooFar;
     repeat
       st.checkNow := Ord(checkNow); st.stop := Ord(stop);
+      Room;
       r := ppaz_deflate(st);
       strstart := st.strstart; nTok := st.nTok; symNext := st.symNext; winBase := st.winBase;
       if st.stop <> 0 then begin stop := True; diverged := True; end;
@@ -1073,6 +1101,9 @@ var
       ref's, the first one stops the run) }
     room := n + 8;
     if (ref <> nil) and (Length(ref^.tokLen) + symEnd + 16 < room) then room := Length(ref^.tokLen) + symEnd + 16;
+    { DeflateC makes more when a long input needs it (zeros: a token for
+      258 bytes) }
+    if room > TOK_ROOM then room := TOK_ROOM;
     if scratch <> nil then begin
       { the scratch's own arrays (the end's SetLength gives z a copy of
         what it holds) }

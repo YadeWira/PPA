@@ -537,6 +537,14 @@ flush, the old versions' second block. So:
   4) and to be written the same again; `.github/test.sh` runs it on the six
   platforms, 32 and 64 bits, with the C and the Pascal code. A vector is
   never made again: a new format adds its own beside them.
+  `tests/recipes/bad/` (M10b, `tools/preflate/mkbad.py`) holds 17 streams
+  no inflate takes, one for each reason (a block type of 3, a stored
+  block's lengths, a distance before the start, codes 286, 287 and 30, the
+  code lengths' tree over-subscribed or empty, a repeat with nothing
+  before it or past the end, no end-of-block code, cut short, a zlib
+  header's check or method, nothing): `test_lib --deflate` requires
+  `PPA_E_DATA` and the byte where it showed, the same in the C and the
+  Pascal, and on every platform (`hash.txt`).
 
 Format 1 was never published (M3b moved to format 2: kind 3's `tree`
 byte; the predictor and its models are `PRED_VERSION` 2, and kind 1's
@@ -995,6 +1003,35 @@ zopfli" above), in codec stream version 5.
   ends. A zopfli golden vector through the API: 13.7 -> 10.1 s, the
   system's 4.0 -> 0.2 s; the same recipes. The same streams with every
   block filled with garbage first (zopfli reads none it did not write).
+
+## Status (M10b, 20/11/2026): damaged and huge streams, the parse
+
+- **Streams no inflate takes**: the corpus's `hostile` set (18) and
+  `tests/recipes/bad/` (17, one for each reason inflate gives): each is
+  `PPA_E_DATA` with the byte where it showed (at the end for a stream cut
+  short, at 0 for a zlib header's check), `PPA_E_NOT_TAKEN` for a preset
+  dictionary; never a crash, never bytes or a recipe.
+- **1 GiB of zeros** (the design's test of the work's bounds), by zlib 1, 6
+  and 9 and libdeflate 6 and 12: each analyzed and rebuilt the same, in 10
+  to 23 s (zlib's) and about 160 s (libdeflate's: its own near-optimal
+  encode of a run, about 1,800 instructions a byte, which every rebuild
+  runs). zlib's rebuild made room for a token a byte (4 GB for 1 GiB, 6.3
+  GB at its peak) and the context kept it: the tokens' arrays now grow as
+  deflate fills them (each call to the C at most a block's symbols or the
+  input's bytes left), and a context lets go of more than 1 Mi tokens
+  after a stream: a 2.1 GB peak, the bytes given back counted. libdeflate's
+  output buffer (its bound, above the input) is no longer cleared first.
+- **The parse** (most of a short stream's analysis): Huffman codes of up to
+  9 bits by a table, the reader holding up to 32 bits between symbols and
+  giving back what it loaded ahead where a position is asked (an error's,
+  a stored block's, the end's): the same positions as the bit-by-bit
+  reader. A 450-byte stream's analysis 627,000 -> 487,000 instructions
+  (callgrind), an 8 KB one's -31%; rebuilds the same. The old library and
+  the new one on the corpus's PDA, `hostile` and golden streams, each with
+  30 damaged copies (bits flipped, bytes set, cut short): 17,577 analyses,
+  10,338 refused, the same code, position, bytes and recipe in all.
+- The suite's hashes are 0.7.1's but deflate's, which now holds the
+  refusals' positions (without them, 0.7.1's).
 
 ## Studied, not done yet (M7, 16/11/2026): zlib-ng
 

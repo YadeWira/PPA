@@ -149,6 +149,15 @@ stream, bit for bit.
   recipe of a version above the library's is `PPA_E_VERSION`; a damaged one
   is `PPA_E_DATA`, or may give another stream. So may the wrong bytes: the
   caller checks the stream against what it keeps (a hash).
+- **Not deflate:** a stream no inflate takes (a bad block type, a code
+  that is not in its tree, a distance before the start, cut short) is
+  `PPA_E_DATA`, `err_pos` the byte where that showed (`tests/recipes/bad/`
+  has one of each).
+- **Large streams:** the time and the memory grow with the bytes, nothing
+  more: 1 GiB of zeros is analyzed in 10 to 25 s from zlib's streams,
+  about 160 s from libdeflate 12's (libdeflate's own encode is that slow
+  on it), at a peak of about 2 GB and 5 GB, the bytes given back counted.
+  `max_plain` caps it.
 - **Worth keeping?** That is the caller's to weigh: the recipe of most
   streams is a few bytes, a recipe of corrections (kind 3) can be long.
 - **Not handled:** gzip's framing (the caller takes it off), streams one

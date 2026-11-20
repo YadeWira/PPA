@@ -267,6 +267,12 @@ static int deflate_main(int argc, char **argv) {
     tA += t1 - t0;
     in += n;
     if (r == PPA_E_NOT_TAKEN) { notTaken++; printf("  not taken: %s\n", name); continue; }
+    if (strstr(name, "bad/") || strstr(name, "bad\\")) {  /* a stream inflate refuses: PPA_E_DATA, where it showed */
+      check(r == PPA_E_DATA && ep <= n && pl == NULL && rc == NULL, "a damaged stream: PPA_E_DATA within it", name);
+      if (r == PPA_E_DATA) { data++; printf("  refused at %zu of %zu: %s\n", ep, n, name); }
+      ppa_free(pl); ppa_free(rc);
+      continue;
+    }
     if (r != PPA_OK) { data++; check(0, "analyze", name); continue; }
     check(cons > 0 && cons <= n, "consumed within the stream", name);
     t0 = now_us();

@@ -96,18 +96,24 @@ begin
 end;
 
 function LdfDeflate(const plain: TBytes; const p: TLdfParams; out raw: TBytes): Boolean;
-var cap, n: SizeUInt; src: Pointer; empty: Byte;
+var cap, n: SizeUInt; src, buf: Pointer; empty: Byte;
 begin
   raw := nil;
   if not LdfValid(p) then Exit(False);
   cap := ppa_ldf_bound(Length(plain));
-  SetLength(raw, cap);
+  { libdeflate's bound is above the input: not cleared (SetLength would
+    touch every page of it), only what it writes copied }
+  buf := GetMem(cap);
+  if buf = nil then Exit(False);
   empty := 0;
   if Length(plain) > 0 then src := @plain[0] else src := @empty;
-  n := ppa_ldf_compress(p.level, src, Length(plain), @raw[0], cap, @LdfAlloc, @LdfRelease);
-  if n = 0 then begin raw := nil; Exit(False); end;
-  SetLength(raw, n);
-  Result := True;
+  n := ppa_ldf_compress(p.level, src, Length(plain), buf, cap, @LdfAlloc, @LdfRelease);
+  if n > 0 then begin
+    SetLength(raw, n);
+    Move(buf^, raw[0], n);
+  end;
+  FreeMem(buf);
+  Result := n > 0;
 end;
 
 function LdfChoices(const plain: TBytes; const p: TLdfParams; out e: TZStream): Boolean;

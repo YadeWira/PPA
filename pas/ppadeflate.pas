@@ -202,18 +202,24 @@ end;
 
 { ---------------------------------------------------------------- Huffman }
 
+const
+  FAST_BITS = 9;
+
 type
   { canonical code for decoding, as puff.c: how many codes of each length,
     and the symbols ordered by code }
   THuffDec = record
     count: array[0..15] of Integer;
     symbol: array[0..287] of Word;
+    { the next FAST_BITS bits (the first read lowest) -> symbol shl 4 or
+      its length; 0: a longer code, or none (DecodeSym's slow way) }
+    fast: array[0..(1 shl FAST_BITS) - 1] of Word;
   end;
 
 { False if the lengths are over-subscribed. An incomplete code is accepted:
   a code it lacks is caught when it is read. }
 function BuildDec(out h: THuffDec; const lens: array of Byte; n: Integer): Boolean;
-var offs: array[0..15] of Integer; i, left: Integer;
+var offs: array[0..15] of Integer; next: array[0..16] of Integer; i, left, c, r, l: Integer; e: Word;
 begin
   FillChar(h, SizeOf(h), 0);
   for i := 0 to n - 1 do Inc(h.count[lens[i]]);
@@ -229,6 +235,25 @@ begin
       h.symbol[offs[lens[i]]] := i;
       Inc(offs[lens[i]]);
     end;
+  { the canonical codes (as BuildEnc), bit-reversed: each short one fills
+    every entry whose low bits it is }
+  c := 0; next[1] := 0;
+  for l := 2 to 15 do begin
+    c := (c + h.count[l - 1]) shl 1;
+    next[l] := c;
+  end;
+  for i := 0 to n - 1 do begin
+    l := lens[i];
+    if (l = 0) or (l > FAST_BITS) then Continue;
+    c := next[l];
+    Inc(next[l]);
+    r := ((Integer(Rev8[c and $FF]) shl 8) or Rev8[(c shr 8) and $FF]) shr (16 - l);
+    e := Word((i shl 4) or l);
+    while r < (1 shl FAST_BITS) do begin
+      h.fast[r] := e;
+      Inc(r, 1 shl l);
+    end;
+  end;
   Result := True;
 end;
 
@@ -285,10 +310,34 @@ begin
   Dec(br.cnt, n);
 end;
 
-{ -1: no such code, or the end of the data }
-function DecodeSym(const a: TBytes; var br: TBitReader; const h: THuffDec): Integer;
-var code, first, index, count, len: Integer;
+{ The reader as GetBits alone leaves it (fewer than 8 bits held): the whole
+  bytes DecodeSym loaded ahead given back. }
+procedure Settle(var br: TBitReader); inline;
 begin
+  Dec(br.pos, br.cnt shr 3);
+  br.cnt := br.cnt and 7;
+  br.buf := br.buf and ((LongWord(1) shl br.cnt) - 1);
+end;
+
+{ -1: no such code, or the end of the data. A code of up to FAST_BITS bits
+  by the table when that many are there; the bytes loaded for it stay in
+  the reader (Settle gives them back, where a position is asked: an
+  error's, a stored block's, the end's, the same as the bit-by-bit way) }
+function DecodeSym(const a: TBytes; var br: TBitReader; const h: THuffDec): Integer;
+var code, first, index, count, len: Integer; e: Word;
+begin
+  while (br.cnt <= 24) and (br.pos < Length(a)) do begin
+    br.buf := br.buf or (LongWord(a[br.pos]) shl br.cnt);
+    Inc(br.pos); Inc(br.cnt, 8);
+  end;
+  e := 0;
+  if br.cnt >= FAST_BITS then e := h.fast[br.buf and ((1 shl FAST_BITS) - 1)];
+  if e <> 0 then begin
+    len := e and 15;
+    br.buf := br.buf shr len;
+    Dec(br.cnt, len);
+    Exit(e shr 4);
+  end;
   code := 0; first := 0; index := 0;
   for len := 1 to 15 do begin
     code := code or Integer(GetBits(a, br, 1));
@@ -316,6 +365,8 @@ var
 
   function Fail(e: TZError): TZResult;
   begin
+    { past the end, every byte was loaded, as GetBits alone does }
+    if not br.eof then Settle(br);
     Result.err := e; Result.pos := br.pos;
     if br.eof and (e in [zeBadCode, zeBadHeader]) then Result.err := zeTruncated;
   end;
@@ -374,6 +425,7 @@ begin
 
     case b.btype of
       btStored: begin
+        Settle(br);
         b.pad := Byte(br.buf and ((LongWord(1) shl br.cnt) - 1));
         { what is left in the buffer is a whole number of bytes after this }
         k := br.cnt mod 8;

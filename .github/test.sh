@@ -115,8 +115,18 @@ PPA_NOC=1 "$OUT/lib/test_lib$EXE" --deflate -1 tests/recipes/*.zlib tests/recipe
   || { cat "$OUT/lib/deflate.txt"; echo "FAIL: libppa's deflate test"; exit 1; }
 PPA_NOC=1 "$OUT/lib/test_lib$EXE" --deflate tests/recipes/rgba8-zopfli.raw tests/recipes/drawing-zok2-i5.raw > "$OUT/lib/deflate2.txt" \
   || { cat "$OUT/lib/deflate2.txt"; echo "FAIL: libppa's deflate test (zopfli)"; exit 1; }
-grep -h '^deflate: [0-9]* streams' "$OUT/lib/deflate.txt" "$OUT/lib/deflate2.txt"
+# streams no inflate takes (tools/preflate/mkbad.py): each refused,
+# PPA_E_DATA and where it showed, the same place in the C and in Pascal
+for noc in 0 1; do
+  PPA_NOC=$noc "$OUT/lib/test_lib$EXE" --deflate -1 tests/recipes/bad/* > "$OUT/lib/deflate_bad$noc.txt" \
+    || { cat "$OUT/lib/deflate_bad$noc.txt"; echo "FAIL: libppa's deflate test (damaged streams)"; exit 1; }
+  grep -h '^  refused at ' "$OUT/lib/deflate_bad$noc.txt" | sed 's|[^ ]*/||' | LC_ALL=C sort -k6 > "$OUT/lib/refused$noc.txt"
+done
+cmp -s "$OUT/lib/refused0.txt" "$OUT/lib/refused1.txt" \
+  || { diff "$OUT/lib/refused0.txt" "$OUT/lib/refused1.txt"; echo "FAIL: damaged streams: the C and Pascal differ"; exit 1; }
+grep -h '^deflate: [0-9]* streams' "$OUT/lib/deflate.txt" "$OUT/lib/deflate2.txt" "$OUT/lib/deflate_bad1.txt"
 grep -h '^deflate: recipes' "$OUT/lib/deflate.txt" "$OUT/lib/deflate2.txt" > "$OUT/deflate.txt"
+cat "$OUT/lib/refused1.txt" >> "$OUT/deflate.txt"
 # each recipe's hash, to find which one differs when the platforms do
 grep -h '^  recipe ' "$OUT/lib/deflate.txt" "$OUT/lib/deflate2.txt" | LC_ALL=C sort -k3
 # 7-Zip 23 or later (not p7zip, whose IUnknown differs): a copy with the

@@ -39,6 +39,8 @@ const
   DEFL_FLAGS_KNOWN = 3 or (3 shl DEFL_LEVEL_SHIFT);
   { the cap on a stream's bytes when the caller gives none }
   DEFL_MAX_PLAIN_DEFAULT = SizeInt(1) shl 30;
+  { the most tokens a context keeps between streams (4 bytes each) }
+  SCRATCH_TOKENS_KEPT = 1 shl 20;
 
 type
   TDeflCtx = class
@@ -52,6 +54,9 @@ type
     { zlib's tables, kept from one stream to the next }
     scratch: TZlibScratch;
     constructor Create(aMaxPlain: SizeUInt);
+    { the scratch's tokens let go when a long stream grew them (a context
+      is kept for a file's streams: a gigabyte's would stay) }
+    procedure TrimScratch;
     { src[0..n) -> plain, recipe; consumed: where the deflate data ends
       (with the Adler-32 when zlib-framed and it is the right one): the
       bytes after it are the caller's, not in the recipe. DC_DATA: not a
@@ -139,6 +144,7 @@ begin
     r.raw := z.raw; r.adlerOk := z.adlerOk; r.header := z.header;
     r.endPad := z.endPad; r.tail := nil;
     found := ppapreflate.Rebuild(z.plain, r, back, 1, @scratch) and Same(back, a);
+    TrimScratch;
     if found then Inc(hits);
   end;
   if not found then begin
@@ -156,9 +162,17 @@ begin
   Result := DC_OK;
 end;
 
+procedure TDeflCtx.TrimScratch;
+begin
+  if Length(scratch.tokLen) > SCRATCH_TOKENS_KEPT then begin
+    scratch.tokLen := nil;
+    scratch.tokVal := nil;
+  end;
+end;
+
 function TDeflCtx.Rebuild(plain: PByte; plainSize: SizeUInt; rec: PByte; recSize: SizeUInt;
   maxOut: SizeUInt; out stream: TBytes; out errPos: SizeUInt): LongInt;
-var b, p: TBytes; pos: SizeInt; r: TDeflRecipe; ver: Byte;
+var b, p: TBytes; pos: SizeInt; r: TDeflRecipe; ver: Byte; ok: Boolean;
 begin
   stream := nil; errPos := 0;
   if recSize = 0 then Exit(DC_DATA);
@@ -178,7 +192,9 @@ begin
   end;
   SetLength(p, plainSize);
   if plainSize > 0 then Move(plain^, p[0], plainSize);
-  if not ppapreflate.Rebuild(p, r, stream, 1, @scratch) then begin
+  ok := ppapreflate.Rebuild(p, r, stream, 1, @scratch);
+  TrimScratch;
+  if not ok then begin
     errPos := 1;
     Exit(DC_DATA);
   end;
