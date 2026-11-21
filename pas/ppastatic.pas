@@ -415,8 +415,10 @@ begin
       last := -1; sum := 0;
       for k := 1 to used do begin
         if not GetVar(meta, p, gap) or not GetVar(meta, p, f) or (p > nf) then Exit;
+        { gap checked before it is used: a damaged one may be any Cardinal }
+        if (gap > 255) or (f >= SM_TOT) then Exit;
         s := last + 1 + Integer(gap);
-        if (gap > 255) or (s > 255) or (f >= SM_TOT) then Exit;
+        if s > 255 then Exit;
         t^.freq[c, s] := f + 1;
         Inc(sum, f + 1);
         last := s;

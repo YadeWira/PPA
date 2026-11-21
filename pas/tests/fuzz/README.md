@@ -81,3 +81,16 @@ that ends where its memory does, a fault. These were `BlockBits`,
 element into a local first, as `Encode` already did), `IsZlibHeader` and
 `ppadeflctx`'s FDICT check, which read the caller's own memory. Not one
 of them changed a bit of what PPA writes.
+
+The 24-hour campaigns of M10 (20/11/2026): `lib_ppa_chk`, an hour in, a
+range check in the static model's decoder. A damaged table's gap (any
+Cardinal) was added to the last symbol before it was checked against 255;
+the release build checked the sum right after and refused the file, the
+checked build stopped at the cast. Now the gap is checked first. The two
+`slow-unit`s of `lib_deflate_chk` (7 and 37 KB, 0.9 and 1.9 s in the
+release build) are kind 3's search again, each rebuilt right.
+The hook printed it as `EControlC` (FreePascal 3.2.2's class under
+`fuzz_decode_chk` and the library alike), not `ERangeError`; the run-time
+error's own number tells which: `gdb -batch -ex 'break
+SYSUTILS_$$_RUNERRORTOEXCEPT$LONGINT$POINTER$POINTER' -ex run -ex 'p $rdi'
+-ex 'info line *$rsi' --args bin/fuzz_decode_chk ppa <file>` (201: range).
