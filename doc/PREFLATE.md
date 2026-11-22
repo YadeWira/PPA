@@ -1032,6 +1032,17 @@ zopfli" above), in codec stream version 5.
   10,338 refused, the same code, position, bytes and recipe in all.
 - The suite's hashes are 0.7.1's but deflate's, which now holds the
   refusals' positions (without them, 0.7.1's).
+- **24 hours of fuzzing** (20-21/11/2026, `pas/tests/fuzz/run.sh`): the
+  checked builds' `lib_deflate_chk` (143,697 runs: analysis, then the
+  rebuild of what it gave, and damaged recipes), `afl_deflate_chk`
+  (34,305 under qemu, guided by the Pascal), `afl_ppa_chk` (3.7 million
+  `.ppa` decodes) and `lib_ppa_chk`: no crash. The last found, an hour in,
+  a range check in the static model's decoder (a damaged table's gap added
+  before it was checked: the release build refused the file, a checked one
+  stopped), fixed, then 24 hours again (6.6 million runs) clean. The few
+  "hangs" and slow units are kind 3's search (at most 1.9 s natively) or
+  were written in a minute the machine ran out of memory, each under a
+  second when run again.
 
 ## Studied, not done yet (M7, 16/11/2026): zlib-ng
 
