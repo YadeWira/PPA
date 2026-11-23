@@ -288,6 +288,12 @@ begin
   end;
 end;
 
+var
+  { the fixed block's codes, built once (MakeTables): a fixed block copies
+    them instead of building them each time (most of a short stream's time) }
+  FixedLitDec, FixedDistDec: THuffDec;
+  FixedLitEnc, FixedDistEnc: THuffEnc;
+
 { ---------------------------------------------------------------- decoding }
 
 type
@@ -447,8 +453,8 @@ begin
         if b.btype = btFixed then begin
           Move(FixedLit, b.litLen, SizeOf(FixedLit));
           Move(FixedDist, b.distLen, SizeOf(FixedDist));
-          BuildDec(litDec, b.litLen, 288);
-          BuildDec(distDec, b.distLen, 30);
+          litDec := FixedLitDec;
+          distDec := FixedDistDec;
         end else begin
           b.hlit := Bits(5) + 257;
           b.hdist := Bits(5) + 1;
@@ -647,8 +653,8 @@ begin
           end;
         end;
         if btype = btFixed then begin
-          BuildEnc(lit, FixedLit, 288);
-          BuildEnc(dst, FixedDist, 32);
+          lit := FixedLitEnc;
+          dst := FixedDistEnc;
         end else begin
           BuildEnc(lit, litLen, 288);
           BuildEnc(dst, distLen, 32);
@@ -753,6 +759,11 @@ begin
       if (i shr s) and 1 <> 0 then l := l or (1 shl (7 - s));
     Rev8[i] := l;
   end;
+  { after Rev8, which they use }
+  BuildDec(FixedLitDec, FixedLit, 288);
+  BuildDec(FixedDistDec, FixedDist, 30);
+  BuildEnc(FixedLitEnc, FixedLit, 288);
+  BuildEnc(FixedDistEnc, FixedDist, 32);
 end;
 
 initialization

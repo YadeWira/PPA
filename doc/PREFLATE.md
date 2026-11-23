@@ -1043,6 +1043,20 @@ zopfli" above), in codec stream version 5.
   "hangs" and slow units are kind 3's search (at most 1.9 s natively) or
   were written in a minute the machine ran out of memory, each under a
   second when run again.
+- **A stream's fixed cost** (M8's "per-stream overhead ≤ 50 µs at the
+  450 B median", 23/11/2026, one core, the context kept): an empty zlib
+  stream, nothing but the overhead, 23 -> 7.5 µs to analyze and 11 -> 5.8
+  µs to rebuild, the fixed block's Huffman codes now built once
+  (`MakeTables`) instead of at each block (two thirds of its
+  instructions). A 39-byte stream 55 -> 41 µs and 36 -> 31 µs. A 450-byte
+  stream the hint gives: about 100 µs and 50 to 65 µs, its encode (35%),
+  the parse and zlib's tables cleared: work, not overhead. PDA's set as a
+  batch (one context, each stream's hint the last one's recipe), its 81
+  streams of 350 to 549 B: a median of 285 µs to analyze (the search,
+  when the hint is wrong) and 87 µs to rebuild. Old and new library on
+  PDA's, `hostile`, the golden and 200 of `png-zlib`/`zflow`/`raw`'s
+  streams, each with 30 damaged copies: 35,557 analyses, 24,495 refused,
+  0 differ; the suite's hashes unchanged.
 
 ## Studied, not done yet (M7, 16/11/2026): zlib-ng
 
