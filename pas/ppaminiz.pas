@@ -96,6 +96,11 @@ const
   CODE_BUF_SIZE = 64 * 1024;
   OUT_BUF_SIZE = (CODE_BUF_SIZE * 13) div 10;
   FAST_LOOKAHEAD = 4096;
+  { MzRun's room for tokens beyond a ref's (a block's, each token a code
+    byte at least, and the one that parts from it), and without a ref the
+    least it starts with }
+  MZ_TOK_SLACK = CODE_BUF_SIZE + 2;
+  MZ_TOK_FIRST = 1 shl 22;
 
 type
   { a block the parse ended: its tokens, the bytes it covers (from dictPos,
@@ -118,6 +123,8 @@ type
     refFirst, refCount, refPos, refLen: PSizeInt; refBlocks: SizeInt;
     refTokLen, refTokVal: PWord;
     useRef: SizeInt;
+    { the room for tokens; full: the parse stopped for want of it }
+    maxTok, full: SizeInt;
   end;
 
 function ppamz_parse(var s: TMzParse): SizeInt; cdecl; external name 'ppamz_parse';
@@ -171,6 +178,7 @@ var
         end;
       end;
     end;
+    if s.nTok >= s.maxTok then begin ok := False; s.full := 1; Exit; end;
     s.tokLen[s.nTok] := len; s.tokVal[s.nTok] := val;
     Inc(s.nTok); Inc(blockTok);
   end;
@@ -421,7 +429,7 @@ begin
   codeOfs := 1; flagsLeft := 8;
   savedLen := 0; savedDist := 0; savedLit := 0;
   src := 0; srcLeft := s.n;
-  s.nTok := 0; s.nBlocks := 0; blockTok := 0;
+  s.nTok := 0; s.nBlocks := 0; s.full := 0; blockTok := 0;
   ok := True;
   if s.fast <> 0 then Fast else Normal;
   if ok then Flush(True);
@@ -546,7 +554,7 @@ function MzRun(const plain: TBytes; const p: TMinizParams; ref: PZStream; hdr: B
 var
   s: TMzParse;
   t: TZStream;
-  n, i, k, nb, outTok: SizeInt;
+  n, i, k, nb, outTok, room: SizeInt;
   bitPos, bits, startByte, b0: Int64;
   stored: Boolean;
   bl: TDeflateBlock;
@@ -556,9 +564,17 @@ begin
   Result := False;
   if not MinizValid(p) then Exit;
   n := Length(plain);
-  if Length(w.tokLen) < n + 1 then begin
-    w.tokLen := nil; w.tokVal := nil;
-    SetLength(w.tokLen, n + 1); SetLength(w.tokVal, n + 1);
+  { the room for tokens: a token a byte at most, but no more than a ref's
+    and a block (a parse that keeps to the ref), or n / 8 for a large
+    stream without one; a parse that fills it runs again with twice the
+    room (the same parse: it is made from the bytes alone). 1 GiB of zeros
+    took 4 GB here }
+  room := n + 1;
+  if ref <> nil then begin
+    if Length(ref^.tokLen) + MZ_TOK_SLACK < room then room := Length(ref^.tokLen) + MZ_TOK_SLACK;
+  end else if room > MZ_TOK_FIRST then begin
+    room := n div 8;
+    if room < MZ_TOK_FIRST then room := MZ_TOK_FIRST;
   end;
   if Length(w.blocks) < n div 16384 + 4 then SetLength(w.blocks, n div 16384 + 4);
   s := Default(TMzParse);
@@ -567,7 +583,6 @@ begin
   s.flags := p.flags;
   s.fast := Ord((p.variant = MZV_FAST) and ((p.flags and MZ_PROBES_MASK) = 1) and ((p.flags and MZ_GREEDY) <> 0) and
     ((p.flags and (MZ_FILTER or MZ_RAW or MZ_RLE)) = 0));
-  s.tokLen := @w.tokLen[0]; s.tokVal := @w.tokVal[0];
   s.blocks := @w.blocks[0]; s.maxBlocks := Length(w.blocks);
   if ref <> nil then begin
     nb := Length(ref^.blocks);
@@ -592,16 +607,25 @@ begin
     end;
     s.useRef := 1;
   end;
-  if UseMinizC then begin
-    if Length(w.dict) = 0 then begin
-      SetLength(w.dict, DICT_SIZE + MAX_MATCH - 1); SetLength(w.hash, HASH_SIZE); SetLength(w.next, DICT_SIZE);
+  repeat
+    if Length(w.tokLen) < room then begin
+      w.tokLen := nil; w.tokVal := nil;
+      SetLength(w.tokLen, room); SetLength(w.tokVal, room);
     end;
-    FillChar(w.dict[0], Length(w.dict), 0);
-    FillChar(w.hash[0], 2 * Length(w.hash), 0);
-    FillChar(w.next[0], 2 * Length(w.next), 0);
-    s.dict := @w.dict[0]; s.hash := @w.hash[0]; s.next := @w.next[0];
-    if ppamz_parse(s) = 0 then Exit;
-  end else if not ParsePas(s) then Exit;
+    s.tokLen := @w.tokLen[0]; s.tokVal := @w.tokVal[0]; s.maxTok := Length(w.tokLen);
+    if UseMinizC then begin
+      if Length(w.dict) = 0 then begin
+        SetLength(w.dict, DICT_SIZE + MAX_MATCH - 1); SetLength(w.hash, HASH_SIZE); SetLength(w.next, DICT_SIZE);
+      end;
+      FillChar(w.dict[0], Length(w.dict), 0);
+      FillChar(w.hash[0], 2 * Length(w.hash), 0);
+      FillChar(w.next[0], 2 * Length(w.next), 0);
+      s.dict := @w.dict[0]; s.hash := @w.hash[0]; s.next := @w.next[0];
+      if ppamz_parse(s) <> 0 then Break;
+    end else if ParsePas(s) then Break;
+    if (s.full = 0) or (s.maxTok > n) then Exit;
+    if 2 * s.maxTok > n + 1 then room := n + 1 else room := 2 * s.maxTok;
+  until False;
   { the blocks: each block's tokens kept in place unless it is stored (t:
     the tokens as the work holds them, for the bits of each block) }
   t := Default(TZStream);

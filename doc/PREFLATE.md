@@ -1058,6 +1058,32 @@ zopfli" above), in codec stream version 5.
   streams, each with 30 damaged copies: 35,557 analyses, 24,495 refused,
   0 differ; the suite's hashes unchanged.
 
+## Status (M10c, 25/11/2026): the slow cases, without a byte changed
+
+- **Kind 3's search on runs of one byte.** The slowest stream the fuzzing
+  kept (1.9 s: 55 KB of XML with 19,000 places holding `\xaa\xaa\xaa\xaa`)
+  spent two thirds of its time in the predictor's search walking q's
+  chain of 4 bytes: thousands of candidates in short runs of that byte,
+  none longer. The search now passes over them as the rank walk already
+  did: once bestLen is q's run, only a candidate whose run is as long as
+  q's can be longer, and the walk jumps to the one place in each run where
+  that holds (or past the run). The same candidates win and the budget is
+  still checked on the one it lands on: 12.1 -> 6.8 billion instructions,
+  1.9 -> 1.2 s.
+- **libdeflate's 1 GiB of zeros** (level 12): M10b's 160 s and 5 GB were
+  the analysis, not the rebuild, which takes 49 s (libdeflate's own 40 s)
+  and 2 GB. The analysis ran libdeflate three times; the stream the level
+  search makes is now read back instead of made again (155 -> 109 s), and
+  the bytes read back are compared and let go at once. Its peak was
+  miniz's trial: room for a token a byte (two arrays of Words, 4 GB), now
+  the ref's tokens and a block (a parse that keeps to the ref holds no
+  more), or n / 8 for a large stream without one, the parse run again
+  with twice the room if it fills it: 5.1 -> 2.1 GB, as zlib's.
+- Old and new library: the corpus's PDA, `hostile`, `png-nonzlib`,
+  `png-zlib`, `raw`, `zflow`, the golden and the fuzzing's slow streams
+  (1,255 analyses), 8 damaged copies of the smaller sets (9,162), and the
+  Pascal path (`PPA_NOC=1`, 747): 0 differ. The suite's hashes unchanged.
+
 ## Studied, not done yet (M7, 16/11/2026): zlib-ng
 
 zlib-ng 2.0.7, 2.1.8, 2.2.5 and 2.3.3 built with and without SIMD

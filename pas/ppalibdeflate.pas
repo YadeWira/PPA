@@ -116,14 +116,24 @@ begin
   Result := n > 0;
 end;
 
+{ libdeflate's stream raw of plain, read back: always deflate, the same
+  bytes; then e holds plain itself (nothing writes to a stream's bytes
+  after Decode), not the copy read, which is let go at once: a 1 GiB
+  stream's analysis held three }
+function LdfRead(const plain, raw: TBytes; out e: TZStream): Boolean;
+begin
+  e := Default(TZStream);
+  Result := Decode(raw, True, Length(plain), e).Ok and (Length(e.plain) = Length(plain)) and
+    ((Length(plain) = 0) or CompareMem(@e.plain[0], @plain[0], Length(plain)));
+  if Result then e.plain := plain;
+end;
+
 function LdfChoices(const plain: TBytes; const p: TLdfParams; out e: TZStream): Boolean;
 var raw: TBytes;
 begin
   e := Default(TZStream);
   if not LdfDeflate(plain, p, raw) then Exit(False);
-  { libdeflate's own stream, read back: always deflate, the same bytes }
-  Result := Decode(raw, True, Length(plain), e).Ok and (Length(e.plain) = Length(plain)) and
-    ((Length(plain) = 0) or CompareMem(@e.plain[0], @plain[0], Length(plain)));
+  Result := LdfRead(plain, raw, e);
 end;
 
 { z's deflate data in a: where it starts (after a zlib header) and how
@@ -161,7 +171,9 @@ begin
       the last block, the stream's endPad, which the recipe's framing
       keeps); the caller rebuilds the whole stream and compares it }
     if (len > 1) and not CompareMem(@raw[0], @a[first], len - 1) then Continue;
-    if LdfChoices(z.plain, p, choices) then Exit(True);
+    { the stream just made, read back (not made again: at level 12,
+      libdeflate's time on 1 GiB of zeros is 40 s) }
+    if LdfRead(z.plain, raw, choices) then Exit(True);
   end;
   p := Default(TLdfParams);
 end;

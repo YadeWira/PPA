@@ -37,6 +37,8 @@ typedef struct {
   const intptr_t *refFirst, *refCount, *refPos, *refLen; intptr_t refBlocks;
   const uint16_t *refTokLen, *refTokVal;
   intptr_t useRef;
+  /* the room for tokens; full: the parse stopped for want of it */
+  intptr_t maxTok, full;
 } mz_parse_t;
 
 typedef struct {
@@ -62,6 +64,7 @@ static void token(st_t *t, intptr_t len, intptr_t val) {
       }
     }
   }
+  if (s->nTok >= s->maxTok) { t->ok = 0; s->full = 1; return; }
   s->tokLen[s->nTok] = (uint16_t)len; s->tokVal[s->nTok] = (uint16_t)val;
   s->nTok++; t->blockTok++;
 }
@@ -306,7 +309,7 @@ intptr_t ppamz_parse(mz_parse_t *s) {
   t.src = 0; t.srcLeft = s->n;
   t.blockTok = 0;
   t.ok = 1;
-  s->nTok = 0; s->nBlocks = 0;
+  s->nTok = 0; s->nBlocks = 0; s->full = 0;
   if (!(s->fast ? fast(&t) : normal(&t))) return 0;
   if (t.ok && !flush(&t, 1)) return 0;
   return t.ok;

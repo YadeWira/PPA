@@ -113,6 +113,8 @@ static inline sz common(const uint8_t *a, const uint8_t *b, sz start, sz max) {
   return len;
 }
 
+static inline sz run_from(const uint8_t *pl, sz c, sz cap);
+
 sz pc_search(pcstate_t *s, sz q, sz prevLen, sz *dist) {
   const uint8_t *pl = s->plain;
   sz cur, limit, chainLen, bestLen, nice, look, len, maxLen;
@@ -153,12 +155,33 @@ sz pc_search(pcstate_t *s, sz q, sz prevLen, sz *dist) {
     {
       sz c4 = q < s->ins ? s->link4[q & PREV_MASK] : s->head4[hash4(s, q)];
       uint32_t key; __builtin_memcpy(&key, pl + q, 4);
+      /* q's run of one byte: when it is 4 bytes or more (and short of
+         maxLen), a candidate with the same 4 bytes is in a run of that
+         byte too, and its length is the shorter of the two runs unless
+         they are as long. Once bestLen is q's run, only a candidate whose
+         run is q's can be longer: the walk passes over the others (as
+         pc_rank does), each of which zlib's would have taken no longer.
+         The candidate it lands on is still checked against the budget,
+         which can only be past the one zlib's stopped at. */
+      sz rq = run_from(pl, q, maxLen);
       (void)start;
+      if (rq < 4 || rq >= maxLen) rq = 0;
       while (c4 >= cur) c4 = s->link4[c4 & PREV_MASK];
       while (c4 > limit) {
         uint32_t v; __builtin_memcpy(&v, pl + c4, 4);
         if (v == key) {
           if (startOrd - s->ord[c4 & PREV_MASK] >= budget) break;
+          if (rq && bestLen >= rq) {
+            sz rc = run_from(pl, c4, rq + 1), rs;
+            if (rc != rq) {
+              rs = s->runs[c4 & PREV_MASK];
+              /* shorter: the run's position whose run is q's, if the
+                 run reaches it; else (or longer) below the run */
+              if (rc < rq && c4 - (rq - rc) >= rs) c4 -= rq - rc;
+              else c4 = s->link4[rs & PREV_MASK];
+              continue;
+            }
+          }
           if (pl[c4 + bestLen] == pl[q + bestLen] && pl[c4 + bestLen - 1] == pl[q + bestLen - 1]) {
             len = common(pl + c4, pl + q, 4, maxLen);
             if (len > bestLen) {
