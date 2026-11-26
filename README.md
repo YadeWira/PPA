@@ -23,10 +23,8 @@ and the BLAKE3 hash stored in the `.ppa`.
 
 The formats freeze at 0.9.0; until then a release may write a newer
 format, but every `.ppa` and 7-Zip archive a published release wrote opens
-in every later one ([doc/STABILITY.md](doc/STABILITY.md)).
-
-PPA belongs to a family of recompressors that share that rule: the original
-comes back byte for byte, and nothing is written unless it verified.
+in every later one ([doc/STABILITY.md](doc/STABILITY.md)). PPA belongs to
+a family of recompressors that share its byte-for-byte rule:
 
 | Sibling | Formats | Successor of |
 |---|---|---|
@@ -43,13 +41,10 @@ comes back byte for byte, and nothing is written unless it verified.
 - **PNG**: every colour type and bit depth (1 to 16 bits, palette, alpha),
   Adam7, any line filters; its pixels coded by one of three models chosen
   image by image, and its deflate stream rebuilt bit for bit: zlib's from
-  zlib's own parameters (every level, strategy, window and memLevel, its
-  flushes too), since 0.3.0 miniz's from its flags and any other
-  encoder's (zopfli, advpng, 7-Zip) from a predictor and a few
-  corrections, since 0.4.0 libdeflate's and oxipng's from their level, and
-  since 0.5.0 zopfli's (zopflipng, advpng -z4, and since 0.6.0 oxipng
-  --zopfli's) from its iterations: for images of up to 64 KiB at the
-  default level, any at `-3`.
+  its parameters (flushes too), miniz's from its flags, libdeflate's and
+  oxipng's from their level, zopfli's (zopflipng, advpng -z4, oxipng
+  --zopfli) from its iterations (up to 64 KiB at the default level, any at
+  `-3`), and any other encoder's from a predictor and a few corrections.
 - **APNG**: every frame's stream, the same way.
 - **MNG**: the PNG and JNG images it embeds.
 - **JNG**: its JPEG through [PJA](https://github.com/YadeWira/PJA)'s codec.
@@ -68,15 +63,14 @@ Download the command for your platform from the [latest release][relLink]:
 Linux (x86-64, x86, arm64; glibc 2.34 or later: Debian 12, Ubuntu 22.04,
 RHEL 9 and newer), macOS (Apple silicon) or Windows (x64, and x86 from XP
 on). Each build is tested by CI on its own platform, and a `.ppa` made on
-one opens on any other ([installing][wInstall], [platforms][wPlat]).
+one opens on any other ([installing][wInstall], [platforms][wPlat],
+[the manual](doc/CLI.md)).
 
 ```sh
 ppa a *.png --output-dir=packed   # compress many
 ppa x packed/*.ppa -o restored/   # and back
 ppa list packed/*.ppa             # sizes and hashes
 ```
-
-The command's manual is [doc/CLI.md](doc/CLI.md).
 
 ## Against other compressors
 
@@ -108,13 +102,10 @@ the others 8 processes; the best of three runs):
 PPA is the smallest on every set, 18 to 27% smaller than packPNG, and
 compresses 2.7 times as fast as it; it is slower to decompress (1.4 times
 on one thread), as rebuilding the encoder's choices costs about as much as
-packPNG's whole decompression. One photo extracts in 0.26 s on 8 threads.
-Streams zlib did not write are rebuilt since 0.3.0 (generated 58.86% ->
-57.52%), oxipng's exactly since 0.4.0 (57.10%), zopfli's since 0.5.0 and
-0.6.0 (none here; the times are 0.5.0's: 0.6.0 gives its `.ppa`, but met a
-load of 10 to 25). Levels (8 at once): `-1` (`--fast`) 58.79%, 60.51%,
-58.46%, extracting in 6.0, 2.1, 4.0 s; `-2` as above; `-3` (`--max`)
-50.96%, 58.53%, 53.89%, in 52.3, 18.3, 13.1 s.
+packPNG's whole decompression. Levels (8 at once): `-1` (`--fast`) 58.79%,
+60.51%, 58.46%, extracting in 6.0, 2.1, 4.0 s; `-2` as above; `-3`
+(`--max`) 50.96%, 58.53%, 53.89%, in 52.3, 18.3, 13.1 s. Later releases
+give the same `.ppa` on these sets.
 
 ## Safe by design
 
@@ -135,23 +126,22 @@ files (15 to 266 KB, PNG, MNG, JNG and CgBI) with PJA's method, on
 | written promise that its files keep opening | **yes** ([STABILITY](doc/STABILITY.md)) | within 2.0x | no |
 
 Most of the others' wrong files are in files they keep as they are, where
-nothing but a hash could see a flip (6 of 3,600 flips elsewhere for
-packPNG, 69 of 3,800 for precomp); packPNG also aborted on 527 of the
-flips. PPA's hash did that work in 204 of its 4,000. It is design, not
-luck: a stored hash and size, a decode-and-compare before writing, a
-temporary that takes the output's name only when it is complete and on the
-disk (and is deleted on Ctrl-C), and a clean refusal of anything it does
-not understand. What it does not do: repair a damaged `.ppa` (keep
-backups, or use an archiver with recovery records) or authenticate it (the
-hash catches accidents, not tampering).
+only a hash could see a flip; PPA's did that work in 204 of its 4,000. It
+is design, not luck: a stored hash and size, a decode-and-compare before
+writing, a temporary that takes the output's name only when it is complete
+and on the disk (and is deleted on Ctrl-C), and a clean refusal of
+anything it does not understand. What it does not do: repair a damaged
+`.ppa` (keep backups, or use an archiver with recovery records) or
+authenticate it (the hash catches accidents, not tampering).
 
 ## Against archivers
 
 One archive per set, 8 threads, every file extracted and compared; size,
 then the best of three times to write / extract (7-Zip + PPA on
-16/11/2026, the rest on 13/11/2026). 7-Zip 25.01 with PPA 0.5.0's plugin, `-m0=PPA -m1=LZMA2`; zpaq-std 2.9.0 `-m5`, with
-`-sa` (PPA 0.2.0's `ppa1`) and without; [Aqueous](https://github.com/lifthrasiir/aqueous)
-0.0.20261101 at its default level and 7-Zip alone (`-mx=9`) for reference.
+16/11/2026, the rest on 13/11/2026). 7-Zip 25.01 with PPA 0.5.0's plugin,
+`-m0=PPA -m1=LZMA2`; zpaq-std 2.9.0 `-m5`, with `-sa` (`ppa1`) and without;
+[Aqueous](https://github.com/lifthrasiir/aqueous) 0.0.20261101 at its
+default level and 7-Zip alone (`-mx=9`) for reference.
 
 | set | 7-Zip + PPA | zpaq-std -sa -m5 | zpaq-std -m5 | Aqueous | 7-Zip |
 |---|---|---|---|---|---|
@@ -165,8 +155,8 @@ set five images written many ways): in one solid block LZMA2 finds the
 repeats PPA alone cannot. zpaq-std's `-sa` takes 30 points off the photos
 and makes `-m5` ten times faster on them, but leaves the corpus as it was
 (`ppa1`'s 7 MiB cap leaves its large files out). Aqueous is much faster
-and takes PNG too, but leaves 1.3 to 2.2 times as much as 7-Zip + PPA. Why
-each number is what it is: [the benchmarks page][wComp].
+and takes PNG too, but leaves 1.3 to 2.2 times as much as 7-Zip + PPA
+([details][wComp]).
 
 ## In 7-Zip and zpaq-std
 
@@ -181,18 +171,18 @@ x86 for 32-bit) in the `Codecs` folder next to 7-Zip, and
 (in 7-Zip's window: **Parameters** `0=PPA 1=LZMA2`). PPA goes first in the
 chain as a filter: it recompresses the PNG, MNG and JNG files of the solid
 block and passes every other byte on. Extracting needs the plugin too
-(7-Zip 23 or later on Linux and macOS; [details][wLib]). The
-same library is a C API (`ppa.h`) for any program; since 0.7.0 also for
-loose deflate streams (a PDF's, a ZIP's): their bytes and a recipe, and
-back bit for bit (`ppa_deflate_*`).
+(7-Zip 23 or later on Linux and macOS; [details][wLib]). The same library
+is a C API (`ppa.h`) for any program, also for loose deflate streams (a
+PDF's, a ZIP's): their bytes and a recipe, and back bit for bit
+(`ppa_deflate_*`).
 
-**[zpaq-std](https://github.com/YadeWira/zpaq-std)**: PPA's plugin (since
-0.2.0) has the codec `ppa1`: PNG, APNG and MNG whose images take PPA's
-static model (8-bit gray, gray and alpha, RGB, RGBA), up to 7 MiB of image
-a file. Each block carries a ZPAQL decoder (19 KB), so any zpaq extracts
-it, even without the plugin. With `-m5`, 20 photos come to 66.17% of their
-size against 96.31% without it ([details][wPlugin]). zpaq-std ships it
-since 2.9.0, in its extra-codecs zip, as an experimental codec:
+**[zpaq-std](https://github.com/YadeWira/zpaq-std)**: PPA's plugin has the
+codec `ppa1`: PNG, APNG and MNG whose images take PPA's static model
+(8-bit gray, gray and alpha, RGB, RGBA), up to 7 MiB of image a file. Each
+block carries a ZPAQL decoder (19 KB), so any zpaq extracts it, even
+without the plugin. With `-m5`, 20 photos come to 66.17% of their size
+against 96.31% without it ([details][wPlugin]). zpaq-std ships it since
+2.9.0, in its extra-codecs zip, as an experimental codec:
 
 ```sh
 zpaq-std a images.zpaq images/ -sa -m5     # -sa:ppa for ppa1 alone; -rcmd for what it refuses
@@ -215,7 +205,7 @@ exit status 3; `ppa selftest` checks a build on the samples inside it.
 ## More
 
 The [wiki][wiki] has the rest: [benchmarks][wComp], [the library and
-7-Zip plugin][wLib], the [zpaq-std plugin][wPlugin] to come, [building and
+7-Zip plugin][wLib], the [zpaq-std plugin][wPlugin], [building and
 testing][wBuild], [how it works][wHow], the [source layout][wLayout],
 [FreePascal pitfalls][wFpc] and the [release history][wRel]. The codec's
 full notes are in [doc/CODEC.md](doc/CODEC.md), the file format in
